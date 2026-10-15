@@ -39,11 +39,14 @@ export interface ValInputs {
 export interface ScenarioValue {
   fcff: number[]; pv: number[] | null; pv_sum: number | null; tv: number | null; pv_tv: number | null
   ev: number | null; equity: number | null; per_share: number | null; upside: number | null; tv_share: number | null
+  grid: (number | null)[][] // value per share: WACC + steps.wacc (rows) x g + steps.g (columns)
+  grid_gm: (number | null)[][] // revenue growth + steps.growth (rows) x EBITDA margin + steps.margin, every year
 }
 export interface Valuation {
   price: number | null; shares: number | null; ke: number; kd: number; tax: number; kd_after_tax: number
   e: number; d: number; we: number; wacc: number; g: number; error: string | null
   borrowings: number; cash: number; investments: number; scenarios: Record<Scenario, ScenarioValue>
+  steps: { wacc: number[]; g: number[]; growth: number[]; margin: number[] }
 }
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
 export interface ModelDoc {

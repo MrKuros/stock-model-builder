@@ -444,6 +444,9 @@ VALUATION = {"rf": 0.065, "erp": 0.07, "beta": 1.0, "kd": None, "g": 0.05, "mid_
 MIN_SPREAD = 0.005  # WACC must beat terminal growth by 0.5 pp, or the Gordon value explodes
 GRID_WACC = (-0.02, -0.01, 0.0, 0.01, 0.02)  # sensitivity grid steps around WACC (rows) and growth (columns)
 GRID_G = (-0.01, -0.005, 0.0, 0.005, 0.01)
+# second grid: shifts added to every projected year of revenue growth (rows) and EBITDA margin (columns)
+GRID_GROWTH = (-0.04, -0.02, 0.0, 0.02, 0.04)
+GRID_MARGIN = (-0.02, -0.01, 0.0, 0.01, 0.02)
 
 
 def _dcf(fcff, period, w, g):
@@ -457,10 +460,11 @@ def _dcf(fcff, period, w, g):
     return {"df": df, "pv": pv, "pv_sum": sum(pv), "tv": tv, "pv_tv": tv * df[-1], "ev": sum(pv) + tv * df[-1]}
 
 
-def valuation(projs, hist, val, base, market):
+def valuation(projs, hist, val, base, market, inputs=None):
     """DCF (free cash flow to firm) of each scenario, discounted from the last reported year end.
     projs: {scenario: project() rows}; val: VALUATION-shaped inputs; base: the base scenario's per-year inputs
     (expand()), for the default cost of debt and the WACC tax rate; market: the company's market data.
+    inputs: {scenario: expand()} adds "grid_gm" per scenario (re-runs project() 25 times each).
     Mirrors the Valuation sheet in to_excel()."""
     v, last = {**VALUATION, **(val or {})}, hist[-1]
     market = market or {}
@@ -494,10 +498,21 @@ def valuation(projs, hist, val, base, market):
                   "tv_share": x["pv_tv"] / x["ev"] if x["ev"] and x["ev"] > 0 else None,
                   "grid": [[per_share((_dcf(fcff, period, wacc + dw, g + dg) or {}).get("ev")) for dg in GRID_G]
                            for dw in GRID_WACC]}
+        if inputs:
+            out[s]["grid_gm"] = [[_shifted(hist, inputs[s], dgr, dm, period, wacc, g, per_share) for dm in GRID_MARGIN]
+                                 for dgr in GRID_GROWTH]
     return {"inputs": v, "price": price, "shares": shares, "ke": ke, "kd": kd, "tax": tax, "kd_after_tax": kd_at,
             "e": e, "d": d, "we": we, "wacc": wacc, "g": g, "period": period, "error": error,
             "borrowings": last["borrowings"], "cash": last["cash"], "investments": last["investments"],
-            "scenarios": out}
+            "steps": {"wacc": GRID_WACC, "g": GRID_G, "growth": GRID_GROWTH, "margin": GRID_MARGIN}, "scenarios": out}
+
+
+def _shifted(hist, a, dgr, dm, period, wacc, g, per_share):
+    """Value per share with growth and EBITDA margin moved by dgr / dm in every projected year."""
+    a = {**a, "growth": [x + dgr for x in a["growth"]], "ebitda_margin": [x + dm for x in a["ebitda_margin"]]}
+    fcff = [r["fcff"] for r in project(hist, a, len(period))]
+    v = per_share((_dcf(fcff, period, wacc, g) or {}).get("ev"))
+    return v if v is not None and math.isfinite(v) else None
 
 
 def projected_dates(co, n):
@@ -634,9 +649,9 @@ def _scenario_sheet(wb, scenarios, n, years, formats, head_fill):
     return lambda s, key, j: f"Scenarios!{get_column_letter(2 + j)}{rows[s, key]}"
 
 
-def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill):
+def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm):
     """'Valuation' sheet: the DCF of whichever scenario Model!B3 picks. Mirrors valuation().
-    at(key, j) -> Model sheet ref for column j (0 = first reported year)."""
+    at(key, j) -> Model sheet ref for column j (0 = first reported year); gm: {scenario: grid_gm} values."""
     v, m, nh = {**VALUATION, **(val or {})}, co.get("market") or {}, len(co["hist"])
     price = _pos(v["price"] if v["price"] is not None else m.get("price"))
     shares = _pos(v["shares"] if v["shares"] is not None else m.get("shares"))
@@ -747,6 +762,22 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill):
                 f'=IF(AND({w}>0,{w}-{g}>={MIN_SPREAD}),IFERROR((SUMPRODUCT({span("fcff")},1/(1+{w})^{span("period")})'
                 f'+{lastf}*(1+{g})/({w}-{g})/(1+{w})^{lastp}-{ref["borrowings"]}+{ref["cash"]}+{ref["investments"]})'
                 f'/{ref["shares"]},""),"")')).number_format = rs
+
+    # ponytail: growth x margin needs a re-run of the whole projection per cell, so it ships as values
+    # (one set per scenario, picked by the selector); editing inputs in Excel doesn't move it
+    head("VALUE PER SHARE (Rs): REVENUE GROWTH SHIFT (rows) x EBITDA MARGIN SHIFT (columns)")
+    vs.cell(r + 1, 1, "Values at export (re-run in the app). Shifts apply to every projected year.").font = Font(
+        italic=True, color="808080")
+    r += 1
+    top = r
+    for i, dm in enumerate(GRID_MARGIN):
+        vs.cell(top, 2 + i, f"{dm * 100:+g} pp").font = Font(bold=True)
+    for k, dgr in enumerate(GRID_GROWTH):
+        r += 1
+        vs.cell(r, 1, f"{dgr * 100:+g} pp").font = Font(bold=True)
+        for i in range(len(GRID_MARGIN)):
+            x = ['""' if gm[s][k][i] is None else repr(gm[s][k][i]) for s in SCENARIOS]
+            vs.cell(r, 2 + i, f"=CHOOSE(Model!$B$3,{','.join(x)})").number_format = rs
     vs.column_dimensions["A"].width = 50
     for j in range(max(n, len(GRID_G))):
         vs.column_dimensions[get_column_letter(2 + j)].width = 12
@@ -825,8 +856,11 @@ def to_excel(co, scenarios, n=5, active="base", val=None):
     for j in range(len(headers)):
         ws.column_dimensions[get_column_letter(2 + j)].width = 11
     ws.freeze_panes = ws.cell(top + 1, 2)
+    ex = {s: expand(scenarios[s], n) for s in SCENARIOS}
+    v = valuation({s: project(co["hist"], ex[s], n) for s in SCENARIOS}, co["hist"], val, ex["base"],
+                  co.get("market"), inputs=ex)
     _valuation_sheet(wb, co, n, val, src, lambda k, j: f"{get_column_letter(2 + j)}{rows[k]}", headers[nh:],
-                     formats, head_fill)
+                     formats, head_fill, {s: x["grid_gm"] for s, x in v["scenarios"].items()})
     cash_proj = f"{get_column_letter(2 + nh)}{rows['cash']}:{get_column_letter(1 + len(headers))}{rows['cash']}"
     ws.conditional_formatting.add(cash_proj, CellIsRule(operator="lessThan", formula=["0"],
                                                         font=Font(color="C00000", bold=True),

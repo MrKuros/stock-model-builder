@@ -134,6 +134,7 @@ export default function ValuationPanel({ inputs, defaults, v, market, active, as
             </tbody>
           </table>
         </div>
+        {v.shares != null && v.steps && <Sensitivity v={v} active={active} />/* steps: a server not yet restarted has none */}
         <p className="muted small">
           Equity value = enterprise value − borrowings Rs {money(v.borrowings)} cr + cash Rs {money(v.cash)} cr +
           investments Rs {money(v.investments)} cr ({asOf}). Terminal value: Gordon growth at {fmt(v.g, 'pct')} on the
@@ -222,6 +223,68 @@ function Ruler({ v, active }: { v: Valuation; active: Scenario }) {
           )
         })}
       </svg>
+    </div>
+  )
+}
+
+const pp = (d: number) => (d === 0 ? 'as set' : `${d > 0 ? '+' : '−'}${Math.abs(d * 100)} pp`)
+
+/** The two 5 x 5 grids for the active scenario: valuation inputs, then operating assumptions. */
+function Sensitivity({ v, active }: { v: Valuation; active: Scenario }) {
+  const x = v.scenarios[active], st = v.steps
+  return (
+    <div className="sens">
+      <h3>Sensitivity · {NAMES[active]} scenario</h3>
+      <p className="muted small">
+        Value per share in Rs.{' '}
+        {v.price != null
+          ? <>Blue cells are above today’s price of Rs {rs(v.price)}, amber below; the deeper the shade, the further away.</>
+          : <>No share price, so the cells aren’t shaded.</>}{' '}
+        The outlined cell is the current model. Growth and margin shifts apply to every projected year.
+      </p>
+      <div className="sens-grids">
+        <Grid id="sens-wacc" title="WACC (rows) × terminal growth (columns)" corner="WACC / growth" grid={x.grid}
+          rows={st.wacc.map(d => fmt(v.wacc + d, 'pct'))} cols={st.g.map(d => fmt(v.g + d, 'pct'))} price={v.price} />
+        <Grid id="sens-gm" title="Revenue growth (rows) × EBITDA margin (columns)"
+          corner="Growth / margin" grid={x.grid_gm} rows={st.growth.map(pp)} cols={st.margin.map(pp)} price={v.price} />
+      </div>
+    </div>
+  )
+}
+
+function Grid({ id, title, corner, grid, rows, cols, price }: {
+  id: string; title: string; corner: string; grid: (number | null)[][]; rows: string[]; cols: string[]; price: number | null
+}) {
+  const mid = Math.floor(rows.length / 2)
+  return (
+    <div className="table-wrap sens-wrap" tabIndex={0} role="region" aria-labelledby={id}>
+      <table className="sens-table">
+        <caption id={id}>{title}</caption>
+        <thead>
+          <tr><th scope="col">{corner}</th>{cols.map(c => <th scope="col" key={c}>{c}</th>)}</tr>
+        </thead>
+        <tbody>
+          {grid.map((row, k) => (
+            <tr key={rows[k]}>
+              <th scope="row">{rows[k]}</th>
+              {row.map((val, i) => {
+                const cur = k === mid && i === mid
+                // ponytail: shade depth is linear in the gap to price, capped at ±50%
+                const gap = val != null && price ? val / price - 1 : null
+                const style = gap == null ? undefined : {
+                  background: `color-mix(in srgb, var(${gap >= 0 ? '--pencil' : '--amber'}) ${Math.round(8 + Math.min(1, Math.abs(gap) / 0.5) * 30)}%, transparent)`,
+                }
+                return (
+                  <td key={i} className={cur ? 'is-current' : undefined} style={style}>
+                    {val == null ? '–' : rs(val)}
+                    {cur && <span className="visually-hidden"> (current model)</span>}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

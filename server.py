@@ -122,7 +122,8 @@ class ModelRequest(BaseModel):
         return co, sc, n, out
 
     def dcf(self, co, sc, n, out):
-        return model.valuation(out, co["hist"], self.valuation.model_dump(), model.expand(sc["base"], n), co["market"])
+        ex = {s: model.expand(sc[s], n) for s in model.SCENARIOS}
+        return model.valuation(out, co["hist"], self.valuation.model_dump(), ex["base"], co["market"], inputs=ex)
 
 
 class ModelDoc(ModelRequest):
