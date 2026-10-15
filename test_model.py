@@ -219,6 +219,7 @@ def main():
     assert projs["base"] == proj
     assert projs["bull"][-1]["revenue"] > proj[-1]["revenue"] > projs["bear"][-1]["revenue"]
 
+    valuation_check(co, projs, ex)
     library_check(tmp / "models", co, seeded)
 
     if not shutil.which("soffice"):
@@ -232,6 +233,7 @@ def main():
         assert ws["B3"].value == i + 1 and ws["C3"].value == s.title(), (ws["B3"].value, ws["C3"].value)
         for j, c in enumerate(projs[s]):  # incl. the per-year driver cells picked by CHOOSE
             _same(ws, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ex[s].items()}}, (s, j))
+        _same_valuation(ws.parent["Valuation"], model.valuation(projs, co["hist"], None, ex["base"], co["market"]), s)
     for j, h in enumerate(co["hist"]):  # historical ratio formulas, incl. first year on closing balances
         _same(ws, rows, 2 + j, {k: h[k] for k in ("ebitda", *RETURNS)}, ("hist", j))
     # zero interest and negative EBITDA must come out blank in both
@@ -239,10 +241,17 @@ def main():
     proj0 = model.project(co["hist"], zero, n=2)
     assert all(c["int_cover"] is None and c["nd_ebitda"] is None for c in proj0), proj0
     (tmp / "zero").mkdir()
-    (tmp / "zero" / "model.xlsx").write_bytes(model.to_excel(co, dict.fromkeys(model.SCENARIOS, zero), n=2))
+    # ... with no market data (book equity weights, no per-share value), typed cost of debt, year-end discounting
+    bare = dict(co, market=None)
+    v0 = {"kd": 0.09, "mid_year": False, "rf": 0.07, "beta": 1.3, "g": 0.03}
+    (tmp / "zero" / "model.xlsx").write_bytes(model.to_excel(bare, dict.fromkeys(model.SCENARIOS, zero), n=2, val=v0))
     ws0 = recalc(tmp / "zero" / "model.xlsx", tmp / "calc0")
     for j, c in enumerate(proj0):
         _same(ws0, rows, 2 + len(co["hist"]) + j, c, ("zero", j))
+    flat0 = model.expand({k: {"start": v, "end": None} for k, v in zero.items()}, 2)
+    val0 = model.valuation(dict.fromkeys(model.SCENARIOS, proj0), co["hist"], v0, flat0, None)
+    assert val0["shares"] is None and val0["scenarios"]["base"]["per_share"] is None and val0["kd"] == 0.09, val0
+    _same_valuation(ws0.parent["Valuation"], val0, "base")
     # debt faded to zero over 10 years: float residue (1e-14 cr) must read as no interest cover, in both
     payoff = {k: {"start": v, "end": None} for k, v in model.default_assumptions(co["hist"]).items()}
     payoff["debt_change"] = {"start": 0.0, "end": -50.0}
@@ -250,11 +259,54 @@ def main():
     proj10 = model.project(co["hist"], ep, n=10)
     assert proj10[-1]["int_cover"] is None, proj10[-1]["int_cover"]
     (tmp / "payoff").mkdir()
-    (tmp / "payoff" / "model.xlsx").write_bytes(model.to_excel(co, dict.fromkeys(model.SCENARIOS, payoff), n=10))
+    # ... with a WACC override too close to terminal growth: an error and blank values in both; typed price/shares
+    v10 = {"wacc_override": 0.1, "g": 0.098, "price": 2000.0, "shares": 4.0}
+    (tmp / "payoff" / "model.xlsx").write_bytes(
+        model.to_excel(co, dict.fromkeys(model.SCENARIOS, payoff), n=10, val=v10))
     ws10 = recalc(tmp / "payoff" / "model.xlsx", tmp / "calc10")
     for j, c in enumerate(proj10):
         _same(ws10, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ep.items()}}, ("payoff", j))
+    val10 = model.valuation(dict.fromkeys(model.SCENARIOS, proj10), co["hist"], v10, ep, co["market"])
+    assert "0.5 pp" in val10["error"] and val10["scenarios"]["base"]["ev"] is None and val10["e"] == 8000, val10
+    _same_valuation(ws10.parent["Valuation"], val10, "base")
+    vs10 = ws10.parent["Valuation"]
+    msg = vs10.cell(next(c.row for c in vs10["A"] if c.value == "WACC") + 1, 2).value  # the line under WACC
+    assert msg.startswith("WACC must"), msg
     print("OK: parse, checks, projection, Excel formulas match Python")
+
+
+def valuation_check(co, projs, ex):
+    """DCF arithmetic, written out by hand for the synthetic company (price 1600, 5 cr shares, 200 cr debt)."""
+    v = model.valuation(projs, co["hist"], None, ex["base"], co["market"])
+    last, tax = co["hist"][-1], ex["base"]["tax_rate"][0]
+    we = 8000 / 8200
+    wacc = we * (0.065 + 1.0 * 0.07) + (1 - we) * ex["base"]["int_rate"][0] * (1 - tax)
+    assert abs(v["wacc"] - wacc) < 1e-15 and v["error"] is None and v["period"] == [0.5, 1.5, 2.5, 3.5, 4.5], v
+    for s, rows in projs.items():
+        f = [r["fcff"] for r in rows]
+        for r, p in zip(rows, [last, *rows]):  # FCFF = NOPAT + dep - capex - change in NWC
+            nwc = lambda x: x["receivables"] + x["inventory"] + x["other_ca"] - x["other_liab"]  # noqa: E731
+            assert abs(r["fcff"] - ((r["ebitda"] - r["dep"]) * (1 - tax) + r["dep"] - r["capex"] - nwc(r) + nwc(p))
+                       ) < 1e-9, (s, r["fcff"])  # tax is flat and equal in every scenario here
+        pv = sum(x / (1 + wacc) ** (t + 0.5) for t, x in enumerate(f))
+        tv = f[-1] * 1.05 / (wacc - 0.05) / (1 + wacc) ** 4.5
+        eq = pv + tv - last["borrowings"] + last["cash"] + last["investments"]
+        got = v["scenarios"][s]
+        assert abs(got["ev"] - (pv + tv)) < 1e-9 and abs(got["per_share"] - eq / 5) < 1e-9, (s, got["ev"], pv + tv)
+        assert abs(got["upside"] - (eq / 5 / 1600 - 1)) < 1e-12 and got["grid"][2][2] == got["per_share"], s
+        assert got["grid"][0][4] > got["grid"][2][2] > got["grid"][4][0], "lower WACC / higher growth = higher value"
+    assert v["scenarios"]["bull"]["per_share"] > v["scenarios"]["base"]["per_share"] > v["scenarios"]["bear"]["per_share"]
+    # year-end discounting is worth less than mid-year; typed price/shares win over market data
+    ye = model.valuation(projs, co["hist"], {"mid_year": False, "price": 800.0, "shares": 10.0}, ex["base"], co["market"])
+    assert ye["scenarios"]["base"]["ev"] < v["scenarios"]["base"]["ev"] and ye["e"] == 8000 and ye["price"] == 800, ye
+    assert abs(ye["scenarios"]["base"]["ev"] * (1 + wacc) ** 0.5 - v["scenarios"]["base"]["ev"]) < 1e-6
+    # WACC must clear growth by 0.5 pp; the grid blanks the cells that don't
+    bad = model.valuation(projs, co["hist"], {"wacc_override": 0.054, "g": 0.05}, ex["base"], co["market"])
+    assert bad["error"] and bad["scenarios"]["base"]["per_share"] is None, bad["error"]
+    mid = bad["scenarios"]["base"]["grid"][2]  # WACC 5.4% against growth 4, 4.5, 5, 5.5, 6%
+    assert None not in mid[:2] and mid[2:] == [None] * 3, mid
+    assert "above zero" in model.valuation(projs, co["hist"], {"wacc_override": -0.01, "g": -0.1}, ex["base"],
+                                           None)["error"]
 
 
 def library_check(root, co, scenarios):
@@ -273,10 +325,20 @@ def library_check(root, co, scenarios):
     company = {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
                "market": co["market"]}
     old = server.ModelDoc.model_validate({"version": 3, "company": {k: company[k] for k in ("name", "dates", "hist")},
-                                          "scenarios": scenarios})  # saved before market data existed
+                                          "scenarios": scenarios})  # saved before market data and valuation existed
     assert old.company.market.price is None and old.company.market.price_hist == [], old.company.market
-    data = {"version": 3, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
-            "excluded_years": ["FY2020"], "saved_at": None}
+    assert old.version == 4 and old.valuation.model_dump() == model.VALUATION, old
+    # a version-3 file on disk opens as version 4 with default valuation inputs, and lists
+    (root / "old-co").mkdir(parents=True)
+    (root / "old-co" / "2026-10-14.json").write_text(json.dumps(
+        {"version": 3, "company": company, "n": 5, "active": "base", "scenarios": scenarios, "excluded_years": [],
+         "saved_at": "2026-10-14T10:00:00"}))
+    assert server.load_model("old-co/2026-10-14", root).model_dump(mode="json")["valuation"] == model.VALUATION
+    assert [m["id"] for m in server.list_models(root)] == ["old-co/2026-10-14"]
+    server.delete_model("old-co/2026-10-14", root)
+    val = dict(model.VALUATION, beta=1.2, kd=0.085, mid_year=False, wacc_override=0.12, price=99.5, shares=3.25)
+    data = {"version": 4, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
+            "excluded_years": ["FY2020"], "saved_at": None, "valuation": val}
     doc = server.ModelDoc.model_validate(data)
     mid, at = server.save_model(doc, root, now=datetime(2026, 10, 15, 12, 41, 5))
     assert (mid, at) == ("test-industries-ltd/2026-10-15", "2026-10-15T12:41:05"), (mid, at)
@@ -306,7 +368,8 @@ def library_check(root, co, scenarios):
     assert server.slug("Tata Motors Ltd.") == "tata-motors-ltd" and server.slug("दूध").startswith("company-")
     assert server.slug("../..").startswith("company-")
     # malformed documents are refused
-    for bad in ({**data, "version": 2}, {**data, "active": "worst"},
+    for bad in ({**data, "version": 2}, {**data, "version": 5}, {**data, "active": "worst"},
+                {**data, "valuation": dict(val, shares=0)}, {**data, "valuation": dict(val, g=float("nan"))},
                 {**data, "scenarios": {k: v for k, v in scenarios.items() if k != "bull"}}):
         try:
             server.save_model(server.ModelDoc.model_validate(bad), root)
@@ -350,6 +413,37 @@ def library_check(root, co, scenarios):
 
 
 RETURNS = ("roe", "roce", "asset_turnover", "nd_ebitda", "int_cover")
+VAL_CELLS = {"Cost of debt, pre-tax": "kd", "Tax rate": "tax", "Share price (Rs)": "price", "Shares (crore)": "shares",
+             "Cost of equity = risk-free + beta x premium": "ke", "Cost of debt after tax": "kd_after_tax",
+             "Equity (market cap; book equity if no price)": "e", "Debt (borrowings)": "d", "Equity weight": "we",
+             "WACC": "wacc", "Less borrowings": "borrowings", "Plus cash & bank": "cash",
+             "Plus investments": "investments"}
+VAL_SCEN = {"PV of explicit years": "pv_sum", "Terminal value (Gordon growth on final-year FCFF)": "tv",
+            "PV of terminal value": "pv_tv", "Enterprise value": "ev", "Equity value": "equity",
+            "Value per share (Rs)": "per_share", "Upside vs share price": "upside",
+            "Terminal value share of EV": "tv_share"}
+VAL_YEARS = {"Free cash flow to firm": "fcff", "Discount factor": "df", "Present value": "pv"}
+
+
+def _same_valuation(vs, v, s):
+    """Every number on the recalculated Valuation sheet equals valuation() for scenario s (None = blank)."""
+    at = {c.value: c.row for c in vs["A"] if isinstance(c.value, str)}
+    sv, n = v["scenarios"][s], len(v["period"])
+    cells = [(at[label], 2, v[k]) for label, k in VAL_CELLS.items()]
+    cells += [(at[label], 2, sv[k]) for label, k in VAL_SCEN.items()]
+    cells += [(at["Discount period (years)"], 2 + j, p) for j, p in enumerate(v["period"])]
+    cells += [(at[label], 2 + j, None if sv[k] is None else sv[k][j]) for label, k in VAL_YEARS.items() for j in range(n)]
+    top = next(r for label, r in at.items() if label.startswith("VALUE PER SHARE"))
+    cells += [(top, 2 + i, v["g"] + dg) for i, dg in enumerate(model.GRID_G)]
+    cells += [(top + 1 + k, 1, v["wacc"] + dw) for k, dw in enumerate(model.GRID_WACC)]
+    cells += [(top + 1 + k, 2 + i, x) for k, row in enumerate(sv["grid"]) for i, x in enumerate(row)]
+    for r, c, want in cells:
+        got = vs.cell(r, c).value
+        if want is None:
+            assert got in (None, ""), (s, vs.cell(r, 1).value, c, got)
+        else:
+            assert isinstance(got, (int, float)) and abs(got - want) < 1e-6 * max(1, abs(want)), (
+                s, vs.cell(r, 1).value, c, got, want)
 
 
 def _same(ws, rows, col, values, where):

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { fmt, groupKeys, type LayoutLine, type LineKind, type Row } from './lib'
 
-const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf', 'fcf'])
+const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf', 'fcf', 'fcff'])
 const TABS = [['PROFIT & LOSS', 'Profit & loss'], ['BALANCE SHEET', 'Balance sheet'], ['CASH FLOW', 'Cash flow'],
   ['RATIOS', 'Ratios']] as const
 

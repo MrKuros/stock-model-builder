@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Chart from './Chart'
 import DriverStrip from './DriverStrip'
 import Statements from './Statements'
+import ValuationPanel from './Valuation'
 import {
   api, dec2, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS, when, clock,
   type ModelDoc, type ModelSummary, type OneOff, type Market, type Opened, type Parsed, type Paths, type Projection, type Row,
@@ -54,8 +55,8 @@ function remember(id: string | null) {
 }
 
 const newDoc = (p: Parsed): ModelDoc => ({
-  version: 3, company: p.company, n: 5, active: 'base', scenarios: seed(flatAll(p.defaults)),
-  excluded_years: [], saved_at: null,
+  version: 4, company: p.company, n: 5, active: 'base', scenarios: seed(flatAll(p.defaults)),
+  excluded_years: [], saved_at: null, valuation: p.valuation,
 })
 
 export interface SaveState { at: string | null; error: string | null }
@@ -251,7 +252,7 @@ interface WorkspaceProps {
 
 function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }: WorkspaceProps) {
   const { company, years: histYears, ratios, defaults, checks, drivers, layout } = parsed
-  const { n, active, scenarios } = doc
+  const { n, active, scenarios, valuation } = doc
   const a = scenarios[active]
   const setN = (n: number) => setDoc(d => ({ ...d, n }))
   const setActive = (active: Scenario) => setDoc(d => ({ ...d, active }))
@@ -277,11 +278,11 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
 
   useEffect(() => {
     const ctl = new AbortController()
-    api<Projection>('/api/project', postJson({ company, scenarios, n }, ctl.signal))
+    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation }, ctl.signal))
       .then(p => { setProjection(p); setError(null) })
       .catch(e => { if (e.name !== 'AbortError') { setProjection(null); setError(e.message) } })
     return () => ctl.abort()
-  }, [company, scenarios, n])
+  }, [company, scenarios, n, valuation])
 
   const proj = projection?.scenarios[active].length === n ? projection.scenarios[active] : null // null while a new horizon loads
   const projYears = proj ? projection!.years : []
@@ -291,7 +292,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
   const exportXlsx = async () => {
     setExporting(true)
     try {
-      const res = await fetch('/api/export', postJson({ company, scenarios, active, n }))
+      const res = await fetch('/api/export', postJson({ company, scenarios, active, n, valuation }))
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? 'Export failed. Try again.')
       const url = URL.createObjectURL(await res.blob())
       const link = Object.assign(document.createElement('a'), { href: url, download: `${company.name} model.xlsx` })
@@ -455,6 +456,9 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
             <Chart title={m[1]} years={years} values={rows.map(m[2])} nHist={nHist} others={others} />
           </div>
         </section>
+        <ValuationPanel inputs={valuation} defaults={parsed.valuation} v={proj ? projection!.valuation : null}
+          market={company.market} active={active} asOf={histYears[nHist - 1]}
+          onChange={f => setDoc(d => ({ ...d, valuation: f(d.valuation) }))} />
       </main>
       <div className="tables">
         <Statements layout={layout} years={years} rows={rows} nHist={nHist} />
