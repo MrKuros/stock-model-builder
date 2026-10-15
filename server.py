@@ -1,20 +1,27 @@
 """Run: uv run uvicorn server:app  (serves the API and the built web/dist front end)."""
+import hashlib
 import io
+import json
 import math
+import os
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, FiniteFloat
+from pydantic import BaseModel, FiniteFloat, ValidationError
 
 import model
 
 MAX_UPLOAD = 5 * 1024 * 1024  # Screener exports are ~50 KB
+MAX_SAVE = 512 * 1024  # a saved model document is ~10-20 KB
+MODELS = Path(__file__).parent / "models"  # the local library, gitignored
+MODEL_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*/\d{4}-\d{2}-\d{2}")  # <company-slug>/<YYYY-MM-DD>
 app = FastAPI()
 
 
@@ -68,13 +75,20 @@ class ModelRequest(BaseModel):
         return co, sc, n, out
 
 
-def _company_payload(co):
+class ModelDoc(ModelRequest):
+    """The full model document as saved in the library."""
+    version: Literal[3]
+    excluded_years: list[str] = []
+    saved_at: str | None = None
+
+
+def _company_payload(co, excluded=()):
     labels = [model.fy(d) for d in co["dates"]]
     return {
         "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"]},
         "years": labels,
         "ratios": model.ratios(co["hist"]),
-        "defaults": model.default_assumptions(co["hist"]),
+        "defaults": model.default_assumptions(co["hist"], exclude=set(excluded), labels=labels),
         "checks": model.data_checks(co),
         "oneoffs": model.detect_oneoffs(co["hist"], labels),
         "drivers": model.DRIVERS,
@@ -137,6 +151,119 @@ def export(req: ModelRequest):
     return Response(model.to_excel(co, sc, n, req.active),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{safe} model.xlsx"'})
+
+
+# ---------- local model library: models/<company-slug>/<YYYY-MM-DD>.json, one file per company per day ----------
+
+def slug(name):
+    s = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:60].strip("-")
+    return s or "company-" + hashlib.sha1(name.encode()).hexdigest()[:8]  # non-Latin names
+
+
+def model_file(model_id, root=MODELS):
+    """The file for an id, only ever inside root. Anything else is rejected, never resolved."""
+    if not isinstance(model_id, str) or not MODEL_ID.fullmatch(model_id):
+        raise HTTPException(422, "That isn't a valid model id.")
+    p = (root / f"{model_id}.json").resolve()
+    if not p.is_relative_to(root.resolve()):  # e.g. a symlinked folder pointing elsewhere
+        raise HTTPException(422, "That isn't a valid model id.")
+    return p
+
+
+def save_model(doc: ModelDoc, root=MODELS, now=None):
+    """Write today's version for this company (replacing any earlier one from today). Returns (id, saved_at)."""
+    doc.args()  # all three scenarios, every driver, a sane horizon
+    now = now or datetime.now()
+    data = doc.model_dump(mode="json") | {"saved_at": now.isoformat(timespec="seconds")}
+    try:
+        text = json.dumps(data, allow_nan=False)
+    except ValueError:
+        raise HTTPException(422, "The model has numbers that aren't finite, so it can't be saved.")
+    model_id = f"{slug(doc.company.name)}/{now.date().isoformat()}"
+    p = model_file(model_id, root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, p)  # atomic: a crash mid-write never leaves half a file
+    return model_id, data["saved_at"]
+
+
+def load_model(model_id, root=MODELS):
+    p = model_file(model_id, root)
+    try:
+        return ModelDoc.model_validate_json(p.read_bytes())
+    except FileNotFoundError:
+        raise HTTPException(404, "No saved model with that id. It may have been deleted.")
+    except ValidationError:
+        raise HTTPException(422, "That saved model is damaged or from an older version of the app.")
+
+
+def list_models(root=MODELS):
+    """Every saved version, most recent first. Unreadable files are skipped."""
+    out = []
+    for p in root.glob("*/*.json"):
+        model_id = f"{p.parent.name}/{p.stem}"
+        try:
+            doc = load_model(model_id, root)
+            co, sc, n = doc.args()
+            last = model.project(co["hist"], model.expand(sc[doc.active], n), n)[-1]["revenue"]
+        except (HTTPException, OSError, ArithmeticError):
+            continue
+        out.append({"id": model_id, "company": doc.company.name, "active": doc.active, "n": n,
+                    "saved_at": doc.saved_at, "year": model.fy(model.projected_dates(co, n)[-1], True),
+                    "revenue": last if last is not None and math.isfinite(last) else None})
+    # ponytail: parses and projects every file per listing; fine for hundreds, add an index file past that
+    return sorted(out, key=lambda m: m["saved_at"] or "", reverse=True)
+
+
+def delete_model(model_id, root=MODELS):
+    p = model_file(model_id, root)
+    try:
+        p.unlink()
+    except FileNotFoundError:
+        raise HTTPException(404, "No saved model with that id.")
+    try:
+        p.parent.rmdir()  # last version of that company
+    except OSError:
+        pass
+
+
+@app.get("/api/models")
+def models():
+    return list_models()
+
+
+@app.get("/api/models/{model_id:path}")
+def open_model(model_id: str):
+    """The saved document plus everything the dashboard derives from the company, defaults honouring exclusions."""
+    doc = load_model(model_id)
+    try:
+        parsed = _company_payload(doc.company.model_dump(), doc.excluded_years)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return {"id": model_id, "doc": doc.model_dump(mode="json"), "parsed": parsed}
+
+
+@app.post("/api/models")
+async def save(request: Request):
+    body = bytearray()
+    async for chunk in request.stream():  # read raw so the size cap applies before parsing
+        body += chunk
+        if len(body) > MAX_SAVE:
+            raise HTTPException(413, "That model is too large to save.")
+    try:
+        doc = ModelDoc.model_validate_json(body)
+    except ValidationError as e:
+        raise RequestValidationError([{**x, "loc": ("body", *x["loc"])} for x in e.errors()])
+    model_id, saved_at = save_model(doc)
+    return {"id": model_id, "saved_at": saved_at}
+
+
+@app.delete("/api/models/{model_id:path}")
+def remove_model(model_id: str):
+    delete_model(model_id)
+    return {"ok": True}
 
 
 dist = Path(__file__).parent / "web" / "dist"

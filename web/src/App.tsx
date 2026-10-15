@@ -3,8 +3,9 @@ import Chart from './Chart'
 import DriverStrip from './DriverStrip'
 import Statements from './Statements'
 import {
-  api, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS,
-  type ModelDoc, type OneOff, type Parsed, type Paths, type Projection, type Row, type Scenario,
+  api, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS, when, clock,
+  type ModelDoc, type ModelSummary, type OneOff, type Opened, type Parsed, type Paths, type Projection, type Row,
+  type Scenario,
 } from './lib'
 
 const GROUPS: [string, string[]][] = [
@@ -37,27 +38,19 @@ const METRICS: [string, string, (r: Row) => number | null][] = [
   ['net_cash', 'Net cash', r => (r.cash ?? 0) + (r.investments ?? 0) - (r.borrowings ?? 0)],
 ]
 const HORIZONS = [3, 5, 7, 10]
-const STORE = 'financial-model:v4' // bump when the saved shape or the driver list changes
 const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
+const LAST = 'financial-model:last' // id of the last open model; the model itself lives in models/ on disk
+const SAVE_DELAY = 1500
 
-/** Saved = the model document plus the parsed extras (years, ratios, defaults…) so a reload needs no server call. */
-type Saved = ModelDoc & { parsed: Omit<Parsed, 'company'> }
-
-/** Last session, or null if missing, corrupt, or saved by an older version of the app. */
-function load(): { parsed: Parsed; doc: ModelDoc } | null {
+function lastId(): string | null {
+  try { return localStorage.getItem(LAST) } catch { return null }
+}
+function remember(id: string | null) {
   try {
-    const s = JSON.parse(localStorage.getItem(STORE) ?? 'null')
-    const keys: string[] = s?.parsed?.drivers?.map((d: unknown[]) => d[0]) ?? []
-    const okPath = (p: { start?: unknown; end?: unknown } | undefined) =>
-      Number.isFinite(p?.start) && (p!.end === null || Number.isFinite(p!.end))
-    const ok = s?.version === 3 && s.company?.hist?.length && s.parsed.years?.length && s.parsed.layout?.length &&
-      keys.length && keys.every(k => Number.isFinite(s.parsed.defaults?.[k]) &&
-        SCENARIOS.every(sc => okPath(s.scenarios?.[sc]?.[k]))) &&
-      SCENARIOS.includes(s.active) && HORIZONS.includes(s.n) && Array.isArray(s.excluded_years)
-    if (!ok) return null
-    const { parsed, ...doc } = s as Saved
-    return { parsed: { ...parsed, company: doc.company }, doc }
-  } catch { return null }
+    localStorage.removeItem('financial-model:v4') // whole sessions lived here before the library
+    if (id) localStorage.setItem(LAST, id)
+    else localStorage.removeItem(LAST)
+  } catch { /* private mode */ }
 }
 
 const newDoc = (p: Parsed): ModelDoc => ({
@@ -65,33 +58,87 @@ const newDoc = (p: Parsed): ModelDoc => ({
   excluded_years: [], saved_at: null,
 })
 
-export default function App() {
-  const saved = useMemo(load, [])
-  const [parsed, setParsed] = useState<Parsed | null>(saved?.parsed ?? null)
-  const [doc, setDoc] = useState<ModelDoc | null>(saved?.doc ?? null)
+export interface SaveState { at: string | null; error: string | null }
 
-  const open = (p: Parsed) => { setParsed(p); setDoc(newDoc(p)) }
-  const close = () => { setParsed(null); setDoc(null); try { localStorage.removeItem(STORE) } catch { /* private mode */ } }
+export default function App() {
+  const [parsed, setParsed] = useState<Parsed | null>(null)
+  const [doc, setDoc] = useState<ModelDoc | null>(null)
+  const [booting, setBooting] = useState(() => lastId() != null)
+  const [save, setSave] = useState<SaveState>({ at: null, error: null })
+  const clean = useRef<ModelDoc | null>(null) // the doc as opened from disk: nothing to save until it changes
+  const pending = useRef<ModelDoc | null>(null) // changed, not yet saved
+  const timer = useRef<number>()
+  const live = useRef(false) // a model is open (a late save reply mustn't re-remember a closed one)
+
+  const send = (d: ModelDoc, keepalive = false) =>
+    api<{ id: string; saved_at: string }>('/api/models', { ...postJson(d), keepalive })
+      .then(r => { if (live.current) remember(r.id); setSave({ at: r.saved_at, error: null }) })
+      .catch(e => { pending.current ??= d; setSave(s => ({ ...s, error: (e as Error).message })) })
+  const flush = () => {
+    window.clearTimeout(timer.current)
+    const d = pending.current
+    pending.current = null
+    if (d) send(d, true) // keepalive: still goes out if the tab is closing (docs are ~10-20 KB, under the 64 KB cap)
+  }
+  const flushRef = useRef(flush)
+  flushRef.current = flush
+
+  // autosave: debounced, so a drag saves once when it settles
+  useEffect(() => {
+    if (!doc || doc === clean.current) return
+    pending.current = doc
+    timer.current = window.setTimeout(() => flushRef.current(), SAVE_DELAY)
+    return () => window.clearTimeout(timer.current)
+  }, [doc])
+  useEffect(() => {
+    const out = () => flushRef.current()
+    window.addEventListener('pagehide', out)
+    return () => window.removeEventListener('pagehide', out)
+  }, [])
+
+  const open = ({ parsed, doc, id }: Opened) => {
+    const d = doc ?? newDoc(parsed)
+    clean.current = doc ? d : null // a fresh upload is saved straight away; a reopened one only once edited
+    live.current = true
+    if (id) remember(id)
+    setSave({ at: doc?.saved_at ?? null, error: null })
+    setParsed(parsed)
+    setDoc(d)
+  }
+  const close = () => {
+    flush()
+    live.current = false
+    remember(null)
+    setParsed(null)
+    setDoc(null)
+  }
 
   useEffect(() => {
-    if (!parsed || !doc) return
-    const { company: _, ...rest } = parsed
-    try { localStorage.setItem(STORE, JSON.stringify({ ...doc, parsed: rest })) } catch { /* quota / private mode */ }
-  }, [parsed, doc])
+    const id = lastId()
+    if (!id) return
+    api<Opened>(`/api/models/${id}`).then(open).catch(() => remember(null)).finally(() => setBooting(false))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  if (booting) return <main className="landing"><p className="muted" role="status">Opening your last model…</p></main>
   return parsed && doc
-    ? <Workspace parsed={parsed} doc={doc} setDoc={f => setDoc(d => d && f(d))} onClose={close}
-        setDefaults={defaults => setParsed(p => p && { ...p, defaults })} />
+    ? <Workspace parsed={parsed} doc={doc} setDoc={f => setDoc(d => d && f(d))} onClose={close} save={save}
+        onRetry={flush} setDefaults={defaults => setParsed(p => p && { ...p, defaults })} />
     : <Landing onOpen={open} />
 }
 
-function Landing({ onOpen }: { onOpen: (p: Parsed) => void }) {
+function Landing({ onOpen }: { onOpen: (o: Opened) => void }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [over, setOver] = useState(false)
+  const [models, setModels] = useState<ModelSummary[]>([])
   const input = useRef<HTMLInputElement>(null)
+  const libHead = useRef<HTMLHeadingElement>(null)
 
-  const run = async (label: string, req: () => Promise<Parsed>) => {
+  useEffect(() => {
+    api<ModelSummary[]>('/api/models').then(setModels).catch(e => setError(`Couldn’t list saved models: ${e.message}`))
+  }, [])
+
+  const run = async (label: string, req: () => Promise<Opened>) => {
     if (busy) return // one load at a time, so a slow earlier upload can't replace a later one
     setBusy(label)
     setError(null)
@@ -101,7 +148,17 @@ function Landing({ onOpen }: { onOpen: (p: Parsed) => void }) {
     if (!f) return
     const body = new FormData()
     body.append('file', f)
-    run(`Reading ${f.name}…`, () => api<Parsed>('/api/parse', { method: 'POST', body }))
+    run(`Reading ${f.name}…`, async () => ({ parsed: await api<Parsed>('/api/parse', { method: 'POST', body }) }))
+  }
+  const remove = async (m: ModelSummary) => {
+    const date = m.saved_at ? when(m.saved_at) : 'earlier'
+    if (!window.confirm(`Delete the ${m.company} model saved ${date}? This can’t be undone.`)) return
+    try {
+      await api(`/api/models/${m.id}`, { method: 'DELETE' })
+      if (lastId() === m.id) remember(null)
+      setModels(ms => ms.filter(x => x.id !== m.id))
+      libHead.current?.focus() // the button that had focus is gone
+    } catch (e) { setError((e as Error).message) }
   }
 
   return (
@@ -127,6 +184,28 @@ function Landing({ onOpen }: { onOpen: (p: Parsed) => void }) {
       </label>
       {error && <p className="error" role="alert">{error}</p>}
 
+      {models.length > 0 && (
+        <section className="library" aria-labelledby="library-head">
+          <h2 id="library-head" ref={libHead} tabIndex={-1}>Recent models</h2>
+          <ul>
+            {models.map(m => (
+              <li key={m.id}>
+                <button type="button" className="lib-open" disabled={!!busy}
+                  onClick={() => run(`Opening ${m.company}…`, () => api<Opened>(`/api/models/${m.id}`))}>
+                  <span className="lib-name">{m.company}</span>
+                  <span className="lib-meta">
+                    {m.saved_at ? when(m.saved_at) : '–'} · {NAMES[m.active]} · {m.n} yrs
+                    {m.revenue != null && <> · revenue <span className="pencil-num">Rs {money(m.revenue)} cr</span> in {m.year}</>}
+                  </span>
+                </button>
+                <button type="button" className="link lib-del" disabled={!!busy} onClick={() => remove(m)}
+                  aria-label={`Delete ${m.company}, saved ${m.saved_at ? when(m.saved_at) : 'earlier'}`}>Delete</button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <div className="how">
         <h2>Getting the file</h2>
         <ol>
@@ -135,12 +214,12 @@ function Landing({ onOpen }: { onOpen: (p: Parsed) => void }) {
           <li>Drop the downloaded file above.</li>
         </ol>
         <button type="button" className="link" disabled={!!busy}
-          onClick={() => run('Loading sample…', () => api<Parsed>('/api/sample'))}>
+          onClick={() => run('Loading sample…', async () => ({ parsed: await api<Parsed>('/api/sample') }))}>
           Explore with a sample company
         </button>
         <span className="muted"> (made-up numbers)</span>
       </div>
-      <p className="scope muted">Works for manufacturing, services and other non-financial companies. Banks, NBFCs and insurers aren’t supported yet.</p>
+      <p className="scope muted">Works for manufacturing, services and other non-financial companies. Banks, NBFCs and insurers aren’t supported yet. Models save themselves to the <code>models</code> folder next to the app.</p>
     </main>
   )
 }
@@ -151,9 +230,11 @@ interface WorkspaceProps {
   setDoc: (f: (d: ModelDoc) => ModelDoc) => void
   setDefaults: (d: Record<string, number>) => void
   onClose: () => void
+  save: SaveState
+  onRetry: () => void
 }
 
-function Workspace({ parsed, doc, setDoc, setDefaults, onClose }: WorkspaceProps) {
+function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }: WorkspaceProps) {
   const { company, years: histYears, ratios, defaults, checks, drivers, layout } = parsed
   const { n, active, scenarios } = doc
   const a = scenarios[active]
@@ -238,6 +319,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose }: WorkspaceProps
           <p className="muted">
             Rs crore · <span className="ink-word">{histYears[0]}–{histYears[nHist - 1]} reported</span>
             {proj && <> · <span className="pencil-word">{projYears[0]}–{projYears[n - 1]} projected</span></>}
+            {save.at && !save.error && <> · <span className="saved">Saved {clock(save.at)}</span></>}
           </p>
         </div>
         <div className="actions">
@@ -274,6 +356,12 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose }: WorkspaceProps
           </button>
         )}
         {error && <span className="bad" role="alert">{error}</span>}
+        {save.error && (
+          <span className="bad" role="alert">
+            Not saved: {save.error}{' '}
+            <button type="button" className="link" onClick={onRetry}>Try again</button>
+          </span>
+        )}
       </div>
       {showChecks && <ul className="check-list">{checks.map(c => <li key={c}>{c}</li>)}</ul>}
       {showOneoffs && (

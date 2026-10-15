@@ -84,6 +84,19 @@ a { color: var(--pencil); }
 .drop-title { font: 600 20px/1.3 var(--display); }
 .drop-sub { color: var(--ink-2); }
 .error { color: var(--neg); margin: 12px 0 0; }
+.library { margin-top: 40px; }
+.library h2 { font: 600 15px/1.4 var(--body); margin: 0 0 8px; }
+.library ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.library li { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--rule); }
+.lib-open {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; text-align: left;
+  background: none; border: 0; padding: 12px 8px; color: inherit; font: inherit; cursor: pointer; border-radius: 6px;
+}
+.lib-open:hover:not(:disabled) { background: var(--sheet); }
+.lib-name { font-weight: 600; overflow-wrap: anywhere; }
+.lib-meta { font-size: 13px; color: var(--ink-2); }
+.lib-del { font-size: 13px; padding: 8px; color: var(--ink-2); }
+.lib-del:hover:not(:disabled) { color: var(--neg); }
 .how { margin-top: 40px; }
 .how h2 { font: 600 15px/1.4 var(--body); margin-bottom: 8px; }
 .how ol { margin: 0 0 16px; padding-left: 20px; color: var(--ink-2); }
