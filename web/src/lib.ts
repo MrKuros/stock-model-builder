@@ -50,6 +50,13 @@ export interface Parsed {
   drivers: Driver[]
   layout: LayoutLine[]
 }
+/** One saved version in the local library (GET /api/models). */
+export interface ModelSummary {
+  id: string; company: string; active: Scenario; n: number; saved_at: string | null
+  year: string; revenue: number | null // final projected year, active scenario
+}
+/** GET /api/models/{id}: the document plus what the dashboard derives from the company. */
+export interface Opened { id?: string; doc?: ModelDoc; parsed: Parsed }
 export interface Projection { years: string[]; scenarios: Record<Scenario, Row[]> }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -68,6 +75,16 @@ export const postJson = (body: unknown, signal?: AbortSignal): RequestInit => ({
   body: JSON.stringify(body),
   signal,
 })
+
+/** saved_at (the machine's local time) as "15 Oct 2026". */
+export const when = (iso: string) =>
+  new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+/** "12:41" today, else "14 Oct 12:41". */
+export function clock(iso: string): string {
+  const d = new Date(iso)
+  const t = d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })
+  return d.toDateString() === new Date().toDateString() ? t : `${d.getDate()} ${d.toLocaleDateString('en-IN', { month: 'short' })} ${t}`
+}
 
 const inr = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 })
 

@@ -1,5 +1,6 @@
 """Run: uv run python test_model.py  (Excel formula check needs LibreOffice `soffice` on PATH)."""
 import io
+import json
 import re
 import shutil
 import subprocess
@@ -185,6 +186,8 @@ def main():
     assert projs["base"] == proj
     assert projs["bull"][-1]["revenue"] > proj[-1]["revenue"] > projs["bear"][-1]["revenue"]
 
+    library_check(tmp / "models", co, seeded)
+
     if not shutil.which("soffice"):
         print("SKIP Excel formula check: soffice not found")
         return
@@ -208,6 +211,68 @@ def main():
     for j, c in enumerate(proj0):
         _same(ws0, rows, 2 + len(co["hist"]) + j, c, ("zero", j))
     print("OK: parse, checks, projection, Excel formulas match Python")
+
+
+def library_check(root, co, scenarios):
+    """Local model library: round trip, one file per company per day, ids can't leave root."""
+    import server  # noqa: PLC0415 (pulls in FastAPI; only this check needs it)
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    def fails(fn, status, *args):
+        try:
+            fn(*args, root)
+        except HTTPException as e:
+            assert e.status_code == status, (fn.__name__, args, e.status_code, e.detail)
+        else:
+            raise AssertionError(f"{fn.__name__}{args}: expected {status}")
+
+    company = {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"]}
+    data = {"version": 3, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
+            "excluded_years": ["FY2020"], "saved_at": None}
+    doc = server.ModelDoc.model_validate(data)
+    mid, at = server.save_model(doc, root, now=datetime(2026, 10, 15, 12, 41, 5))
+    assert (mid, at) == ("test-industries-ltd/2026-10-15", "2026-10-15T12:41:05"), (mid, at)
+    back = server.load_model(mid, root).model_dump(mode="json")
+    assert back == {**data, "saved_at": at}, "round trip must restore scenarios, fades, horizon, exclusions"
+    assert back["scenarios"]["bear"]["growth"]["end"] is not None and back["scenarios"]["base"]["tax_rate"]["end"] is None
+    # same day overwrites; a new day is a new version; the listing is newest first with final-year revenue
+    server.save_model(doc.model_copy(update={"active": "bull"}), root, now=datetime(2026, 10, 15, 18, 0))
+    server.save_model(doc, root, now=datetime(2026, 10, 16, 9, 0))
+    listed = server.list_models(root)
+    assert [(m["id"], m["active"]) for m in listed] == [
+        ("test-industries-ltd/2026-10-16", "bear"), ("test-industries-ltd/2026-10-15", "bull")], listed
+    want = model.project(co["hist"], model.expand(scenarios["bear"], 7), 7)[-1]["revenue"]
+    assert listed[0]["revenue"] == want and listed[0]["n"] == 7 and listed[0]["year"] == "FY2032E", listed[0]
+    (root / "test-industries-ltd" / "2026-10-14.json").write_text("{broken")  # skipped, not fatal
+    assert len(server.list_models(root)) == 2
+    fails(server.load_model, 422, "test-industries-ltd/2026-10-14")
+    # ids are matched against a strict pattern before touching the disk
+    (root.parent / "secret.json").write_text(json.dumps(data))
+    for bad in ("../secret", "test-industries-ltd/../../secret", "/etc/passwd", "a/2026-10-15/../../x",
+                "test-industries-ltd/2026-10-15.json", "Test/2026-10-15", "x\\..\\y/2026-10-15", "", "..", "%2e%2e/x"):
+        fails(server.load_model, 422, bad)
+        fails(server.delete_model, 422, bad)
+    (root / "evil").symlink_to(root.parent, target_is_directory=True)  # a link out of the library
+    fails(server.load_model, 422, "evil/2026-10-15")
+    assert (root.parent / "secret.json").exists()
+    assert server.slug("Tata Motors Ltd.") == "tata-motors-ltd" and server.slug("दूध").startswith("company-")
+    assert server.slug("../..").startswith("company-")
+    # malformed documents are refused
+    for bad in ({**data, "version": 2}, {**data, "active": "worst"},
+                {**data, "scenarios": {k: v for k, v in scenarios.items() if k != "bull"}}):
+        try:
+            server.save_model(server.ModelDoc.model_validate(bad), root)
+            raise AssertionError(f"expected rejection: {bad['version'], bad['active'], list(bad['scenarios'])}")
+        except (HTTPException, ValueError):
+            pass
+    inf = dict(data, company=dict(company, hist=[dict(company["hist"][0], revenue=float("inf"))]))
+    fails(lambda d, r: server.save_model(server.ModelDoc.model_validate(d), r), 422, inf)
+    # delete removes the file, then the empty company folder; a second delete is a 404
+    server.delete_model("test-industries-ltd/2026-10-16", root)
+    server.delete_model("test-industries-ltd/2026-10-15", root)
+    (root / "test-industries-ltd" / "2026-10-14.json").unlink()
+    fails(server.delete_model, 404, "test-industries-ltd/2026-10-15")
+    assert server.list_models(root) == []
 
 
 RETURNS = ("roe", "roce", "asset_turnover", "nd_ebitda", "int_cover")
