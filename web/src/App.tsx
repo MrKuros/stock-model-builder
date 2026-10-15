@@ -68,17 +68,28 @@ export default function App() {
   const clean = useRef<ModelDoc | null>(null) // the doc as opened from disk: nothing to save until it changes
   const pending = useRef<ModelDoc | null>(null) // changed, not yet saved
   const timer = useRef<number>()
-  const live = useRef(false) // a model is open (a late save reply mustn't re-remember a closed one)
+  const gen = useRef(0) // bumped on open and close: a late save reply for an earlier model must not touch this one
+  const inflight = useRef<Promise<string | false>>(Promise.resolve('')) // the last save: its saved_at, or false if it failed
 
-  const send = (d: ModelDoc, keepalive = false) =>
-    api<{ id: string; saved_at: string }>('/api/models', { ...postJson(d), keepalive })
-      .then(r => { if (live.current) remember(r.id); setSave({ at: r.saved_at, error: null }) })
-      .catch(e => { pending.current ??= d; setSave(s => ({ ...s, error: (e as Error).message })) })
+  const send = (d: ModelDoc, keepalive = false) => {
+    const g = gen.current
+    inflight.current = api<{ id: string; saved_at: string }>('/api/models', { ...postJson(d), keepalive })
+      .then(r => {
+        if (g === gen.current) { remember(r.id); setSave({ at: r.saved_at, error: null }) }
+        return r.saved_at
+      })
+      .catch(e => {
+        if (g === gen.current) { pending.current ??= d; setSave(s => ({ ...s, error: (e as Error).message })) }
+        return false as const
+      })
+    return inflight.current
+  }
   const flush = () => {
     window.clearTimeout(timer.current)
     const d = pending.current
     pending.current = null
     if (d) send(d, true) // keepalive: still goes out if the tab is closing (docs are ~10-20 KB, under the 64 KB cap)
+    return inflight.current
   }
   const flushRef = useRef(flush)
   flushRef.current = flush
@@ -99,15 +110,18 @@ export default function App() {
   const open = ({ parsed, doc, id }: Opened) => {
     const d = doc ?? newDoc(parsed)
     clean.current = doc ? d : null // a fresh upload is saved straight away; a reopened one only once edited
-    live.current = true
+    window.clearTimeout(timer.current)
+    pending.current = null
+    gen.current++
+    inflight.current = Promise.resolve('')
     if (id) remember(id)
     setSave({ at: doc?.saved_at ?? null, error: null })
     setParsed(parsed)
     setDoc(d)
   }
-  const close = () => {
-    flush()
-    live.current = false
+  const close = async () => {
+    if ((await flush()) === false) return // stay: the "Not saved … Try again" alert is showing, nothing is lost
+    gen.current++
     remember(null)
     setParsed(null)
     setDoc(null)
@@ -157,7 +171,8 @@ function Landing({ onOpen }: { onOpen: (o: Opened) => void }) {
       await api(`/api/models/${m.id}`, { method: 'DELETE' })
       if (lastId() === m.id) remember(null)
       setModels(ms => ms.filter(x => x.id !== m.id))
-      libHead.current?.focus() // the button that had focus is gone
+      // the button that had focus is gone; with the last row the whole list goes, so land on the file picker
+      ;(models.length > 1 ? libHead : input).current?.focus()
     } catch (e) { setError((e as Error).message) }
   }
 
@@ -231,7 +246,7 @@ interface WorkspaceProps {
   setDefaults: (d: Record<string, number>) => void
   onClose: () => void
   save: SaveState
-  onRetry: () => void
+  onRetry: () => Promise<string | false>
 }
 
 function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }: WorkspaceProps) {
@@ -251,6 +266,12 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
   const [pending, setPending] = useState<string | null>(null) // year whose exclusion is being applied
   const [defaultsNote, setDefaultsNote] = useState('')
   const [exporting, setExporting] = useState(false)
+  const [retried, setRetried] = useState<string | null>(null) // saved_at of a successful "Try again", announced once
+  const back = useRef<HTMLButtonElement>(null)
+  const retry = async () => {
+    const at = await onRetry()
+    if (at) { setRetried(at); back.current?.focus() } // the Try again button is gone
+  }
   const hist = company.hist
   const nHist = hist.length
 
@@ -294,10 +315,11 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
   }
 
   const excluded = doc.excluded_years
-  const oneoffYears = Object.entries((parsed.oneoffs ?? []).reduce<Record<string, OneOff[]>>(
+  const oneoffYears = Object.entries(parsed.oneoffs.reduce<Record<string, OneOff[]>>(
     (g, o) => ({ ...g, [o.year]: [...(g[o.year] ?? []), o] }), {}))
   // fetch first, then store the year and its defaults together, so the two never disagree
   const toggleYear = async (year: string) => {
+    if (pending) return // one at a time; the checkbox stays focusable (aria-disabled) so keyboard focus isn't lost
     const next = excluded.includes(year) ? excluded.filter(y => y !== year) : [...excluded, year]
     setPending(year)
     try {
@@ -314,7 +336,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
       <div className="head-area">
       <header className="top">
         <div className="title">
-          <button type="button" className="link back" onClick={onClose}>Open another file</button>
+          <button ref={back} type="button" className="link back" onClick={onClose}>Open another file</button>
           <h1>{company.name}</h1>
           <p className="muted">
             Rs crore · <span className="ink-word">{histYears[0]}–{histYears[nHist - 1]} reported</span>
@@ -355,11 +377,12 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
             {excluded.length > 0 && <> · {excluded.length} left out of defaults</>}
           </button>
         )}
+        {retried != null && retried === save.at && !save.error && <span className="ok">Saved</span>}
         {error && <span className="bad" role="alert">{error}</span>}
         {save.error && (
           <span className="bad" role="alert">
             Not saved: {save.error}{' '}
-            <button type="button" className="link" onClick={onRetry}>Try again</button>
+            <button type="button" className="link" onClick={retry}>Try again</button>
           </span>
         )}
       </div>
@@ -393,7 +416,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
                 hint={HINTS[k] ?? ''}
                 kind={byKey[k][2]}
                 history={ratios.map(r => r[k])}
-                value={a[k] ?? flat(seeded[active][k].start)}
+                value={a[k] ?? flat(seeded[active][k].start)} // a model saved before this driver existed
                 base={seeded[active][k].start}
                 baseLabel={k === 'debt_change' ? 'no new debt' : `default ${fmt(seeded[active][k].start, byKey[k][2])}`}
                 onChange={v => setA(prev => ({ ...prev, [k]: v }))}
@@ -442,14 +465,14 @@ function OneOffs({ id, years, histYears, excluded, pending, note, onToggle }: {
     <section id={id} className="oneoffs" aria-label="Unusual years">
       <p className="muted small">
         Years far from this company’s own history (more than 2σ from its median). Defaults use the last three
-        reported years that aren’t left out.
+        reported years that aren’t left out; revenue growth always uses the last three.
       </p>
       <ul>
         {years.map(([year, items]) => (
           <li key={year}>
             <span>{items.map(o => o.note).join('. ')}.</span>
             <label className="exclude">
-              <input type="checkbox" checked={excluded.includes(year)} disabled={pending != null}
+              <input type="checkbox" checked={excluded.includes(year)} aria-disabled={pending != null}
                 aria-busy={pending === year} onChange={() => onToggle(year)} />
               Exclude from defaults
             </label>

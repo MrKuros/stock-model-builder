@@ -2,15 +2,13 @@ import { useState } from 'react'
 import { fmt, groupKeys, type LayoutLine, type LineKind, type Row } from './lib'
 
 const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf', 'fcf'])
-const ALL_TABS = [['PROFIT & LOSS', 'Profit & loss'], ['BALANCE SHEET', 'Balance sheet'], ['CASH FLOW', 'Cash flow'],
+const TABS = [['PROFIT & LOSS', 'Profit & loss'], ['BALANCE SHEET', 'Balance sheet'], ['CASH FLOW', 'Cash flow'],
   ['RATIOS', 'Ratios']] as const
 
 interface Props { layout: LayoutLine[]; years: string[]; rows: Row[]; nHist: number }
 
 export default function Statements({ layout, years, rows, nHist }: Props) {
-  const [tab, setTab] = useState<string>(ALL_TABS[0][0])
-  // a session saved before a section existed has no layout lines for it, so hide its tab
-  const TABS = ALL_TABS.filter(([id]) => layout.some(([label, , kind]) => kind === 'head' && label === id))
+  const [tab, setTab] = useState<string>(TABS[0][0])
   const lines: [string, string, LineKind][] = []
   let section = ''
   for (const [label, key, kind] of layout) {

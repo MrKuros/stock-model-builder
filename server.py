@@ -1,10 +1,12 @@
 """Run: uv run uvicorn server:app  (serves the API and the built web/dist front end)."""
+import contextlib
 import hashlib
 import io
 import json
 import math
 import os
 import re
+import tempfile
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, FiniteFloat, ValidationError
+from pydantic import BaseModel, FiniteFloat, ValidationError, model_validator
 
 import model
 
@@ -32,10 +34,31 @@ def _invalid(_, exc):
     return JSONResponse({"detail": f"Invalid request: {msgs}"}, status_code=422)
 
 
+@app.exception_handler(OSError)
+def _disk(_, exc):
+    # library reads and writes (full disk, read-only folder): say what failed instead of a bare 500
+    return JSONResponse({"detail": f"Couldn't read or write the models folder: {exc.strerror or exc}."},
+                        status_code=500)
+
+
+REQUIRED = [*model.PL.values(), *model.BS.values(), "ebitda", "other_ca"]  # always numbers from parse_screener
+
+
 class Company(BaseModel):
     name: str
     dates: list[datetime]
     hist: list[dict[str, float | None]]
+
+    @model_validator(mode="after")
+    def _years(self):
+        """Every endpoint and the library go through here, so a hand-made or damaged company is a 422."""
+        if len(self.hist) < 2 or len(self.dates) != len(self.hist):
+            raise ValueError("company needs at least two reported years, with one date per year")
+        for i, row in enumerate(self.hist):
+            bad = [k for k in REQUIRED if not isinstance(row.get(k), float) or not math.isfinite(row[k])]
+            if bad:
+                raise ValueError(f"company.hist[{i}] is missing numbers for {', '.join(bad)}")
+        return self
 
 
 class DriverPath(BaseModel):
@@ -83,7 +106,7 @@ class ModelDoc(ModelRequest):
 
 
 def _company_payload(co, excluded=()):
-    labels = [model.fy(d) for d in co["dates"]]
+    labels = model.labels(co["dates"])
     return {
         "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"]},
         "years": labels,
@@ -128,12 +151,9 @@ class DefaultsRequest(BaseModel):
 @app.post("/api/defaults")
 def defaults(req: DefaultsRequest):
     """Defaults with the user's excluded (one-off) years left out."""
-    labels = [model.fy(d) for d in req.company.dates]
-    if len(labels) != len(req.company.hist):
-        raise HTTPException(422, "company.dates and company.hist differ in length.")
     try:
         return model.default_assumptions(req.company.model_dump()["hist"], exclude=set(req.excluded_years),
-                                         labels=labels)
+                                         labels=model.labels(req.company.dates))
     except ValueError as e:
         raise HTTPException(422, str(e))
 
@@ -180,13 +200,28 @@ def save_model(doc: ModelDoc, root=MODELS, now=None):
         text = json.dumps(data, allow_nan=False)
     except ValueError:
         raise HTTPException(422, "The model has numbers that aren't finite, so it can't be saved.")
-    model_id = f"{slug(doc.company.name)}/{now.date().isoformat()}"
+    name, folder = doc.company.name, slug(doc.company.name)
+    if any(_saved_name(f) not in (None, name) for f in (root / folder).glob("*.json")):
+        folder += "-" + hashlib.sha1(name.encode()).hexdigest()[:6]  # another company slugs the same ("Tata Motors"/"TATA MOTORS!")
+    model_id = f"{folder}/{now.date().isoformat()}"
     p = model_file(model_id, root)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, p)  # atomic: a crash mid-write never leaves half a file
+    fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")  # own temp file per write, so saves can't collide
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, p)  # atomic: a crash mid-write never leaves half a file
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)  # only still there if the write failed
     return model_id, data["saved_at"]
+
+
+def _saved_name(p):
+    try:
+        return json.loads(p.read_bytes())["company"]["name"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def load_model(model_id, root=MODELS):
@@ -208,8 +243,8 @@ def list_models(root=MODELS):
             doc = load_model(model_id, root)
             co, sc, n = doc.args()
             last = model.project(co["hist"], model.expand(sc[doc.active], n), n)[-1]["revenue"]
-        except (HTTPException, OSError, ArithmeticError):
-            continue
+        except Exception:  # noqa: BLE001
+            continue  # ponytail: skip any unreadable file, never fail the whole list
         out.append({"id": model_id, "company": doc.company.name, "active": doc.active, "n": n,
                     "saved_at": doc.saved_at, "year": model.fy(model.projected_dates(co, n)[-1], True),
                     "revenue": last if last is not None and math.isfinite(last) else None})

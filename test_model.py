@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+from pydantic import ValidationError
 
 import model
 
@@ -105,9 +106,23 @@ def main():
     assert found[0]["note"] == "FY2020 other income was 10.0% of revenue, typically 2.0%", found[0]["note"]
     assert abs(found[1]["value"] - 0.45) < 1e-3 and abs(found[1]["typical"] - 0.25) < 1e-3, found[1]
     assert model.detect_oneoffs(odd[3:6], labels[3:6]) == [], "fewer than 4 years: flag nothing"
-    # excluding years: the window skips them and reaches back; nothing excluded = unchanged
+    # tax: a latest year near the 25% statutory rate is the normal one, not a one-off (Milky Mist: 57, 56, 48, 20%)
+    mm = [dict(x, pbt=100.0, tax=t) for x, t in zip(co["hist"][-4:], (57.0, 56.0, 48.0, 20.0))]
+    assert not [o for o in model.detect_oneoffs(mm, labels[-4:]) if o["metric"] == "tax_rate"], "near-statutory year"
+    # excluding years: the window skips them and reaches back; nothing excluded = unchanged; growth ignores exclusions
     assert model.default_assumptions(odd, exclude=set(), labels=labels) == model.default_assumptions(odd)
-    assert model.default_assumptions(odd, exclude={"FY2025"}, labels=labels) == model.default_assumptions(odd[:-1])
+    no_last = model.default_assumptions(odd, exclude={"FY2025"}, labels=labels)
+    assert no_last == {**model.default_assumptions(odd[:-1]), "growth": no_last["growth"]}
+    assert no_last["growth"] == model.default_assumptions(odd)["growth"]
+    dip = [dict(x) for x in co["hist"]]
+    dip[7]["revenue"] *= 0.55  # FY2023 dip year: excluding it must not keep the x2 rebound out of it
+    assert abs(model.default_assumptions(dip, exclude={"FY2023"}, labels=labels)["growth"] - 0.12) < 1e-6
+    # a year-end change (Mar 2019 then Dec 2019) gets unique labels, so excluding one year drops only that one
+    moved = [*co["dates"][:4], datetime(2019, 12, 31), *co["dates"][5:]]
+    ml = model.labels(moved)
+    assert ml[3:5] == ["FY2019", "FY2019 Dec"] and len(set(ml)) == len(ml), ml
+    assert model.default_assumptions(co["hist"], exclude={"FY2019"}, labels=ml) == model.default_assumptions(
+        co["hist"][:3] + co["hist"][4:])
     ex = model.default_assumptions(odd, exclude={"FY2023", "FY2024"}, labels=labels)
     assert abs(ex["tax_rate"] - 0.25) < 1e-3 and abs(ex["growth"] - 0.12) < 1e-6, ex
     assert ex["dso"] == model._ros((odd[i]["receivables"] * 365, odd[i]["revenue"]) for i in (5, 6, 9)), ex
@@ -206,10 +221,21 @@ def main():
     proj0 = model.project(co["hist"], zero, n=2)
     assert all(c["int_cover"] is None and c["nd_ebitda"] is None for c in proj0), proj0
     (tmp / "zero").mkdir()
-    (tmp / "zero" / "model.xlsx").write_bytes(model.to_excel(co, zero, n=2))
+    (tmp / "zero" / "model.xlsx").write_bytes(model.to_excel(co, dict.fromkeys(model.SCENARIOS, zero), n=2))
     ws0 = recalc(tmp / "zero" / "model.xlsx", tmp / "calc0")
     for j, c in enumerate(proj0):
         _same(ws0, rows, 2 + len(co["hist"]) + j, c, ("zero", j))
+    # debt faded to zero over 10 years: float residue (1e-14 cr) must read as no interest cover, in both
+    payoff = {k: {"start": v, "end": None} for k, v in model.default_assumptions(co["hist"]).items()}
+    payoff["debt_change"] = {"start": 0.0, "end": -50.0}
+    ep = model.expand(payoff, 10)
+    proj10 = model.project(co["hist"], ep, n=10)
+    assert proj10[-1]["int_cover"] is None, proj10[-1]["int_cover"]
+    (tmp / "payoff").mkdir()
+    (tmp / "payoff" / "model.xlsx").write_bytes(model.to_excel(co, dict.fromkeys(model.SCENARIOS, payoff), n=10))
+    ws10 = recalc(tmp / "payoff" / "model.xlsx", tmp / "calc10")
+    for j, c in enumerate(proj10):
+        _same(ws10, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ep.items()}}, ("payoff", j))
     print("OK: parse, checks, projection, Excel formulas match Python")
 
 
@@ -265,8 +291,34 @@ def library_check(root, co, scenarios):
             raise AssertionError(f"expected rejection: {bad['version'], bad['active'], list(bad['scenarios'])}")
         except (HTTPException, ValueError):
             pass
-    inf = dict(data, company=dict(company, hist=[dict(company["hist"][0], revenue=float("inf"))]))
-    fails(lambda d, r: server.save_model(server.ModelDoc.model_validate(d), r), 422, inf)
+    # a malformed company (missing, null or infinite numbers; no years; dates not matching years) is refused
+    row = company["hist"][-1]
+    for hist, dates in (([*company["hist"][:-1], {k: v for k, v in row.items() if k != "revenue"}], company["dates"]),
+                        ([*company["hist"][:-1], dict(row, revenue=None)], company["dates"]),
+                        ([*company["hist"][:-1], dict(row, revenue=float("nan"))], company["dates"]),
+                        ([*company["hist"][:-1], dict(row, revenue=float("inf"))], company["dates"]),
+                        ([], []), (company["hist"], company["dates"][:1])):
+        try:
+            server.ModelDoc.model_validate(dict(data, company=dict(company, hist=hist, dates=dates)))
+            raise AssertionError(f"expected rejection: {len(hist)} years, {len(dates)} dates")
+        except ValidationError:
+            pass
+    # one damaged file never hides the rest of the library
+    (root / "poison").mkdir()
+    (root / "poison" / "2026-10-15.json").write_text(json.dumps(dict(data, company=dict(company, hist=[]))))
+    assert len(server.list_models(root)) == 2, server.list_models(root)
+    fails(server.load_model, 422, "poison/2026-10-15")
+    (root / "poison" / "2026-10-15.json").unlink()
+    (root / "poison").rmdir()
+    # two companies that slug the same keep separate files; the same company keeps its folder
+    other = server.ModelDoc.model_validate(dict(data, company=dict(company, name="TEST INDUSTRIES LTD!")))
+    oid, _ = server.save_model(other, root, now=datetime(2026, 10, 15, 13, 0))
+    assert oid.startswith("test-industries-ltd-") and oid != mid, oid
+    assert server.load_model(mid, root).company.name == "Test Industries Ltd"
+    assert server.load_model(oid, root).company.name == "TEST INDUSTRIES LTD!"
+    assert server.save_model(doc, root, now=datetime(2026, 10, 15, 14, 0))[0] == mid
+    server.delete_model(oid, root)
+    assert not list(root.glob("*/*.tmp")), "no temp files left behind"
     # delete removes the file, then the empty company folder; a second delete is a 404
     server.delete_model("test-industries-ltd/2026-10-16", root)
     server.delete_model("test-industries-ltd/2026-10-15", root)
