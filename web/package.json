@@ -1,5 +1,5 @@
 {
-  "name": "financial-model-web",
+  "name": "stock-model-builder-web",
   "private": true,
   "type": "module",
   "scripts": {
