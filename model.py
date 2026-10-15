@@ -450,13 +450,22 @@ GRID_MARGIN = (-0.02, -0.01, 0.0, 0.01, 0.02)
 IMPLIED_RANGE = (-0.30, 0.80)  # reverse DCF: flat revenue growth searched between these
 
 
+def _clears(w, g):
+    """WACC is positive and at least MIN_SPREAD above g. The ROUND keeps Excel (=ROUND(w-g,10)>=0.005) and Python
+    deciding an exact 0.5 pp spread the same way: 0.055-0.05 is 0.00499999... in floats."""
+    return w > 0 and round(w - g, 10) >= MIN_SPREAD
+
+
 def _dcf(fcff, period, w, g):
-    """PV of the explicit years and of a Gordon terminal value; None when w doesn't clear g (or isn't positive).
+    """PV of the explicit years and of a Gordon terminal value; None when w doesn't clear g (or isn't positive),
+    or the final year's FCFF isn't positive (a perpetuity on a cash burn means nothing).
     The terminal value takes the final year's discount factor: with mid-year flows that is the consistent one."""
-    if not (w > 0 and w - g >= MIN_SPREAD):
+    if not _clears(w, g) or fcff[-1] <= 0:
         return None
     df = [(1 + w) ** -p for p in period]
     pv = [f * d for f, d in zip(fcff, df)]
+    # ponytail: terminal FCFF carries the final year's reinvestment (capex, NWC at that year's growth); a
+    # value-driver TV, NOPAT x (1+g) x (1 - g/RONIC) / (WACC - g), if growth-phase reinvestment distorts it
     tv = fcff[-1] * (1 + g) / (w - g)
     return {"df": df, "pv": pv, "pv_sum": sum(pv), "tv": tv, "pv_tv": tv * df[-1], "ev": sum(pv) + tv * df[-1]}
 
@@ -473,30 +482,44 @@ def valuation(projs, hist, val, base, market, inputs=None):
     market = market or {}
     price = _pos(v["price"] if v["price"] is not None else market.get("price"))
     shares = _pos(v["shares"] if v["shares"] is not None else market.get("shares"))
-    kd = base["int_rate"][0] if v["kd"] is None else v["kd"]
-    tax = base["tax_rate"][0]
-    ke, kd_at = v["rf"] + v["beta"] * v["erp"], kd * (1 - tax)
+    ke, tax = v["rf"] + v["beta"] * v["erp"], base["tax_rate"][0]
+    # ponytail: the default (3-yr interest / opening borrowings) is kept between rf and ke; lease interest or a
+    # big late loan can push it above the cost of equity. A typed kd is used as is.
+    kd = min(max(base["int_rate"][0], v["rf"]), ke) if v["kd"] is None else v["kd"]
+    kd_at = kd * (1 - tax)
     # ponytail: no share price -> book equity weights the WACC; a negative book counts as zero
     e = price * shares if price and shares else max(0.0, last["share_cap"] + last["reserves"])
     d = last["borrowings"]
     we = e / (e + d) if e + d > 0 else 1.0
-    wacc = v["wacc_override"] if v["wacc_override"] is not None else we * ke + (1 - we) * kd_at
+    wacc_build = we * ke + (1 - we) * kd_at
+    wacc = v["wacc_override"] if v["wacc_override"] is not None else wacc_build
     g, n = v["g"], len(next(iter(projs.values())))
     period = [t + 1 - (0.5 if v["mid_year"] else 0) for t in range(n)]
     bridge = -last["borrowings"] + last["cash"] + last["investments"]
+    # minority holders' claim on the consolidated EV, as their share of profit (the base scenario's first year;
+    # mi_pct nets minorities against associates, so a net positive share deducts nothing).
+    # ponytail: proportional to profit share; upgrade path: a typed NCI value from the annual report
+    nci = max(0.0, -base["mi_pct"][0])
+    minority = lambda ev: None if ev is None else max(0.0, ev + bridge) * nci  # noqa: E731
+    equity_of = lambda ev: None if ev is None else ev + bridge - minority(ev)  # noqa: E731
     error = None
-    if wacc <= 0:
+    if not math.isfinite(wacc):
+        error = "Those inputs give no WACC. Check the beta, rates and share price."
+    elif wacc <= 0:
         error = f"WACC is {_pct(wacc)}; it must be above zero."
-    elif wacc - g < MIN_SPREAD:
+    elif not _clears(wacc, g):
         error = (f"WACC ({_pct(wacc)}) must be at least 0.5 pp above terminal growth ({_pct(g)}). "
                  "Lower the growth or raise the WACC.")
-    per_share = lambda ev: (ev + bridge) / shares if ev is not None and shares else None  # noqa: E731
+    per_share = lambda ev: equity_of(ev) / shares if ev is not None and shares else None  # noqa: E731
     out = {}
     for s, rows in projs.items():
         fcff = [r["fcff"] for r in rows]
         x = _dcf(fcff, period, wacc, g) or dict.fromkeys(("df", "pv", "pv_sum", "tv", "pv_tv", "ev"))
         ps = per_share(x["ev"])
-        out[s] = {**x, "fcff": fcff, "equity": None if x["ev"] is None else x["ev"] + bridge, "per_share": ps,
+        out[s] = {**x, "fcff": fcff, "minority": minority(x["ev"]), "equity": equity_of(x["ev"]), "per_share": ps,
+                  "error": None if error or fcff[-1] > 0 else (
+                      "Final-year free cash flow is negative; a perpetuity on it has no meaning. "
+                      "Lower capex or growth in the last years, or extend the projection."),
                   "upside": ps / price - 1 if ps is not None and price else None,
                   "tv_share": x["pv_tv"] / x["ev"] if x["ev"] and x["ev"] > 0 else None,
                   "grid": [[per_share((_dcf(fcff, period, wacc + dw, g + dg) or {}).get("ev")) for dg in GRID_G]
@@ -506,13 +529,14 @@ def valuation(projs, hist, val, base, market, inputs=None):
                                  for dgr in GRID_GROWTH]
             out[s]["implied_growth"] = _implied(hist, inputs[s], period, wacc, g, per_share, price)
         # multiples at today's price and at this value per share, on the last reported and first projected year
-        out[s]["multiples"] = {f"{k}_{t}": _multiples(p * shares if p is not None and shares else None, -bridge, r)
+        out[s]["multiples"] = {f"{k}_{t}": _multiples(p * shares if p is not None and shares else None, -bridge, r, nci)
                                for k, p in (("price", price), ("value", ps))
                                for t, r in (("last", last), ("next", rows[0]))}
     return {"inputs": v, "price": price, "shares": shares, "ke": ke, "kd": kd, "tax": tax, "kd_after_tax": kd_at,
-            "e": e, "d": d, "we": we, "wacc": wacc, "g": g, "period": period, "error": error,
+            "e": e, "d": d, "we": we, "wacc": wacc, "wacc_build": wacc_build, "g": g, "period": period,
+            "error": error, "nci": nci,
             "borrowings": last["borrowings"], "cash": last["cash"], "investments": last["investments"],
-            "multiples": _hist_multiples(hist, market, shares),
+            "multiples": _hist_multiples(hist, market, shares, nci),
             "steps": {"wacc": GRID_WACC, "g": GRID_G, "growth": GRID_GROWTH, "margin": GRID_MARGIN,
                       "implied": IMPLIED_RANGE}, "scenarios": out}
 
@@ -523,19 +547,20 @@ MULTIPLE_LABELS = (("pe", "P/E (market cap / net profit)"),
                    ("pb", "P/B (market cap / book equity)"))
 
 
-def _multiples(mcap, ev_net, r):
+def _multiples(mcap, ev_net, r, nci=0.0):
     """P/E, EV/EBITDA, P/B of a market cap against year r's net profit, EBITDA and book equity (share capital +
-    reserves). ev_net: borrowings - cash - investments. None without a positive market cap (a negative DCF value
-    has no meaningful multiple) or when a denominator is <= 0."""
+    reserves). ev_net: borrowings - cash - investments. EV grosses the (attributable) market cap up by the minority
+    share nci, so it matches the consolidated EBITDA and the DCF's EV. None without a positive market cap (a
+    negative DCF value has no meaningful multiple) or when a denominator is <= 0."""
     if mcap is None or mcap <= 0:
         return dict.fromkeys(MULTIPLES)
     book = r["share_cap"] + r["reserves"]
     return {"pe": mcap / r["pat"] if r["pat"] > 0 else None,
-            "ev_ebitda": (mcap + ev_net) / r["ebitda"] if r["ebitda"] > 0 else None,
+            "ev_ebitda": (mcap / (1 - nci) + ev_net) / r["ebitda"] if r["ebitda"] > 0 and nci < 1 else None,
             "pb": mcap / book if book > 0 else None}
 
 
-def _hist_multiples(hist, market, shares):
+def _hist_multiples(hist, market, shares, nci=0.0):
     """Multiples at each reported year end's price, plus the median, min and max of each across the years.
     Mirrored by the MULTIPLES rows of the Valuation sheet."""
     years, ph, sh = [], market.get("price_hist") or [], market.get("shares_hist") or []
@@ -543,7 +568,7 @@ def _hist_multiples(hist, market, shares):
         p, s = (_pos(x[i]) if i < len(x) else None for x in (ph, sh))
         # ponytail: a year without Screener's adjusted share count uses today's count (typed or from the export)
         s = s or shares
-        years.append(_multiples(p * s if p and s else None, h["borrowings"] - h["cash"] - h["investments"], h))
+        years.append(_multiples(p * s if p and s else None, h["borrowings"] - h["cash"] - h["investments"], h, nci))
     out = {"hist": {k: [y[k] for y in years] for k in MULTIPLES}}
     for name, f in (("median", statistics.median), ("min", min), ("max", max)):
         out[name] = {k: f(xs) if (xs := [x for x in out["hist"][k] if x is not None]) else None for k in MULTIPLES}
@@ -722,13 +747,12 @@ def _scenario_sheet(wb, scenarios, n, years, formats, head_fill):
     return lambda s, key, j: f"Scenarios!{get_column_letter(2 + j)}{rows[s, key]}"
 
 
-def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, implied):
-    """'Valuation' sheet: the DCF of whichever scenario Model!B3 picks. Mirrors valuation().
-    at(key, j) -> Model sheet ref for column j (0 = first reported year); gm: {scenario: grid_gm} values;
-    implied: {scenario: implied_growth}."""
-    v, m, nh = {**VALUATION, **(val or {})}, co.get("market") or {}, len(co["hist"])
-    price = _pos(v["price"] if v["price"] is not None else m.get("price"))
-    shares = _pos(v["shares"] if v["shares"] is not None else m.get("shares"))
+def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill):
+    """'Valuation' sheet: the DCF of whichever scenario Model!B3 picks. Mirrors valuation(); val is its result
+    (inputs, price and shares as resolved there, and the grid_gm / implied_growth values per scenario).
+    at(key, j) -> Model sheet ref for column j (0 = first reported year)."""
+    v, m, nh = val["inputs"], co.get("market") or {}, len(co["hist"])
+    price, shares, sv = val["price"], val["shares"], val["scenarios"]
     vs = wb.create_sheet("Valuation")
     vs["A1"] = "DCF of free cash flow to firm, for the scenario picked in Model!B3"
     vs["A1"].font = Font(bold=True, size=14)
@@ -761,14 +785,22 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, imp
     put("rf", "Risk-free rate (10-yr G-sec)", v["rf"], pct, blue)
     put("erp", "Equity risk premium", v["erp"], pct, blue)
     put("beta", "Beta", v["beta"], "0.00", blue)
-    put("kd", "Cost of debt, pre-tax", f"={src('base', 'int_rate', 0)}" if v["kd"] is None else v["kd"], pct,
-        green if v["kd"] is None else blue)
+    # the default is clamped between rf and ke, like valuation()
+    put("kd", "Cost of debt, pre-tax",
+        f"=MIN(MAX({src('base', 'int_rate', 0)},{ref['rf']}),{ref['rf']}+{ref['beta']}*{ref['erp']})"
+        if v["kd"] is None else v["kd"], pct, green if v["kd"] is None else blue)
     put("tax", "Tax rate", f"={src('base', 'tax_rate', 0)}", pct, green)
     put("g", "Terminal growth", v["g"], pct, blue)
     put("mid", "Mid-year discounting (1 = yes, 0 = year end)", 1 if v["mid_year"] else 0, "0", blue)
+    yes_no = DataValidation(type="whole", operator="between", formula1="0", formula2="1", showErrorMessage=True,
+                            error="Enter 1 (mid-year) or 0 (year end).")
+    vs.add_data_validation(yes_no)
+    yes_no.add(ref["mid"])
     put("override", "WACC override (blank = build-up below)", v["wacc_override"], pct, blue)
     put("price", "Share price (Rs)", price, rs, blue)
     put("shares", "Shares (crore)", shares, rs, blue)
+    put("nci", "Minority share of profit", f"=MAX(0,-{src('base', 'mi_pct', 0)})",
+        pct, green)
 
     head("WACC BUILD-UP")
     put("ke", "Cost of equity = risk-free + beta x premium", f"={ref['rf']}+{ref['beta']}*{ref['erp']}", pct)
@@ -781,11 +813,14 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, imp
     put("wd", "Debt weight", f"=1-{ref['we']}", pct)
     put("wacc", "WACC", f"=IF(ISNUMBER({ref['override']}),{ref['override']},"
                         f"{ref['we']}*{ref['ke']}+{ref['wd']}*{ref['kd_at']})", pct, Font(bold=True))
-    ok = f"AND({ref['wacc']}>0,{ref['wacc']}-{ref['g']}>={MIN_SPREAD})"
-    put("check", "", f'=IF({ok},"","WACC must be above zero and at least 0.5 pp above terminal growth")',
-        "General", Font(bold=True, color="C00000"))
+    okw = f"AND({ref['wacc']}>0,ROUND({ref['wacc']}-{ref['g']},10)>={MIN_SPREAD})"  # see _clears()
+    check = put("check", "", None, "General", Font(bold=True, color="C00000"))
 
     head("EXPLICIT YEARS")
+    lastf = f"${col(n - 1)}${r + 1}"  # final-year FCFF: the first row below
+    ok = f"AND({okw},{lastf}>0)"
+    check.value = (f'=IF(NOT({okw}),"WACC must be above zero and at least 0.5 pp above terminal growth",'
+                   f'IF({lastf}>0,"","Final-year free cash flow is negative; a perpetuity on it has no meaning"))')
     for j, y in enumerate(years):
         vs.cell(r, 2 + j, y).font = Font(bold=True)
     rows = {}
@@ -802,7 +837,7 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, imp
             c = vs.cell(r, 2 + j, f(j))
             c.number_format = fmt
     span = lambda key: f"$B${rows[key]}:${col(n - 1)}${rows[key]}"  # noqa: E731
-    lastf, lastp, lastdf = (f"${col(n - 1)}${rows[k]}" for k in ("fcff", "period", "df"))
+    lastp, lastdf = (f"${col(n - 1)}${rows[k]}" for k in ("period", "df"))
 
     head("ENTERPRISE VALUE TO VALUE PER SHARE")
     put("pv_sum", "PV of explicit years", f'=IF({ok},SUM({span("pv")}),"")', num)
@@ -813,16 +848,17 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, imp
     put("borrowings", "Less borrowings", f"={hist('borrowings')}", num)
     put("cash", "Plus cash & bank", f"={hist('cash')}", num)
     put("investments", "Plus investments", f"={hist('investments')}", num)
-    put("equity", "Equity value",
-        f'=IF({ok},{ref["ev"]}-{ref["borrowings"]}+{ref["cash"]}+{ref["investments"]},"")', num, Font(bold=True))
+    pre = f'{ref["ev"]}-{ref["borrowings"]}+{ref["cash"]}+{ref["investments"]}'
+    put("minority", "Less minority interest (estimate)", f'=IF({ok},MAX(0,{pre})*{ref["nci"]},"")', num)
+    put("equity", "Equity value", f'=IF({ok},{pre}-{ref["minority"]},"")', num, Font(bold=True))
     put("per_share", "Value per share (Rs)", f'=IFERROR(IF({ok},{ref["equity"]}/{ref["shares"]},""),"")', rs,
         Font(bold=True))
-    put("upside", "Upside vs share price",
+    put("upside", f"Upside: value at the {labels(co['dates'])[-1]} year end vs price at export",
         f'=IFERROR(IF(ISNUMBER({ref["per_share"]}),{ref["per_share"]}/{ref["price"]}-1,""),"")', pct)
     put("tv_share", "Terminal value share of EV", f'=IFERROR(IF({ref["ev"]}>0,{ref["pv_tv"]}/{ref["ev"]},""),"")', pct)
     # ponytail: the reverse DCF is a search over whole projections, so like the second grid it ships as values
-    x = ['""' if implied[s] is None else repr(implied[s]) for s in SCENARIOS]
-    put("implied", "Revenue growth implied by share price", f"=CHOOSE(Model!$B$3,{','.join(x)})", pct)
+    x = ['""' if sv[s]["implied_growth"] is None else repr(sv[s]["implied_growth"]) for s in SCENARIOS]
+    put("implied", "Revenue growth implied by share price at export", f"=CHOOSE(Model!$B$3,{','.join(x)})", pct)
     vs.cell(r, 3, "Flat every projected year, other inputs as set; value at export (re-run in the app)").font = Font(
         italic=True, color="808080")
 
@@ -837,10 +873,11 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, imp
         c.number_format, c.font = pct, Font(bold=True)
         for i in range(len(GRID_G)):
             w, g = f"$A{r}", f"{col(i)}${top}"
+            eq = (f'(SUMPRODUCT({span("fcff")},1/(1+{w})^{span("period")})+{lastf}*(1+{g})/({w}-{g})/(1+{w})^{lastp}'
+                  f'-{ref["borrowings"]}+{ref["cash"]}+{ref["investments"]})')  # equity before minorities
             vs.cell(r, 2 + i, (
-                f'=IF(AND({w}>0,{w}-{g}>={MIN_SPREAD}),IFERROR((SUMPRODUCT({span("fcff")},1/(1+{w})^{span("period")})'
-                f'+{lastf}*(1+{g})/({w}-{g})/(1+{w})^{lastp}-{ref["borrowings"]}+{ref["cash"]}+{ref["investments"]})'
-                f'/{ref["shares"]},""),"")')).number_format = rs
+                f'=IF(AND({w}>0,ROUND({w}-{g},10)>={MIN_SPREAD},{lastf}>0),'
+                f'IFERROR(({eq}-MAX(0,{eq})*{ref["nci"]})/{ref["shares"]},""),"")')).number_format = rs
 
     # ponytail: growth x margin needs a re-run of the whole projection per cell, so it ships as values
     # (one set per scenario, picked by the selector); editing inputs in Excel doesn't move it
@@ -855,7 +892,7 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, imp
         r += 1
         vs.cell(r, 1, f"{dgr * 100:+g} pp").font = Font(bold=True)
         for i in range(len(GRID_MARGIN)):
-            x = ['""' if gm[s][k][i] is None else repr(gm[s][k][i]) for s in SCENARIOS]
+            x = ['""' if sv[s]["grid_gm"][k][i] is None else repr(sv[s]["grid_gm"][k][i]) for s in SCENARIOS]
             vs.cell(r, 2 + i, f"=CHOOSE(Model!$B$3,{','.join(x)})").number_format = rs
 
     # multiples: every reported year at its year-end price, then today's price and the DCF value against the last
@@ -872,7 +909,8 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, imp
         - investments ("" when cap is blank or <= 0, or a denominator is <= 0)."""
         x = lambda key: model_at(key, j)  # noqa: E731
         book = f'{x("share_cap")}+{x("reserves")}'
-        num, den = {"pe": (cap, x("pat")), "ev_ebitda": (f"({cap}+{net})", x("ebitda")), "pb": (cap, book)}[k]
+        num, den = {"pe": (cap, x("pat")), "ev_ebitda": (f"({cap}/(1-{ref['nci']})+{net})", x("ebitda")),
+                    "pb": (cap, book)}[k]
         return f'=IFERROR(IF(AND(ISNUMBER({cap}),{cap}>0,{den}>0),{num}/({den}),""),"")'
 
     for key, label, fmt, f in (
@@ -993,9 +1031,8 @@ def to_excel(co, scenarios, n=5, active="base", val=None):
     ex = {s: expand(scenarios[s], n) for s in SCENARIOS}
     v = valuation({s: project(co["hist"], ex[s], n) for s in SCENARIOS}, co["hist"], val, ex["base"],
                   co.get("market"), inputs=ex)
-    _valuation_sheet(wb, co, n, val, src, lambda k, j: f"{get_column_letter(2 + j)}{rows[k]}", headers[nh:],
-                     formats, head_fill, {s: x["grid_gm"] for s, x in v["scenarios"].items()},
-                     {s: x["implied_growth"] for s, x in v["scenarios"].items()})
+    _valuation_sheet(wb, co, n, v, src, lambda k, j: f"{get_column_letter(2 + j)}{rows[k]}", headers[nh:],
+                     formats, head_fill)
     cash_proj = f"{get_column_letter(2 + nh)}{rows['cash']}:{get_column_letter(1 + len(headers))}{rows['cash']}"
     ws.conditional_formatting.add(cash_proj, CellIsRule(operator="lessThan", formula=["0"],
                                                         font=Font(color="C00000", bold=True),

@@ -235,6 +235,21 @@ def main():
         for j, c in enumerate(projs[s]):  # incl. the per-year driver cells picked by CHOOSE
             _same(ws, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ex[s].items()}}, (s, j))
         _same_valuation(ws.parent["Valuation"], model.valuation(projs, co["hist"], None, ex["base"], co["market"], ex), s)
+    edge = {s: dict(p) for s, p in seeded.items()}
+    edge["base"].update(int_rate={"start": 0.3, "end": None}, mi_pct={"start": -0.1, "end": None})
+    edge["bear"]["capex_pct"] = {"start": 0.4, "end": None}
+    ee = {s: model.expand(edge[s], 5) for s in model.SCENARIOS}
+    ve = {"wacc_override": 0.055, "g": 0.05}  # exactly 0.5 pp, also on the grid's edges
+    vedge = model.valuation({s: model.project(co["hist"], ee[s], 5) for s in model.SCENARIOS}, co["hist"], ve,
+                            ee["base"], co["market"], ee)
+    assert vedge["kd"] == vedge["ke"] and vedge["nci"] == 0.1 and vedge["scenarios"]["bear"]["error"], vedge["kd"]
+    for i, s in enumerate(model.SCENARIOS):
+        (tmp / f"edge-{s}").mkdir()
+        (tmp / f"edge-{s}" / "model.xlsx").write_bytes(model.to_excel(co, edge, n=5, active=s, val=ve))
+        wse = recalc(tmp / f"edge-{s}" / "model.xlsx", tmp / f"edge-{s}" / "calc")
+        _same_valuation(wse.parent["Valuation"], vedge, s)
+    dv = wse.parent["Valuation"].data_validations.dataValidation
+    assert any("B" in str(d.sqref) and d.formula2 == "1" for d in dv), dv  # the mid-year cell takes 0 or 1 only
     for j, h in enumerate(co["hist"]):  # historical ratio formulas, incl. first year on closing balances
         _same(ws, rows, 2 + j, {k: h[k] for k in ("ebitda", *RETURNS)}, ("hist", j))
     # zero interest and negative EBITDA must come out blank in both
@@ -244,7 +259,7 @@ def main():
     (tmp / "zero").mkdir()
     # ... with no market data (book equity weights, no per-share value), typed cost of debt, year-end discounting
     bare = dict(co, market=None)
-    # typed shares without a price: no upside or price multiples; the value is negative, so no value multiples
+    # typed shares without a price: no upside or price multiples; the final FCFF is negative, so no value
     v0 = {"kd": 0.09, "mid_year": False, "rf": 0.07, "beta": 1.3, "g": 0.03, "shares": 5.0}
     (tmp / "zero" / "model.xlsx").write_bytes(model.to_excel(bare, dict.fromkeys(model.SCENARIOS, zero), n=2, val=v0))
     ws0 = recalc(tmp / "zero" / "model.xlsx", tmp / "calc0")
@@ -255,7 +270,8 @@ def main():
                            dict.fromkeys(model.SCENARIOS, flat0))
     m0 = val0["scenarios"]["base"]["multiples"]
     assert val0["e"] == co["hist"][-1]["share_cap"] + co["hist"][-1]["reserves"] and val0["kd"] == 0.09, val0
-    assert val0["scenarios"]["base"]["per_share"] < 0 and {x for b in m0.values() for x in b.values()} == {None}, m0
+    assert val0["scenarios"]["base"]["error"] and val0["scenarios"]["base"]["per_share"] is None, val0["scenarios"]
+    assert {x for b in m0.values() for x in b.values()} == {None}, m0
     _same_valuation(ws0.parent["Valuation"], val0, "base")
     # debt faded to zero over 10 years: float residue (1e-14 cr) must read as no interest cover, in both
     payoff = {k: {"start": v, "end": None} for k, v in model.default_assumptions(co["hist"]).items()}
@@ -286,7 +302,9 @@ def valuation_check(co, projs, ex):
     v = model.valuation(projs, co["hist"], None, ex["base"], co["market"], ex)
     last, tax = co["hist"][-1], ex["base"]["tax_rate"][0]
     we = 8000 / 8200
-    wacc = we * (0.065 + 1.0 * 0.07) + (1 - we) * ex["base"]["int_rate"][0] * (1 - tax)
+    kd = min(max(ex["base"]["int_rate"][0], 0.065), 0.135)  # the default kd sits between rf and ke
+    wacc = we * (0.065 + 1.0 * 0.07) + (1 - we) * kd * (1 - tax)
+    assert v["wacc_build"] == v["wacc"], v["wacc_build"]
     assert abs(v["wacc"] - wacc) < 1e-15 and v["error"] is None and v["period"] == [0.5, 1.5, 2.5, 3.5, 4.5], v
     for s, rows in projs.items():
         f = [r["fcff"] for r in rows]
@@ -297,6 +315,7 @@ def valuation_check(co, projs, ex):
         pv = sum(x / (1 + wacc) ** (t + 0.5) for t, x in enumerate(f))
         tv = f[-1] * 1.05 / (wacc - 0.05) / (1 + wacc) ** 4.5
         eq = pv + tv - last["borrowings"] + last["cash"] + last["investments"]
+        eq -= max(0.0, eq) * max(0.0, -ex["base"]["mi_pct"][0])  # minorities' share of profit
         got = v["scenarios"][s]
         assert abs(got["ev"] - (pv + tv)) < 1e-9 and abs(got["per_share"] - eq / 5) < 1e-9, (s, got["ev"], pv + tv)
         assert abs(got["upside"] - (eq / 5 / 1600 - 1)) < 1e-12 and got["grid"][2][2] == got["per_share"], s
@@ -315,12 +334,14 @@ def valuation_check(co, projs, ex):
     assert v["scenarios"]["bull"]["per_share"] > v["scenarios"]["base"]["per_share"] > v["scenarios"]["bear"]["per_share"]
     # reverse DCF: the implied flat growth, plugged back in, gives today's price (within 0.1%)
     # bear (12% capex) can't reach Rs 1,600 at any growth: value barely moves with it, so no solution in range
-    assert v["scenarios"]["bear"]["implied_growth"] is None
-    for s in ("base", "bull"):
-        x = v["scenarios"][s]["implied_growth"]
-        back = model.valuation({s: model.project(co["hist"], dict(ex[s], growth=x), 5)}, co["hist"], None, ex["base"],
-                               co["market"])["scenarios"][s]["per_share"]
-        assert -0.3 < x < 0.8 and abs(back / 1600 - 1) < 0.001, (s, x, back)
+    # base tops out at Rs 1,524 at +80% once minorities take their 5%, so it is checked at a typed Rs 1,000
+    assert v["scenarios"]["bear"]["implied_growth"] is None and v["scenarios"]["base"]["implied_growth"] is None
+    for s, price in (("base", 1000.0), ("bull", 1600.0)):
+        x = model.valuation(projs, co["hist"], {"price": price}, ex["base"], co["market"], ex)["scenarios"][s][
+            "implied_growth"]
+        back = model.valuation({s: model.project(co["hist"], dict(ex[s], growth=x), 5)}, co["hist"], {"price": price},
+                               ex["base"], co["market"])["scenarios"][s]["per_share"]
+        assert -0.3 < x < 0.8 and abs(back / price - 1) < 0.001, (s, x, back)
     # no solution in range, no price, and a WACC error all come back as None
     far = model.valuation(projs, co["hist"], {"price": 1e7}, ex["base"], co["market"], ex)
     assert far["scenarios"]["base"]["implied_growth"] is None, far["scenarios"]["base"]["implied_growth"]
@@ -328,7 +349,8 @@ def valuation_check(co, projs, ex):
     # multiples, by hand: FY2016 at Rs 500 x 5 cr = 2,500 cr against net profit 120, EBITDA 200, book 450
     h0, mu = co["hist"][0], v["multiples"]
     assert abs(mu["hist"]["pe"][0] - 2500 / 120) < 1e-9 and abs(mu["hist"]["pb"][0] - 2500 / 450) < 1e-9, mu
-    assert abs(mu["hist"]["ev_ebitda"][0] - (2500 + 200 - h0["cash"] - 60) / 200) < 1e-9, mu
+    # EV grosses the market cap up by the 5% minority share, to match consolidated EBITDA
+    assert abs(mu["hist"]["ev_ebitda"][0] - (2500 / 0.95 + 200 - h0["cash"] - 60) / 200) < 1e-9, mu
     assert mu["hist"]["pe"][-1] is None and mu["min"]["pe"] == mu["hist"]["pe"][-2]  # last year has no price
     assert mu["median"]["pe"] == statistics.median(mu["hist"]["pe"][:-1]) and mu["max"]["pe"] == 2500 / 120
     for s in model.SCENARIOS:
@@ -358,6 +380,32 @@ def valuation_check(co, projs, ex):
     assert bad["scenarios"]["bear"]["implied_growth"] is None
     assert "above zero" in model.valuation(projs, co["hist"], {"wacc_override": -0.01, "g": -0.1}, ex["base"],
                                            None)["error"]
+    # exactly 0.5 pp clears, whatever the float residue (0.055 - 0.05 = 0.00499999...)
+    for w, g in ((0.055, 0.05), (0.105, 0.10), (0.13, 0.125)):
+        edge = model.valuation(projs, co["hist"], {"wacc_override": w, "g": g}, ex["base"], co["market"])
+        assert edge["error"] is None and edge["scenarios"]["base"]["per_share"] is not None, (w, g, edge["error"])
+    assert "no WACC" in model.valuation(projs, co["hist"], {"price": 1e308, "shares": 1e308}, ex["base"], None)["error"]
+    # a negative final-year FCFF gets no perpetuity: that scenario only is blank, with its own error
+    burn = dict(projs, bear=model.project(co["hist"], dict(ex["bear"], capex_pct=0.4), 5))
+    b = model.valuation(burn, co["hist"], None, ex["base"], co["market"], dict(ex, bear=dict(ex["bear"], capex_pct=0.4)))
+    assert burn["bear"][-1]["fcff"] < 0 and b["error"] is None and b["scenarios"]["base"]["error"] is None, b["error"]
+    bb = b["scenarios"]["bear"]
+    assert "negative" in bb["error"] and bb["per_share"] is None and bb["grid"] == [[None] * 5] * 5, bb["error"]
+    assert bb["implied_growth"] is None and b["scenarios"]["base"]["per_share"] == v["scenarios"]["base"]["per_share"]
+    # the default kd is clamped between rf and ke; a typed one isn't
+    for rate, want in ((0.30, 0.135), (0.01, 0.065)):
+        hi = dict(ex["base"], int_rate=[rate] * 5)
+        assert abs(model.valuation(projs, co["hist"], None, hi, co["market"])["kd"] - want) < 1e-15, rate
+    assert model.valuation(projs, co["hist"], {"kd": 0.3}, ex["base"], co["market"])["kd"] == 0.3
+    # minorities take their share of profit out of equity (base, first year); never out of a negative equity
+    mb = dict(ex["base"], mi_pct=[-0.1] * 5)
+    mv = model.valuation(projs, co["hist"], None, mb, co["market"])
+    x, pre = mv["scenarios"]["base"], v["scenarios"]["base"]["ev"] - 200 + last["cash"] + last["investments"]
+    assert mv["nci"] == 0.1 and abs(x["minority"] - 0.1 * pre) < 1e-9 and abs(x["equity"] - 0.9 * pre) < 1e-9, x
+    assert abs(x["multiples"]["value_last"]["ev_ebitda"] - x["ev"] / last["ebitda"]) < 1e-9  # EV grossed back up
+    debt = [*co["hist"][:-1], dict(last, borrowings=1e5)]  # net debt above EV
+    neg = model.valuation(projs, debt, None, mb, co["market"])["scenarios"]["base"]
+    assert neg["equity"] < 0 and neg["minority"] == 0, (neg["equity"], neg["minority"])
 
 
 def library_check(root, co, scenarios):
@@ -386,6 +434,10 @@ def library_check(root, co, scenarios):
          "saved_at": "2026-10-14T10:00:00"}))
     assert server.load_model("old-co/2026-10-14", root).model_dump(mode="json")["valuation"] == model.VALUATION
     assert [m["id"] for m in server.list_models(root)] == ["old-co/2026-10-14"]
+    # valuation inputs that overflow to inf are a 422, not a 500 from the JSON encoder
+    tiny = server.ModelRequest.model_validate({"company": company, "scenarios": scenarios,
+                                               "valuation": {"shares": 1e-320}})
+    fails(lambda _root: tiny.dcf(*tiny.projection()), 422)
     server.delete_model("old-co/2026-10-14", root)
     val = dict(model.VALUATION, beta=1.2, kd=0.085, mid_year=False, wacc_override=0.12, price=99.5, shares=3.25)
     data = {"version": 4, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
@@ -465,13 +517,14 @@ def library_check(root, co, scenarios):
 
 RETURNS = ("roe", "roce", "asset_turnover", "nd_ebitda", "int_cover")
 VAL_CELLS = {"Cost of debt, pre-tax": "kd", "Tax rate": "tax", "Share price (Rs)": "price", "Shares (crore)": "shares",
+             "Minority share of profit": "nci",
              "Cost of equity = risk-free + beta x premium": "ke", "Cost of debt after tax": "kd_after_tax",
              "Equity (market cap; book equity if no price)": "e", "Debt (borrowings)": "d", "Equity weight": "we",
              "WACC": "wacc", "Less borrowings": "borrowings", "Plus cash & bank": "cash",
              "Plus investments": "investments"}
 VAL_SCEN = {"PV of explicit years": "pv_sum", "Terminal value (Gordon growth on final-year FCFF)": "tv",
-            "PV of terminal value": "pv_tv", "Enterprise value": "ev", "Equity value": "equity",
-            "Value per share (Rs)": "per_share", "Upside vs share price": "upside",
+            "PV of terminal value": "pv_tv", "Enterprise value": "ev", "Less minority interest (estimate)": "minority",
+            "Equity value": "equity", "Value per share (Rs)": "per_share", "Upside: value at": "upside",
             "Terminal value share of EV": "tv_share", "Revenue growth implied by share price": "implied_growth"}
 VAL_YEARS = {"Free cash flow to firm": "fcff", "Discount factor": "df", "Present value": "pv"}
 
@@ -481,7 +534,9 @@ def _same_valuation(vs, v, s):
     at = {c.value: c.row for c in vs["A"] if isinstance(c.value, str)}
     sv, n = v["scenarios"][s], len(v["period"])
     cells = [(at[label], 2, v[k]) for label, k in VAL_CELLS.items()]
-    cells += [(at[label], 2, sv[k]) for label, k in VAL_SCEN.items()]
+    # a label that carries the year end is matched by its start
+    cells += [(at.get(label) or next(r for x, r in at.items() if x.startswith(label)), 2, sv[k])
+              for label, k in VAL_SCEN.items()]
     cells += [(at["Discount period (years)"], 2 + j, p) for j, p in enumerate(v["period"])]
     cells += [(at[label], 2 + j, None if sv[k] is None else sv[k][j]) for label, k in VAL_YEARS.items() for j in range(n)]
     top = next(r for label, r in at.items() if label.startswith("VALUE PER SHARE (Rs): WACC"))

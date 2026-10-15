@@ -18,16 +18,21 @@ function Field({ id, label, unit, value, fallback, nullable, onCommit }: {
 }) {
   const shown = value == null ? '' : toText(value, unit)
   const [draft, setDraft] = useState(shown)
+  const [bad, setBad] = useState(false) // the last typed value wasn't a number
   const editing = useRef(false)
   useEffect(() => { if (!editing.current) setDraft(shown) }, [shown])
   const commit = () => {
     if (!editing.current) { setDraft(shown); return }
     editing.current = false
-    const text = (unit === '%' ? draft : draft.replace(/,/g, '')).trim()
+    // the unit printed beside the box may be typed too: "Rs. 1,600", "5%". Commas are grouping outside % fields
+    const t = draft.trim().replace(/^rs\.?\s*/i, '').replace(/\s*%$/, '')
+    const text = (unit === '%' ? t : t.replace(/,/g, '')).trim()
     if (!text && nullable) { onCommit(null); return }
     const n = /^-?(\d+\.?\d*|\.\d+)$/.test(text) ? parseFloat(text) : NaN
     // price and shares must be positive; the server refuses anything else
-    if (Number.isFinite(n) && (unit === '%' || unit === '' || n > 0)) onCommit(unit === '%' ? n / 100 : n)
+    const ok = Number.isFinite(n) && (unit === '%' || unit === '' || n > 0)
+    setBad(!ok)
+    if (ok) onCommit(unit === '%' ? n / 100 : n)
     else setDraft(shown)
   }
   return (
@@ -35,8 +40,8 @@ function Field({ id, label, unit, value, fallback, nullable, onCommit }: {
       <span className="vfield-label">{label}</span>
       <span className="vfield-box">
         {unit === 'Rs' && <span className="unit">Rs</span>}
-        <input id={id} inputMode="decimal" value={draft} placeholder={fallback}
-          onFocus={e => { editing.current = true; e.currentTarget.select() }}
+        <input id={id} inputMode="decimal" value={draft} placeholder={fallback} aria-describedby={bad ? `${id}-bad` : undefined}
+          onFocus={e => { editing.current = true; setBad(false); e.currentTarget.select() }}
           onChange={e => setDraft(e.target.value)} onBlur={commit}
           onKeyDown={e => {
             if (e.key === 'Enter') e.currentTarget.blur()
@@ -44,6 +49,7 @@ function Field({ id, label, unit, value, fallback, nullable, onCommit }: {
           }} />
         {unit && unit !== 'Rs' && <span className="unit">{unit}</span>}
       </span>
+      <span id={`${id}-bad`} className="vfield-bad" role="status">{bad ? `Not ${unit === '%' || unit === '' ? 'a number' : 'a positive number'}; kept the old value` : ''}</span>
     </label>
   )
 }
@@ -63,19 +69,24 @@ interface Props {
 
 export default function ValuationPanel({ inputs, defaults, v, market, active, asOf, next, growth, n, onChange }: Props) {
   const set = (k: keyof ValInputs) => (x: number | null) => onChange(p => ({ ...p, [k]: x }))
-  const buildUp = v ? v.we * v.ke + (1 - v.we) * v.kd_after_tax : null
+  const buildUp = v ? v.wacc_build : null
   const edited = JSON.stringify(inputs) !== JSON.stringify(defaults)
+  const head = useRef<HTMLHeadingElement>(null)
+  const burn = v ? ORDER.filter(s => v.scenarios[s].error) : [] // scenarios with no terminal value (same message)
   const pct = (x: number | null | undefined) => (x == null ? '' : toText(x, '%'))
 
   return (
     <section className="valuation" aria-labelledby="val-head">
       <div className="val-top">
-        <h2 id="val-head">Valuation</h2>
-        {edited && <button type="button" className="link small" onClick={() => onChange(() => defaults)}>Reset valuation inputs</button>}
+        <h2 id="val-head" tabIndex={-1} ref={head}>Valuation</h2>
+        {/* the button unmounts once inputs match the defaults, so focus moves to the heading */}
+        {edited && <button type="button" className="link small"
+          onClick={() => { onChange(() => defaults); head.current?.focus() }}>Reset valuation inputs</button>}
       </div>
       <p className="muted small">
-        Discounted cash flow of free cash flow to firm, valued at the {asOf} year end. The same inputs apply to all
-        three scenarios. Blank fields use the value shown in grey.
+        Discounted cash flow of free cash flow to firm, valued at the {asOf} year end; upside compares that value with
+        the share price at export (or the one you type). The same inputs apply to all three scenarios. Blank fields
+        use the value shown in grey.
       </p>
 
       <div className="wacc" role="group" aria-label="WACC and terminal value inputs">
@@ -100,7 +111,7 @@ export default function ValuationPanel({ inputs, defaults, v, market, active, as
       {v && (
         <p className="wacc-sum">
           Cost of equity {fmt(v.ke, 'pct')} · debt {fmt(v.kd_after_tax, 'pct')} after {fmt(v.tax, 'pct')} tax ·
-          weights {fmt(v.we, 'pct')} equity ({v.price && v.shares ? 'market cap' : 'book, no share price'}), {fmt(1 - v.we, 'pct')} debt ·{' '}
+          weights {fmt(v.we, 'pct')} equity ({v.price && v.shares ? 'market cap' : v.price ? 'book, no share count' : 'book, no share price'}), {fmt(1 - v.we, 'pct')} debt ·{' '}
           <b>WACC <span className="pencil-num">{fmt(v.wacc, 'pct')}</span></b>
           {inputs.wacc_override != null && <> (typed; the build-up gives {fmt(buildUp, 'pct')})</>}
         </p>
@@ -108,6 +119,10 @@ export default function ValuationPanel({ inputs, defaults, v, market, active, as
 
       {v?.error && <p className="val-error" role="alert">{v.error}</p>}
       {v && !v.error && <>
+        {burn.length > 0 && (
+          <p className="val-error">{burn.map((s, i) => (i ? NAMES[s].toLowerCase() : NAMES[s])).join(', ').replace(/, (?=[^,]*$)/, ' and ')}{' '}
+            {burn.length > 1 ? 'cases' : 'case'}: {v.scenarios[burn[0]].error}</p>
+        )}
         {v.shares == null
           ? <p className="val-empty">Enter shares to get a per-share value.</p>
           : <Ruler v={v} active={active} />}
@@ -142,7 +157,9 @@ export default function ValuationPanel({ inputs, defaults, v, market, active, as
         {v.shares != null && v.multiples && next && <Multiples v={v} active={active} asOf={asOf} next={next} />}
         <p className="muted small">
           Equity value = enterprise value − borrowings Rs {money(v.borrowings)} cr + cash Rs {money(v.cash)} cr +
-          investments Rs {money(v.investments)} cr ({asOf}). Terminal value: Gordon growth at {fmt(v.g, 'pct')} on the
+          investments Rs {money(v.investments)} cr ({asOf})
+          {v.nci > 0 && <> − minority interest, estimated as minorities’ {fmt(v.nci, 'pct')} share of profit</>}.
+          Terminal value: Gordon growth at {fmt(v.g, 'pct')} on the
           final year’s free cash flow. Free cash flow to firm = EBIT after tax + depreciation − capex − change in working
           capital; other income is left out because its cash and investments are added here instead.
         </p>
@@ -180,7 +197,7 @@ function Split({ share }: { share: number | null }) {
   )
 }
 
-const PAD = 12, ROW = 17, CH = 7 // label row height; approx. width of one 12px mono character
+const PAD = 12, ROW = 17, CH = 7.5 // label row height; width of one 12px mono character (7.2) plus the halo
 
 /** One axis: today's price in ink, each scenario's value per share in pencil, labels stacked so they never collide. */
 function Ruler({ v, active }: { v: Valuation; active: Scenario }) {
@@ -202,6 +219,7 @@ function Ruler({ v, active }: { v: Valuation; active: Scenario }) {
       }]
     }),
   ]
+  if (!marks.length) return null // no price and no scenario value
   const vals = marks.map(m => m.value)
   let lo = Math.min(...vals), hi = Math.max(...vals)
   const pad = (hi - lo || Math.abs(hi) || 1) * 0.12
@@ -217,8 +235,10 @@ function Ruler({ v, active }: { v: Valuation; active: Scenario }) {
     let row = ends.findIndex(e => cx - half > e + 8)
     if (row < 0) row = ends.length
     ends[row] = cx + half
-    return { ...m, cx, row }
+    return { ...m, cx, row, half }
   })
+  const base = (m: { row: number }) => 10 + m.row * ROW + 11 // label baseline
+  const cls = (m: { ink: boolean; key: string }) => `${m.ink ? 'mark-ink' : 'mark-pencil'}${m.key === active ? ' is-active' : ''}`
   const rows = Math.max(1, ends.length)
   const axis = 10 + rows * ROW + 14
   const H = axis + 30
@@ -234,16 +254,19 @@ function Ruler({ v, active }: { v: Valuation; active: Scenario }) {
             <text className="ruler-num" x={x(t)} y={axis + 18} textAnchor="middle">{money(t)}</text>
           </g>
         ))}
-        {placed.map(m => {
-          const y = 10 + m.row * ROW + 11 // label baseline
-          return (
-            <g key={m.key} className={`${m.ink ? 'mark-ink' : 'mark-pencil'}${m.key === active ? ' is-active' : ''}`}>
-              <line className="mark-lead" x1={x(m.value)} x2={x(m.value)} y1={y + 4} y2={axis + (m.ink ? 7 : 0)} />
-              <circle className="mark-dot" cx={x(m.value)} cy={axis} r={m.ink ? 4 : 4.5} />
-              <text className="mark-text" x={m.cx} y={y} textAnchor="middle">{m.text}</text>
-            </g>
-          )
-        })}
+        {/* leads and dots first, then every label on a sheet-coloured box, so no lead runs through a label */}
+        {placed.map(m => (
+          <g key={m.key} className={cls(m)}>
+            <line className="mark-lead" x1={x(m.value)} x2={x(m.value)} y1={base(m) + 4} y2={axis + (m.ink ? 7 : 0)} />
+            <circle className="mark-dot" cx={x(m.value)} cy={axis} r={m.ink ? 4 : 4.5} />
+          </g>
+        ))}
+        {placed.map(m => (
+          <g key={m.key} className={cls(m)}>
+            <rect className="mark-bg" x={m.cx - m.half} y={base(m) - 11} width={2 * m.half} height={14} />
+            <text className="mark-text" x={m.cx} y={base(m)} textAnchor="middle">{m.text}</text>
+          </g>
+        ))}
       </svg>
     </div>
   )
@@ -253,7 +276,7 @@ const pp = (d: number) => (d === 0 ? 'as set' : `${d > 0 ? '+' : '−'}${Math.ab
 
 /** The two 5 x 5 grids for the active scenario: valuation inputs, then operating assumptions. */
 function Sensitivity({ v, active }: { v: Valuation; active: Scenario }) {
-  const x = v.scenarios[active], st = v.steps
+  const x = v.scenarios[active], st = v.steps!
   return (
     <div className="sens">
       <h3>Sensitivity · {NAMES[active]} scenario</h3>

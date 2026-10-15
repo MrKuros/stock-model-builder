@@ -504,7 +504,9 @@ function OneOffs({ id, years, histYears, excluded, pending, note, onToggle }: {
 const NBSP = '\u00a0' // keeps 'Rs 13,02,344 cr' on one line
 /** Reported market data from the export, in ink. Anything Screener left out is skipped. */
 function MarketLine({ m }: { m?: Market }) {
-  if (!m?.price && !m?.shares) return <p className="market muted">No share price in this file</p>
+  // a parsed file always has one price_hist entry per year; an empty list = saved before prices were read
+  if (!m?.price_hist?.length) return <p className="market muted">Saved before share prices were read. Type the price and shares under Valuation.</p>
+  if (!m.price && !m.shares) return <p className="market muted">No share price in this file</p>
   return (
     <p className="market">
       {m.price != null && <>Rs{NBSP}{dec2(m.price)} a share</>}
