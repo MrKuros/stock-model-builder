@@ -23,6 +23,7 @@ Reported years are drawn in **ink**. Your assumptions are drawn in **blue pencil
 - **Scenarios:** base, bull and bear, shown as overlays on the chart and compared in a single sentence.
 - **Return ratios:** ROE, ROCE, asset turnover, net debt/EBITDA and interest cover, for history and projection.
 - **One-off detection:** unusual years (tax, capex, other income, margin) are flagged with robust statistics (median and MAD). You can leave them out of the defaults.
+- **DCF valuation:** free cash flow to firm discounted at a WACC you build (risk-free rate, equity risk premium, beta, cost of debt), Gordon terminal value, and a bridge to value per share. A price ruler puts today's price (ink) next to the bear, base and bull values (pencil). The Excel export has a live Valuation sheet with a WACC × growth grid.
 - **Model library:** models autosave to `models/` locally, and you can reopen any of them from the start page.
 - **Excel export:** every projected cell is a live formula. Inputs are blue, and a scenario selector switches the whole workbook between base, bull and bear.
 

@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, FiniteFloat, ValidationError, model_validator
+from pydantic import BaseModel, Field, FiniteFloat, ValidationError, model_validator
 
 import model
 
@@ -76,14 +76,29 @@ class DriverPath(BaseModel):
 
 
 Scenario = Literal["base", "bull", "bear"]
+V = model.VALUATION
+
+
+class Valuation(BaseModel):
+    """DCF inputs (model.VALUATION). kd None = base scenario's interest rate; price/shares None = market data."""
+    rf: FiniteFloat = V["rf"]
+    erp: FiniteFloat = V["erp"]
+    beta: FiniteFloat = V["beta"]
+    kd: FiniteFloat | None = V["kd"]
+    g: FiniteFloat = V["g"]
+    mid_year: bool = V["mid_year"]
+    wacc_override: FiniteFloat | None = V["wacc_override"]
+    price: FiniteFloat | None = Field(V["price"], gt=0)
+    shares: FiniteFloat | None = Field(V["shares"], gt=0)
 
 
 class ModelRequest(BaseModel):
-    """The model document (version 3) minus what the engine ignores (excluded_years, saved_at)."""
+    """The model document (version 4) minus what the engine ignores (excluded_years, saved_at)."""
     company: Company
     scenarios: dict[Scenario, dict[str, DriverPath]]
     active: Scenario = "base"
     n: int = 5
+    valuation: Valuation = Valuation()
 
     def args(self):
         if not 1 <= self.n <= 15:
@@ -106,12 +121,20 @@ class ModelRequest(BaseModel):
                                          "Try smaller values.")
         return co, sc, n, out
 
+    def dcf(self, co, sc, n, out):
+        return model.valuation(out, co["hist"], self.valuation.model_dump(), model.expand(sc["base"], n), co["market"])
+
 
 class ModelDoc(ModelRequest):
-    """The full model document as saved in the library."""
-    version: Literal[3]
+    """The full model document as saved in the library. Version 3 (before valuation) loads with default inputs."""
+    version: Literal[3, 4]
     excluded_years: list[str] = []
     saved_at: str | None = None
+
+    @model_validator(mode="after")
+    def _migrate(self):
+        self.version = 4  # v3 -> v4 only added "valuation", which already defaulted
+        return self
 
 
 def _company_payload(co, excluded=()):
@@ -124,6 +147,7 @@ def _company_payload(co, excluded=()):
         "defaults": model.default_assumptions(co["hist"], exclude=set(excluded), labels=labels),
         "checks": model.data_checks(co),
         "oneoffs": model.detect_oneoffs(co["hist"], labels),
+        "valuation": model.VALUATION,  # defaults for a new document
         "drivers": model.DRIVERS,
         "layout": model.LAYOUT,
     }
@@ -170,15 +194,16 @@ def defaults(req: DefaultsRequest):
 
 @app.post("/api/project")
 def project(req: ModelRequest):
-    co, _, n, out = req.projection()
-    return {"years": [model.fy(d, True) for d in model.projected_dates(co, n)], "scenarios": out}
+    co, sc, n, out = req.projection()
+    return {"years": [model.fy(d, True) for d in model.projected_dates(co, n)], "scenarios": out,
+            "valuation": req.dcf(co, sc, n, out)}
 
 
 @app.post("/api/export")
 def export(req: ModelRequest):
     co, sc, n, _ = req.projection()
     safe = re.sub(r"[^\w\- ]+", "", co["name"], flags=re.ASCII).strip() or "company"  # headers are latin-1
-    return Response(model.to_excel(co, sc, n, req.active),
+    return Response(model.to_excel(co, sc, n, req.active, req.valuation.model_dump()),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{safe} model.xlsx"'})
 

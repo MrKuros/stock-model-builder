@@ -3,7 +3,7 @@ import { money, shortYear } from './lib'
 
 const H = 300, M = { top: 28, right: 8, bottom: 30, left: 64 }
 
-function niceTicks(lo: number, hi: number) {
+export function niceTicks(lo: number, hi: number) {
   const raw = (hi - lo || 1) / 4
   const mag = 10 ** Math.floor(Math.log10(raw))
   const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw)!

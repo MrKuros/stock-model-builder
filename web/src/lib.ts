@@ -30,15 +30,31 @@ export function seed(base: Paths): Scenarios {
 /** Share price (Rs) and count (crore) from the export; null when Export left them out. */
 export interface Market { price: number | null; shares: number | null; price_hist: (number | null)[]; shares_hist: (number | null)[] }
 export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market }
+/** DCF inputs (model.VALUATION). kd null = base scenario's interest rate; price/shares null = market data. */
+export interface ValInputs {
+  rf: number; erp: number; beta: number; kd: number | null; g: number; mid_year: boolean
+  wacc_override: number | null; price: number | null; shares: number | null
+}
+/** One scenario's DCF (model.valuation). Nulls when WACC doesn't clear terminal growth, or no shares. */
+export interface ScenarioValue {
+  fcff: number[]; pv: number[] | null; pv_sum: number | null; tv: number | null; pv_tv: number | null
+  ev: number | null; equity: number | null; per_share: number | null; upside: number | null; tv_share: number | null
+}
+export interface Valuation {
+  price: number | null; shares: number | null; ke: number; kd: number; tax: number; kd_after_tax: number
+  e: number; d: number; we: number; wacc: number; g: number; error: string | null
+  borrowings: number; cash: number; investments: number; scenarios: Record<Scenario, ScenarioValue>
+}
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
 export interface ModelDoc {
-  version: 3
+  version: 4
   company: Company
   n: number
   active: Scenario
   scenarios: Scenarios
   excluded_years: string[]
   saved_at: string | null
+  valuation: ValInputs
 }
 /** A reported year whose metric sits far from the company's own median (model.detect_oneoffs). */
 export interface OneOff { year: string; metric: string; value: number; typical: number; note: string }
@@ -49,6 +65,7 @@ export interface Parsed {
   defaults: Record<string, number>
   checks: string[]
   oneoffs: OneOff[]
+  valuation: ValInputs // defaults for a new document
   drivers: Driver[]
   layout: LayoutLine[]
 }
@@ -59,7 +76,7 @@ export interface ModelSummary {
 }
 /** GET /api/models/{id}: the document plus what the dashboard derives from the company. */
 export interface Opened { id?: string; doc?: ModelDoc; parsed: Parsed }
-export interface Projection { years: string[]; scenarios: Record<Scenario, Row[]> }
+export interface Projection { years: string[]; scenarios: Record<Scenario, Row[]>; valuation: Valuation }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init)

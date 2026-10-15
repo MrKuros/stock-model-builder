@@ -72,6 +72,8 @@ LAYOUT = [  # (label, key, kind); kind "head" = section title, None key = blank 
     ("Cash from financing", "cff", "num"), ("Net cash flow", "net_cf", "num"),
     ("Capex", "capex", "num"), ("Free cash flow", "fcf", "num"),
     ("Borrowed to cover cash shortfall", "revolver", "num"),
+    ("Operating EBIT (excl. other income)", "ebit", "num"), ("Operating EBIT after tax", "nopat", "num"),
+    ("Net working capital", "nwc", "num"), ("Free cash flow to firm", "fcff", "num"),
     ("", None, None),
     ("RATIOS", None, "head"),
     ("Return on equity", "roe", "pct"), ("Return on capital employed", "roce", "pct"),
@@ -417,12 +419,85 @@ def project(hist, a, n=5):
         c["cff"] = c["borrowings"] - p["borrowings"] + c["share_cap"] - p["share_cap"] - c["dividend"]
         c["net_cf"] = c["cfo"] + c["cfi"] + c["cff"]
         c["fcf"] = c["cfo"] - c["capex"]
+        # FCFF for the DCF: operating EBIT only; other income's cash and investments join in the equity bridge.
+        # ponytail: a loss year's EBIT gets a tax credit at the full rate; fine while the value rests on profit years
+        c["ebit"] = c["ebitda"] - c["dep"]
+        c["nopat"] = c["ebit"] * (1 - y["tax_rate"])
+        c["nwc"] = _nwc(c)
+        c["fcff"] = c["nopat"] + c["dep"] - c["capex"] - (c["nwc"] - _nwc(p))
         c["chk_bs"] = c["total_assets"] - c["total_liab"]
         c["chk_cash"] = p["cash"] + c["net_cf"] - c["cash"]
         c.update(returns(c, p))
         out.append(c)
         p = c
     return out
+
+
+def _nwc(r):
+    return r["receivables"] + r["inventory"] + r["other_ca"] - r["other_liab"]
+
+
+# The model document's "valuation" inputs. kd None = the base scenario's first-year interest rate;
+# price / shares None = the export's market data. Same inputs for all three scenarios.
+VALUATION = {"rf": 0.065, "erp": 0.07, "beta": 1.0, "kd": None, "g": 0.05, "mid_year": True,
+             "wacc_override": None, "price": None, "shares": None}
+MIN_SPREAD = 0.005  # WACC must beat terminal growth by 0.5 pp, or the Gordon value explodes
+GRID_WACC = (-0.02, -0.01, 0.0, 0.01, 0.02)  # sensitivity grid steps around WACC (rows) and growth (columns)
+GRID_G = (-0.01, -0.005, 0.0, 0.005, 0.01)
+
+
+def _dcf(fcff, period, w, g):
+    """PV of the explicit years and of a Gordon terminal value; None when w doesn't clear g (or isn't positive).
+    The terminal value takes the final year's discount factor: with mid-year flows that is the consistent one."""
+    if not (w > 0 and w - g >= MIN_SPREAD):
+        return None
+    df = [(1 + w) ** -p for p in period]
+    pv = [f * d for f, d in zip(fcff, df)]
+    tv = fcff[-1] * (1 + g) / (w - g)
+    return {"df": df, "pv": pv, "pv_sum": sum(pv), "tv": tv, "pv_tv": tv * df[-1], "ev": sum(pv) + tv * df[-1]}
+
+
+def valuation(projs, hist, val, base, market):
+    """DCF (free cash flow to firm) of each scenario, discounted from the last reported year end.
+    projs: {scenario: project() rows}; val: VALUATION-shaped inputs; base: the base scenario's per-year inputs
+    (expand()), for the default cost of debt and the WACC tax rate; market: the company's market data.
+    Mirrors the Valuation sheet in to_excel()."""
+    v, last = {**VALUATION, **(val or {})}, hist[-1]
+    market = market or {}
+    price = _pos(v["price"] if v["price"] is not None else market.get("price"))
+    shares = _pos(v["shares"] if v["shares"] is not None else market.get("shares"))
+    kd = base["int_rate"][0] if v["kd"] is None else v["kd"]
+    tax = base["tax_rate"][0]
+    ke, kd_at = v["rf"] + v["beta"] * v["erp"], kd * (1 - tax)
+    # ponytail: no share price -> book equity weights the WACC; a negative book counts as zero
+    e = price * shares if price and shares else max(0.0, last["share_cap"] + last["reserves"])
+    d = last["borrowings"]
+    we = e / (e + d) if e + d > 0 else 1.0
+    wacc = v["wacc_override"] if v["wacc_override"] is not None else we * ke + (1 - we) * kd_at
+    g, n = v["g"], len(next(iter(projs.values())))
+    period = [t + 1 - (0.5 if v["mid_year"] else 0) for t in range(n)]
+    bridge = -last["borrowings"] + last["cash"] + last["investments"]
+    error = None
+    if wacc <= 0:
+        error = f"WACC is {_pct(wacc)}; it must be above zero."
+    elif wacc - g < MIN_SPREAD:
+        error = (f"WACC ({_pct(wacc)}) must be at least 0.5 pp above terminal growth ({_pct(g)}). "
+                 "Lower the growth or raise the WACC.")
+    per_share = lambda ev: (ev + bridge) / shares if ev is not None and shares else None  # noqa: E731
+    out = {}
+    for s, rows in projs.items():
+        fcff = [r["fcff"] for r in rows]
+        x = _dcf(fcff, period, wacc, g) or dict.fromkeys(("df", "pv", "pv_sum", "tv", "pv_tv", "ev"))
+        ps = per_share(x["ev"])
+        out[s] = {**x, "fcff": fcff, "equity": None if x["ev"] is None else x["ev"] + bridge, "per_share": ps,
+                  "upside": ps / price - 1 if ps is not None and price else None,
+                  "tv_share": x["pv_tv"] / x["ev"] if x["ev"] and x["ev"] > 0 else None,
+                  "grid": [[per_share((_dcf(fcff, period, wacc + dw, g + dg) or {}).get("ev")) for dg in GRID_G]
+                           for dw in GRID_WACC]}
+    return {"inputs": v, "price": price, "shares": shares, "ke": ke, "kd": kd, "tax": tax, "kd_after_tax": kd_at,
+            "e": e, "d": d, "we": we, "wacc": wacc, "g": g, "period": period, "error": error,
+            "borrowings": last["borrowings"], "cash": last["cash"], "investments": last["investments"],
+            "scenarios": out}
 
 
 def projected_dates(co, n):
@@ -519,6 +594,11 @@ def _proj_formula(key, x):
         "net_cf": f'={x("cfo")}+{x("cfi")}+{x("cff")}',
         "capex": f'={x("revenue")}*{x("capex_pct")}',
         "fcf": f'={x("cfo")}-{x("capex")}',
+        "ebit": f'={x("ebitda")}-{x("dep")}',
+        "nopat": f'={x("ebit")}*(1-{x("tax_rate")})',
+        "nwc": f'={x("receivables")}+{x("inventory")}+{x("other_ca")}-{x("other_liab")}',
+        "fcff": (f'={x("nopat")}+{x("dep")}-{x("capex")}-({x("nwc")}-({x("receivables", 1)}+{x("inventory", 1)}'
+                 f'+{x("other_ca", 1)}-{x("other_liab", 1)}))'),
         "chk_bs": f'=ROUND({x("total_assets")}-{x("total_liab")},2)',
         "chk_cash": f'=ROUND({x("cash", 1)}+{x("net_cf")}-{x("cash")},2)',
         **_returns_formulas(x, True),
@@ -554,10 +634,134 @@ def _scenario_sheet(wb, scenarios, n, years, formats, head_fill):
     return lambda s, key, j: f"Scenarios!{get_column_letter(2 + j)}{rows[s, key]}"
 
 
-def to_excel(co, scenarios, n=5, active="base"):
+def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill):
+    """'Valuation' sheet: the DCF of whichever scenario Model!B3 picks. Mirrors valuation().
+    at(key, j) -> Model sheet ref for column j (0 = first reported year)."""
+    v, m, nh = {**VALUATION, **(val or {})}, co.get("market") or {}, len(co["hist"])
+    price = _pos(v["price"] if v["price"] is not None else m.get("price"))
+    shares = _pos(v["shares"] if v["shares"] is not None else m.get("shares"))
+    vs = wb.create_sheet("Valuation")
+    vs["A1"] = "DCF of free cash flow to firm, for the scenario picked in Model!B3"
+    vs["A1"].font = Font(bold=True, size=14)
+    vs["A2"] = (f"Discounted from the {labels(co['dates'])[-1]} year end. Rs crore; value per share in Rs. "
+                "Blue = input, green = from the Scenarios sheet (base, first projected year).")
+    vs["A2"].font = Font(italic=True, color="808080")
+    blue, green = Font(color="0000FF"), Font(color="008000")
+    hist = lambda k: f"Model!{at(k, nh - 1)}"  # noqa: E731
+    r, ref = 3, {}
+
+    def put(key, label, value, fmt, font=None):
+        nonlocal r
+        r += 1
+        ref[key] = f"$B${r}"
+        vs.cell(r, 1, label)
+        c = vs.cell(r, 2, value)
+        c.number_format, c.font = fmt, font or Font()
+        return c
+
+    def head(title):
+        nonlocal r
+        r += 2
+        for j in range(n + 2):
+            vs.cell(r, 1 + j).fill = head_fill
+        vs.cell(r, 1, title).font = Font(bold=True)
+
+    pct, num, rs = formats["pct"], formats["num"], "#,##0.00;(#,##0.00);-"
+    r -= 1
+    head("INPUTS")
+    put("rf", "Risk-free rate (10-yr G-sec)", v["rf"], pct, blue)
+    put("erp", "Equity risk premium", v["erp"], pct, blue)
+    put("beta", "Beta", v["beta"], "0.00", blue)
+    put("kd", "Cost of debt, pre-tax", f"={src('base', 'int_rate', 0)}" if v["kd"] is None else v["kd"], pct,
+        green if v["kd"] is None else blue)
+    put("tax", "Tax rate", f"={src('base', 'tax_rate', 0)}", pct, green)
+    put("g", "Terminal growth", v["g"], pct, blue)
+    put("mid", "Mid-year discounting (1 = yes, 0 = year end)", 1 if v["mid_year"] else 0, "0", blue)
+    put("override", "WACC override (blank = build-up below)", v["wacc_override"], pct, blue)
+    put("price", "Share price (Rs)", price, rs, blue)
+    put("shares", "Shares (crore)", shares, rs, blue)
+
+    head("WACC BUILD-UP")
+    put("ke", "Cost of equity = risk-free + beta x premium", f"={ref['rf']}+{ref['beta']}*{ref['erp']}", pct)
+    put("kd_at", "Cost of debt after tax", f"={ref['kd']}*(1-{ref['tax']})", pct)
+    put("e", "Equity (market cap; book equity if no price)",
+        f"=IF(AND(ISNUMBER({ref['price']}),ISNUMBER({ref['shares']})),{ref['price']}*{ref['shares']},"
+        f"MAX(0,{hist('share_cap')}+{hist('reserves')}))", num)
+    put("d", "Debt (borrowings)", f"={hist('borrowings')}", num)
+    put("we", "Equity weight", f"=IF({ref['e']}+{ref['d']}>0,{ref['e']}/({ref['e']}+{ref['d']}),1)", pct)
+    put("wd", "Debt weight", f"=1-{ref['we']}", pct)
+    put("wacc", "WACC", f"=IF(ISNUMBER({ref['override']}),{ref['override']},"
+                        f"{ref['we']}*{ref['ke']}+{ref['wd']}*{ref['kd_at']})", pct, Font(bold=True))
+    ok = f"AND({ref['wacc']}>0,{ref['wacc']}-{ref['g']}>={MIN_SPREAD})"
+    put("check", "", f'=IF({ok},"","WACC must be above zero and at least 0.5 pp above terminal growth")',
+        "General", Font(bold=True, color="C00000"))
+
+    head("EXPLICIT YEARS")
+    for j, y in enumerate(years):
+        vs.cell(r, 2 + j, y).font = Font(bold=True)
+    rows = {}
+    for key, label, fmt, f in (
+        ("fcff", "Free cash flow to firm", num, lambda j: f"=Model!{at('fcff', nh + j)}"),
+        ("period", "Discount period (years)", "0.0", lambda j: f"={j + 1}-IF({ref['mid']}=1,0.5,0)"),
+        ("df", "Discount factor", "0.0000", lambda j: f'=IF({ok},1/(1+{ref["wacc"]})^{col(j)}{rows["period"]},"")'),
+        ("pv", "Present value", num, lambda j: f'=IF({ok},{col(j)}{rows["fcff"]}*{col(j)}{rows["df"]},"")'),
+    ):
+        r += 1
+        rows[key] = r
+        vs.cell(r, 1, label)
+        for j in range(n):
+            c = vs.cell(r, 2 + j, f(j))
+            c.number_format = fmt
+    span = lambda key: f"$B${rows[key]}:${col(n - 1)}${rows[key]}"  # noqa: E731
+    lastf, lastp, lastdf = (f"${col(n - 1)}${rows[k]}" for k in ("fcff", "period", "df"))
+
+    head("ENTERPRISE VALUE TO VALUE PER SHARE")
+    put("pv_sum", "PV of explicit years", f'=IF({ok},SUM({span("pv")}),"")', num)
+    put("tv", "Terminal value (Gordon growth on final-year FCFF)",
+        f'=IF({ok},{lastf}*(1+{ref["g"]})/({ref["wacc"]}-{ref["g"]}),"")', num)
+    put("pv_tv", "PV of terminal value", f'=IF({ok},{ref["tv"]}*{lastdf},"")', num)
+    put("ev", "Enterprise value", f'=IF({ok},{ref["pv_sum"]}+{ref["pv_tv"]},"")', num, Font(bold=True))
+    put("borrowings", "Less borrowings", f"={hist('borrowings')}", num)
+    put("cash", "Plus cash & bank", f"={hist('cash')}", num)
+    put("investments", "Plus investments", f"={hist('investments')}", num)
+    put("equity", "Equity value",
+        f'=IF({ok},{ref["ev"]}-{ref["borrowings"]}+{ref["cash"]}+{ref["investments"]},"")', num, Font(bold=True))
+    put("per_share", "Value per share (Rs)", f'=IFERROR(IF({ok},{ref["equity"]}/{ref["shares"]},""),"")', rs,
+        Font(bold=True))
+    put("upside", "Upside vs share price",
+        f'=IFERROR(IF(ISNUMBER({ref["per_share"]}),{ref["per_share"]}/{ref["price"]}-1,""),"")', pct)
+    put("tv_share", "Terminal value share of EV", f'=IFERROR(IF({ref["ev"]}>0,{ref["pv_tv"]}/{ref["ev"]},""),"")', pct)
+
+    head("VALUE PER SHARE (Rs): WACC (rows) x TERMINAL GROWTH (columns)")
+    top = r
+    for i, dg in enumerate(GRID_G):
+        c = vs.cell(top, 2 + i, f"={ref['g']}{dg:+}")
+        c.number_format, c.font = pct, Font(bold=True)
+    for k, dw in enumerate(GRID_WACC):
+        r += 1
+        c = vs.cell(r, 1, f"={ref['wacc']}{dw:+}")
+        c.number_format, c.font = pct, Font(bold=True)
+        for i in range(len(GRID_G)):
+            w, g = f"$A{r}", f"{col(i)}${top}"
+            vs.cell(r, 2 + i, (
+                f'=IF(AND({w}>0,{w}-{g}>={MIN_SPREAD}),IFERROR((SUMPRODUCT({span("fcff")},1/(1+{w})^{span("period")})'
+                f'+{lastf}*(1+{g})/({w}-{g})/(1+{w})^{lastp}-{ref["borrowings"]}+{ref["cash"]}+{ref["investments"]})'
+                f'/{ref["shares"]},""),"")')).number_format = rs
+    vs.column_dimensions["A"].width = 50
+    for j in range(max(n, len(GRID_G))):
+        vs.column_dimensions[get_column_letter(2 + j)].width = 12
+
+
+def col(j):
+    """Valuation sheet column for explicit year j (B = first projected year)."""
+    return get_column_letter(2 + j)
+
+
+def to_excel(co, scenarios, n=5, active="base", val=None):
     """Workbook bytes: historicals as values, projections as live formulas, inputs in blue.
     scenarios: {"base"|"bull"|"bear": {key: {"start", "end"}}}. Each scenario's per-year inputs (from expand())
-    sit on the Scenarios sheet; the Model sheet's driver cells pick one with CHOOSE on the selector in B3."""
+    sit on the Scenarios sheet; the Model sheet's driver cells pick one with CHOOSE on the selector in B3.
+    val: VALUATION-shaped inputs for the Valuation sheet (None = defaults)."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Model"
@@ -580,7 +784,7 @@ def to_excel(co, scenarios, n=5, active="base"):
     rows = {key: top + 1 + i for i, (_, key, _) in enumerate(LAYOUT) if key}
     nh = len(co["hist"])
     headers = labels(co["dates"]) + [fy(d, True) for d in projected_dates(co, n)]
-    bold, totals = Font(bold=True), {"total_liab", "total_assets", "pat", "fcf"}
+    bold, totals = Font(bold=True), {"total_liab", "total_assets", "pat", "fcf", "fcff"}
     head_fill = PatternFill("solid", fgColor="DDE4EE")
     formats = {"pct": "0.0%", "days": "0", "num": "#,##0.0;(#,##0.0);-", "chk": "#,##0.00;(#,##0.00);-",
                "x": '0.0"x";-0.0"x"'}
@@ -621,6 +825,8 @@ def to_excel(co, scenarios, n=5, active="base"):
     for j in range(len(headers)):
         ws.column_dimensions[get_column_letter(2 + j)].width = 11
     ws.freeze_panes = ws.cell(top + 1, 2)
+    _valuation_sheet(wb, co, n, val, src, lambda k, j: f"{get_column_letter(2 + j)}{rows[k]}", headers[nh:],
+                     formats, head_fill)
     cash_proj = f"{get_column_letter(2 + nh)}{rows['cash']}:{get_column_letter(1 + len(headers))}{rows['cash']}"
     ws.conditional_formatting.add(cash_proj, CellIsRule(operator="lessThan", formula=["0"],
                                                         font=Font(color="C00000", bold=True),
