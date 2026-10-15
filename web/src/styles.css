@@ -213,6 +213,10 @@ tbody tr:hover th, tbody tr:hover td { background: var(--pencil-soft); }
   .workspace { grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "main" "drivers" "tables"; grid-template-rows: none; padding: 16px; }
   .drivers { position: static; max-height: none; }
 }
+@media (max-width: 440px) {
+  .tabs { padding: 0 6px; gap: 0; }
+  .tab { padding-inline: 7px; } /* four statement tabs fit at 390px */
+}
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }

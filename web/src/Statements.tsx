@@ -1,18 +1,21 @@
 import { useState } from 'react'
-import { fmt, groupKeys, type Kind, type LayoutLine, type Row } from './lib'
+import { fmt, groupKeys, type LayoutLine, type LineKind, type Row } from './lib'
 
 const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf', 'fcf'])
-const TABS = [['PROFIT & LOSS', 'Profit & loss'], ['BALANCE SHEET', 'Balance sheet'], ['CASH FLOW', 'Cash flow']] as const
+const ALL_TABS = [['PROFIT & LOSS', 'Profit & loss'], ['BALANCE SHEET', 'Balance sheet'], ['CASH FLOW', 'Cash flow'],
+  ['RATIOS', 'Ratios']] as const
 
 interface Props { layout: LayoutLine[]; years: string[]; rows: Row[]; nHist: number }
 
 export default function Statements({ layout, years, rows, nHist }: Props) {
-  const [tab, setTab] = useState<string>(TABS[0][0])
-  const lines: [string, string, Kind][] = []
+  const [tab, setTab] = useState<string>(ALL_TABS[0][0])
+  // a session saved before a section existed has no layout lines for it, so hide its tab
+  const TABS = ALL_TABS.filter(([id]) => layout.some(([label, , kind]) => kind === 'head' && label === id))
+  const lines: [string, string, LineKind][] = []
   let section = ''
   for (const [label, key, kind] of layout) {
     if (kind === 'head') section = label
-    else if (key && section === tab) lines.push([label, key, kind as Kind])
+    else if (key && section === tab) lines.push([label, key, kind as LineKind])
   }
 
   return (
@@ -31,7 +34,7 @@ export default function Statements({ layout, years, rows, nHist }: Props) {
         <table>
           <thead>
             <tr>
-              <th scope="col">Rs crore</th>
+              <th scope="col">{tab === 'RATIOS' ? 'Ratio' : 'Rs crore'}</th>
               {years.map((y, i) => <th scope="col" key={y} className={i >= nHist ? 'proj' : undefined}>{y}</th>)}
             </tr>
           </thead>
@@ -47,6 +50,14 @@ export default function Statements({ layout, years, rows, nHist }: Props) {
           </tbody>
         </table>
       </div>
+      {tab === 'RATIOS' && (
+        <p className="muted small">
+          ROE = net profit / average equity. ROCE = EBIT / average (equity + borrowings), EBIT = profit before tax +
+          interest. Asset turnover = revenue / average total assets. Averages use opening and closing balances; the
+          first year uses closing. Net debt = borrowings − cash − investments. – means not meaningful (zero or
+          negative denominator).
+        </p>
+      )}
     </section>
   )
 }
