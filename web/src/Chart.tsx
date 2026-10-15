@@ -13,9 +13,13 @@ function niceTicks(lo: number, hi: number) {
   return out
 }
 
-interface Props { title: string; years: string[]; values: (number | null)[]; nHist: number }
+/** Other scenarios, drawn as thin pencil markers over the projected bars. */
+export interface Alt { name: string; values: (number | null)[] }
+interface Props { title: string; years: string[]; values: (number | null)[]; nHist: number; others?: Alt[] }
 
-export default function Chart({ title, years, values, nHist }: Props) {
+const finite = (v: number | null): v is number => v != null && Number.isFinite(v)
+
+export default function Chart({ title, years, values, nHist, others = [] }: Props) {
   const box = useRef<HTMLDivElement>(null)
   const [w, setW] = useState(640)
   const [hover, setHover] = useState<number | null>(null)
@@ -25,7 +29,7 @@ export default function Chart({ title, years, values, nHist }: Props) {
     return () => ro.disconnect()
   }, [])
 
-  const nums = values.filter((v): v is number => v != null && Number.isFinite(v))
+  const nums = [...values, ...others.flatMap(o => o.values)].filter(finite)
   const ticks = niceTicks(Math.min(0, ...nums), Math.max(0, ...nums))
   const [lo, hi] = [ticks[0], ticks[ticks.length - 1]]
   const innerW = w - M.left - M.right, innerH = H - M.top - M.bottom
@@ -43,7 +47,8 @@ export default function Chart({ title, years, values, nHist }: Props) {
         width={w}
         height={H}
         role="img"
-        aria-label={`${title}: ${years.map((yr, i) => `${yr} ${money(values[i])}`).join(', ')}`}
+        aria-label={`${title}: ${years.map((yr, i) => `${yr} ${money(values[i])}${others
+          .filter(o => finite(o.values[i])).map(o => ` (${o.name} ${money(o.values[i])})`).join('')}`).join(', ')}`}
         onPointerMove={e => {
           const r = e.currentTarget.getBoundingClientRect()
           const i = Math.floor((e.clientX - r.left - M.left) / band)
@@ -79,17 +84,38 @@ export default function Chart({ title, years, values, nHist }: Props) {
               <rect className={proj ? 'bar proj' : 'bar'} x={x(i) - bw / 2} y={top} width={bw} height={h}
                 style={{ animationDelay: proj ? `${(i - nHist) * 60}ms` : undefined }} />
               {labelled.has(i) && (
-                <text className={proj ? 'bar-label proj' : 'bar-label'} x={x(i)} y={v >= 0 ? top - 6 : top + h + 14} textAnchor="middle">
+                <text className={proj ? 'bar-label proj' : 'bar-label'} y={v >= 0 ? top - 6 : top + h + 14}
+                  {...(narrow && i === years.length - 1 ? { x: x(i) + bw / 2, textAnchor: 'end' } : { x: x(i), textAnchor: 'middle' })}>
                   {money(v)}
                 </text>
               )}
             </g>
           )
         })}
+        {others.map(o => (
+          <g key={o.name} className={`alt alt-${o.name}`}>
+            {o.values.map((v, i) => finite(v) && (
+              <g key={i}>
+                <line className="alt-halo" x1={x(i) - bw / 2 - 4} x2={x(i) + bw / 2 + 4} y1={y(v)} y2={y(v)} />
+                <line className="alt-mark" x1={x(i) - bw / 2 - 4} x2={x(i) + bw / 2 + 4} y1={y(v)} y2={y(v)} />
+              </g>
+            ))}
+          </g>
+        ))}
         {years.map((yr, i) => ((years.length - 1 - i) % every ? null : (
           <text key={yr} className={i >= nHist ? 'year proj' : 'year'} x={x(i)} y={H - 10} textAnchor="middle">{shortYear(yr)}</text>
         )))}
       </svg>
+      {others.length > 0 && (
+        <p className="chart-legend" aria-hidden="true">
+          {others.map(o => (
+            <span key={o.name}>
+              <svg width="18" height="8" className={`alt alt-${o.name}`}><line className="alt-mark" x1="1" x2="17" y1="4" y2="4" /></svg>
+              {o.name}
+            </span>
+          ))}
+        </p>
+      )}
     </div>
   )
 }

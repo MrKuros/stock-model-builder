@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Chart from './Chart'
 import DriverStrip from './DriverStrip'
 import Statements from './Statements'
-import { api, flat, flatAll, fmt, groupKeys, money, postJson, type Parsed, type Paths, type Projection, type Row } from './lib'
+import {
+  api, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS,
+  type ModelDoc, type Parsed, type Paths, type Projection, type Row, type Scenario,
+} from './lib'
 
 const GROUPS: [string, string[]][] = [
   ['Growth and margins', ['growth', 'ebitda_margin', 'oi_pct']],
@@ -34,39 +37,50 @@ const METRICS: [string, string, (r: Row) => number | null][] = [
   ['net_cash', 'Net cash', r => (r.cash ?? 0) + (r.investments ?? 0) - (r.borrowings ?? 0)],
 ]
 const HORIZONS = [3, 5, 7, 10]
-const STORE = 'financial-model:v3' // bump when the saved shape or the driver list changes
+const STORE = 'financial-model:v4' // bump when the saved shape or the driver list changes
+const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
 
-interface Saved { parsed: Parsed; a: Paths; n: number }
+/** Saved = the model document plus the parsed extras (years, ratios, defaults…) so a reload needs no server call. */
+type Saved = ModelDoc & { parsed: Omit<Parsed, 'company'> }
 
 /** Last session, or null if missing, corrupt, or saved by an older version of the app. */
-function load(): Saved | null {
+function load(): { parsed: Parsed; doc: ModelDoc } | null {
   try {
     const s = JSON.parse(localStorage.getItem(STORE) ?? 'null')
     const keys: string[] = s?.parsed?.drivers?.map((d: unknown[]) => d[0]) ?? []
-    const ok = s?.parsed?.company?.hist?.length && s.parsed.years?.length && s.parsed.layout?.length &&
-      keys.length && keys.every(k => Number.isFinite(s.a?.[k]?.start) && (s.a[k].end === null || Number.isFinite(s.a[k].end)) &&
-        Number.isFinite(s.parsed.defaults?.[k])) &&
-      HORIZONS.includes(s.n)
-    return ok ? s : null
+    const okPath = (p: { start?: unknown; end?: unknown } | undefined) =>
+      Number.isFinite(p?.start) && (p!.end === null || Number.isFinite(p!.end))
+    const ok = s?.version === 3 && s.company?.hist?.length && s.parsed.years?.length && s.parsed.layout?.length &&
+      keys.length && keys.every(k => Number.isFinite(s.parsed.defaults?.[k]) &&
+        SCENARIOS.every(sc => okPath(s.scenarios?.[sc]?.[k]))) &&
+      SCENARIOS.includes(s.active) && HORIZONS.includes(s.n) && Array.isArray(s.excluded_years)
+    if (!ok) return null
+    const { parsed, ...doc } = s as Saved
+    return { parsed: { ...parsed, company: doc.company }, doc }
   } catch { return null }
 }
+
+const newDoc = (p: Parsed): ModelDoc => ({
+  version: 3, company: p.company, n: 5, active: 'base', scenarios: seed(flatAll(p.defaults)),
+  excluded_years: [], saved_at: null,
+})
 
 export default function App() {
   const saved = useMemo(load, [])
   const [parsed, setParsed] = useState<Parsed | null>(saved?.parsed ?? null)
-  const [a, setA] = useState<Paths>(saved?.a ?? {})
-  const [n, setN] = useState(saved?.n ?? 5)
+  const [doc, setDoc] = useState<ModelDoc | null>(saved?.doc ?? null)
 
-  const open = (p: Parsed) => { setParsed(p); setA(flatAll(p.defaults)); setN(5) }
-  const close = () => { setParsed(null); try { localStorage.removeItem(STORE) } catch { /* private mode */ } }
+  const open = (p: Parsed) => { setParsed(p); setDoc(newDoc(p)) }
+  const close = () => { setParsed(null); setDoc(null); try { localStorage.removeItem(STORE) } catch { /* private mode */ } }
 
   useEffect(() => {
-    if (!parsed) return
-    try { localStorage.setItem(STORE, JSON.stringify({ parsed, a, n })) } catch { /* quota / private mode */ }
-  }, [parsed, a, n])
+    if (!parsed || !doc) return
+    const { company: _, ...rest } = parsed
+    try { localStorage.setItem(STORE, JSON.stringify({ ...doc, parsed: rest })) } catch { /* quota / private mode */ }
+  }, [parsed, doc])
 
-  return parsed
-    ? <Workspace parsed={parsed} a={a} setA={setA} n={n} setN={setN} onClose={close} />
+  return parsed && doc
+    ? <Workspace parsed={parsed} doc={doc} setDoc={f => setDoc(d => d && f(d))} onClose={close} />
     : <Landing onOpen={open} />
 }
 
@@ -132,15 +146,20 @@ function Landing({ onOpen }: { onOpen: (p: Parsed) => void }) {
 
 interface WorkspaceProps {
   parsed: Parsed
-  a: Paths
-  setA: React.Dispatch<React.SetStateAction<Paths>>
-  n: number
-  setN: (n: number) => void
+  doc: ModelDoc
+  setDoc: (f: (d: ModelDoc) => ModelDoc) => void
   onClose: () => void
 }
 
-function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
+function Workspace({ parsed, doc, setDoc, onClose }: WorkspaceProps) {
   const { company, years: histYears, ratios, defaults, checks, drivers, layout } = parsed
+  const { n, active, scenarios } = doc
+  const a = scenarios[active]
+  const setN = (n: number) => setDoc(d => ({ ...d, n }))
+  const setActive = (active: Scenario) => setDoc(d => ({ ...d, active }))
+  const setA = (f: (p: Paths) => Paths) =>
+    setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [d.active]: f(d.scenarios[d.active]) } }))
+  const seeded = useMemo(() => seed(flatAll(defaults)), [defaults]) // each scenario's own defaults
   const [projection, setProjection] = useState<Projection | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [metric, setMetric] = useState(METRICS[0][0])
@@ -151,13 +170,13 @@ function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
 
   useEffect(() => {
     const ctl = new AbortController()
-    api<Projection>('/api/project', postJson({ company, a, n }, ctl.signal))
+    api<Projection>('/api/project', postJson({ company, scenarios, n }, ctl.signal))
       .then(p => { setProjection(p); setError(null) })
       .catch(e => { if (e.name !== 'AbortError') { setProjection(null); setError(e.message) } })
     return () => ctl.abort()
-  }, [company, a, n])
+  }, [company, scenarios, n])
 
-  const proj = projection?.proj.length === n ? projection.proj : null // null while a new horizon loads
+  const proj = projection?.scenarios[active].length === n ? projection.scenarios[active] : null // null while a new horizon loads
   const projYears = proj ? projection!.years : []
   const years = [...histYears, ...projYears]
   const rows = proj ? [...hist, ...proj] : hist
@@ -165,7 +184,7 @@ function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
   const exportXlsx = async () => {
     setExporting(true)
     try {
-      const res = await fetch('/api/export', postJson({ company, a, n }))
+      const res = await fetch('/api/export', postJson({ company, scenarios, active, n }))
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? 'Export failed. Try again.')
       const url = URL.createObjectURL(await res.blob())
       const link = Object.assign(document.createElement('a'), { href: url, download: `${company.name} model.xlsx` })
@@ -178,6 +197,15 @@ function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
   const balanced = proj?.every(r => Math.abs(r.chk_bs ?? 0) < 0.5 && Math.abs(r.chk_cash ?? 0) < 0.5)
   const borrowed = proj ? proj.reduce((s, r) => s + (r.revolver ?? 0), 0) : 0
   const m = METRICS.find(x => x[0] === metric)!
+  const others = proj ? SCENARIOS.filter(s => s !== active).map(s => ({
+    name: s, values: [...hist.map(() => null), ...projection!.scenarios[s].map(m[2])],
+  })) : []
+  const copyBase = () => {
+    const next = seed(scenarios.base)
+    const edited = (['bull', 'bear'] as const).some(s => JSON.stringify(scenarios[s]) !== JSON.stringify(next[s]))
+    if (edited && !window.confirm('Replace your bull and bear assumptions with base ± 3 pp growth and ± 1.5 pp EBITDA margin?')) return
+    setDoc(d => ({ ...d, scenarios: next }))
+  }
 
   return (
     <div className="workspace">
@@ -192,6 +220,12 @@ function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
           </p>
         </div>
         <div className="actions">
+          <div className="segmented" role="radiogroup" aria-label="Scenario">
+            {SCENARIOS.map(s => (
+              <button key={s} type="button" role="radio" aria-checked={active === s} tabIndex={active === s ? 0 : -1}
+                onClick={() => setActive(s)} onKeyDown={e => groupKeys(e, [...SCENARIOS], active, setActive)}>{NAMES[s]}</button>
+            ))}
+          </div>
           <div className="segmented" role="radiogroup" aria-label="Years to project">
             {HORIZONS.map(h => (
               <button key={h} type="button" role="radio" aria-checked={n === h} tabIndex={n === h ? 0 : -1}
@@ -218,9 +252,14 @@ function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
 
       <aside className="drivers" aria-label="Assumptions">
         <div className="drivers-head">
-          <h2>Assumptions</h2>
-          <button type="button" className="link" onClick={() => setA(flatAll(defaults))}>Reset all</button>
+          <h2>Assumptions <span className="scen-tag">{NAMES[active]}</span></h2>
+          <button type="button" className="link" onClick={() => setA(() => seeded[active])}>Reset {active}</button>
         </div>
+        <p className="muted small">
+          Strips edit the <b>{active}</b> case. Bull and bear start from base with revenue growth ± 3 pp and EBITDA
+          margin ± 1.5 pp; everything else is the same.{' '}
+          <button type="button" className="link" onClick={copyBase}>Copy base to bull and bear</button>
+        </p>
         <p className="muted small">Dots are reported years. Drag the pencil line, use arrow keys, or type a value. Fade slopes it from the first projected year to the last.</p>
         {GROUPS.map(([group, keys]) => (
           <section key={group} className="group">
@@ -233,9 +272,9 @@ function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
                 hint={HINTS[k] ?? ''}
                 kind={byKey[k][2]}
                 history={ratios.map(r => r[k])}
-                value={a[k] ?? flat(defaults[k])}
-                base={defaults[k]}
-                baseLabel={k === 'debt_change' ? 'no new debt' : `default ${fmt(defaults[k], byKey[k][2])}`}
+                value={a[k] ?? flat(seeded[active][k].start)}
+                base={seeded[active][k].start}
+                baseLabel={k === 'debt_change' ? 'no new debt' : `default ${fmt(seeded[active][k].start, byKey[k][2])}`}
                 onChange={v => setA(prev => ({ ...prev, [k]: v }))}
               />
             ))}
@@ -245,6 +284,7 @@ function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
 
       <main className="main">
         {proj && <Readout hist={hist} proj={proj} histYear={histYears[nHist - 1]} projYear={projYears[n - 1]} n={n} />}
+        {proj && <Compare all={projection!.scenarios} active={active} projYear={projYears[n - 1]} />}
         {borrowed >= 0.5 && (
           <p className="banner">
             Cash would run out, so the model borrows <b>Rs {money(borrowed)} cr</b> over {n} years to cover it.
@@ -260,7 +300,7 @@ function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
             ))}
           </div>
           <div id="chart-panel" role="tabpanel" aria-labelledby={`chart-tab-${metric}`}>
-            <Chart title={m[1]} years={years} values={rows.map(m[2])} nHist={nHist} />
+            <Chart title={m[1]} years={years} values={rows.map(m[2])} nHist={nHist} others={others} />
           </div>
         </section>
       </main>
@@ -287,6 +327,20 @@ function Readout({ hist, proj, histYear, projYear, n }: { hist: Row[]; proj: Row
       <P>{fmt(margin(end), 'pct')}</P>. Over {n} years the business {fcf >= 0 ? 'generates' : 'burns'}{' '}
       <P>Rs {money(Math.abs(fcf))} cr</P> of free cash and ends with{' '}
       <P>Rs {money(Math.abs(netCash))} cr</P> net {netCash >= 0 ? 'cash' : 'debt'}.
+    </p>
+  )
+}
+
+/** One line: final-year revenue and net profit in each scenario, low case first. */
+function Compare({ all, active, projYear }: { all: Projection['scenarios']; active: Scenario; projYear: string }) {
+  const order: Scenario[] = ['bear', 'base', 'bull']
+  const list = (k: string) => order.map((s, i) => {
+    const v = money(all[s][all[s].length - 1][k])
+    return <span key={s}>{i > 0 && ' · '}{s} {s === active ? <b className="pencil-num">{v}</b> : v}</span>
+  })
+  return (
+    <p className="compare">
+      In {projYear}, revenue: {list('revenue')} cr. Net profit: {list('pat')} cr.
     </p>
   )
 }

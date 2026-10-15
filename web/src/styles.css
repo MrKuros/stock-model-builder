@@ -205,6 +205,17 @@ a { color: var(--pencil); }
 .chart .divider { stroke: var(--ink-3); stroke-dasharray: 3 3; }
 .chart .divider-label { font: 500 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; fill: var(--pencil); }
 .chart .divider-label.ink { fill: var(--ink-2); }
+/* other scenarios: thin pencil markers, told apart by dash (bull solid, bear dashed, base dotted) */
+.alt .alt-halo { stroke: var(--sheet); stroke-width: 5; }
+.alt .alt-mark { stroke: var(--pencil); stroke-width: 1.6; }
+.alt-bear .alt-mark { stroke-dasharray: 4 3; }
+.alt-base .alt-mark { stroke-dasharray: 1.5 2.5; stroke-width: 2; }
+.chart-legend { display: flex; gap: 14px; justify-content: flex-end; margin: 2px 0 0; font: 11px var(--mono); color: var(--ink-2); }
+.chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.compare { margin: -8px 0 0; font-size: 14px; color: var(--ink-2); }
+.compare b { font-weight: 600; }
+.scen-tag { font: 500 11px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--pencil);
+  border: 1px solid var(--pencil); border-radius: 999px; padding: 2px 7px; vertical-align: 3px; margin-left: 4px; }
 @keyframes pencil-in { from { opacity: 0; } to { opacity: 1; } }
 
 .table-wrap { overflow-x: auto; margin: 0 -16px; }
