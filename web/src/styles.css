@@ -116,6 +116,8 @@ a { color: var(--pencil); }
 .top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px; }
 .title h1 { font: 700 clamp(26px, 3.4vw, 40px)/1.1 var(--display); letter-spacing: -0.02em; margin: 6px 0 4px; }
 .title p { margin: 0; font-size: 14px; }
+.title .market { margin-top: 2px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.title .market.muted { color: var(--ink-2); }
 .back { font-size: 13px; }
 .actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .segmented { display: inline-flex; border: 1px solid var(--rule); border-radius: 999px; padding: 3px; background: var(--sheet); }

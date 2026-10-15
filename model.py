@@ -176,7 +176,32 @@ def parse_export(file):
     if all(not h["receivables"] and not h["inventory"] for h in hist) or (ir > 0.3 and wc < 0.05) or oca > 2.0:
         raise ValueError("Looks like a bank/NBFC/insurer (loan book or interest dominates, no receivables/inventory). "
                          "Financial companies are not supported yet.")
-    return {"name": str(name), "dates": dates, "hist": hist}
+    return {"name": str(name), "dates": dates, "hist": hist, "market": _market(ws, s["pl"]["report date"], dates)}
+
+
+def _pos(v):
+    """A positive finite number, else None (formulas without a cached value come back as None)."""
+    try:
+        v = float(str(v).replace(",", "")) if isinstance(v, str) else v
+    except ValueError:
+        return None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0 else None
+
+
+def _market(ws, cols, dates):
+    """Share price and count (shares in crore) from META, the PRICE row and DERIVED; any of it may be missing."""
+    rows = {}
+    for r in ws.iter_rows(values_only=True):
+        if r and isinstance(r[0], str):
+            rows.setdefault(r[0].strip().rstrip(":").strip().lower(), r[1:])
+    first = lambda label: _pos((rows.get(label) or (None,))[0])  # noqa: E731
+    at = {d: i for i, d in enumerate(cols) if isinstance(d, datetime)}  # PRICE / DERIVED share the annual columns
+    hist = lambda label: [_pos(rows[label][at[d]]) if label in rows and at[d] < len(rows[label]) else None  # noqa: E731
+                          for d in dates]
+    price, mcap = first("current price"), first("market capitalization")
+    shares_hist = hist("adjusted equity shares in cr")
+    shares = mcap / price if price and mcap else next((v for v in reversed(shares_hist) if v), None)
+    return {"price": price, "shares": shares, "price_hist": hist("price"), "shares_hist": shares_hist}
 
 
 def data_checks(co):

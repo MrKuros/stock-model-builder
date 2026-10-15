@@ -3,8 +3,8 @@ import Chart from './Chart'
 import DriverStrip from './DriverStrip'
 import Statements from './Statements'
 import {
-  api, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS, when, clock,
-  type ModelDoc, type ModelSummary, type OneOff, type Opened, type Parsed, type Paths, type Projection, type Row,
+  api, dec2, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS, when, clock,
+  type ModelDoc, type ModelSummary, type OneOff, type Market, type Opened, type Parsed, type Paths, type Projection, type Row,
   type Scenario,
 } from './lib'
 
@@ -347,6 +347,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
             {proj && <> · <span className="pencil-word">{projYears[0]}–{projYears[n - 1]} projected</span></>}
             {save.at && !save.error && <> · <span className="saved">Saved {clock(save.at)}</span></>}
           </p>
+          <MarketLine m={company.market} />
         </div>
         <div className="actions">
           <div className="segmented" role="radiogroup" aria-label="Scenario">
@@ -491,6 +492,20 @@ function OneOffs({ id, years, histYears, excluded, pending, note, onToggle }: {
       </ul>
       <p className="oneoff-note" role="status">{note}</p>
     </section>
+  )
+}
+
+const NBSP = '\u00a0' // keeps 'Rs 13,02,344 cr' on one line
+/** Reported market data from the export, in ink. Anything Export left out is skipped. */
+function MarketLine({ m }: { m?: Market }) {
+  if (!m?.price && !m?.shares) return <p className="market muted">No share price in this file</p>
+  return (
+    <p className="market">
+      {m.price != null && <>Rs{NBSP}{dec2(m.price)} a share</>}
+      {m.price != null && m.shares != null && ' · '}
+      {m.shares != null && <>{dec2(m.shares)}{NBSP}cr shares</>}
+      {m.price != null && m.shares != null && <> · Market cap Rs{NBSP}{money(m.price * m.shares)}{NBSP}cr</>}
+    </p>
   )
 }
 
