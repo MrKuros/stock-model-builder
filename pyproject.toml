@@ -1,0 +1,15 @@
+[project]
+name = "financial-model"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.143.1",
+    "openpyxl>=3.1.5",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+]
