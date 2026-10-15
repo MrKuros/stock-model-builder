@@ -209,6 +209,13 @@ def fy(d, projected=False):
     return f"FY{d.year}{'E' if projected else ''}"
 
 
+def labels(dates):
+    """fy() for each reported year, unique: a year-end change can put two year ends in one calendar year
+    (Mar 2019, Dec 2019), so a repeat gets its month ("FY2019 Dec"). Exclusions and flags key on these."""
+    out = [fy(d) for d in dates]
+    return [x if out.index(x) == i else f"{x} {d:%b}" for i, (x, d) in enumerate(zip(out, dates))]
+
+
 # ---------- ratios & projection ----------
 
 def _div(a, b):
@@ -217,11 +224,12 @@ def _div(a, b):
 
 def returns(c, p=None):
     """Return ratios for year c; p = previous year (None: averages fall back to closing balances).
-    Blank (None) when the denominator is <= 0: a ratio on negative equity or EBITDA means nothing.
+    Blank (None) when the denominator is <= ~0: a ratio on negative equity or EBITDA means nothing.
     EBIT = PBT + interest. Mirrored by _returns_formulas()."""
     avg = lambda f: (f(c) + f(p)) / 2 if p else f(c)  # noqa: E731
     eq = lambda r: r["share_cap"] + r["reserves"]  # noqa: E731
-    pos = lambda num, den: num / den if den > 0 else None  # noqa: E731
+    # 1e-6 cr = Rs 10: debt faded to zero leaves float residue (1e-14) that would read as 1e18x cover
+    pos = lambda num, den: num / den if den > 1e-6 else None  # noqa: E731
     ebit = c["pbt"] + c["interest"]
     return {
         "roe": pos(c["pat"], avg(eq)),
@@ -263,9 +271,10 @@ def _ros(pairs, default=0.0):
 
 
 def default_assumptions(hist, years=3, exclude=(), labels=None):
-    """Weighted (ratio-of-sums) averages over the last `years` reported years; growth is the compound
-    year-on-year rate. Borrowings held flat. Years in `exclude` (labels like "FY2020", matched against
-    `labels`) are skipped and the window reaches further back instead."""
+    """Weighted (ratio-of-sums) averages over the last `years` reported years; growth is the plain CAGR over
+    the last `years`. Borrowings held flat. Years in `exclude` (labels like "FY2020", matched against
+    `labels`) are skipped and the window reaches further back instead, except for growth: no one-off flag is
+    about revenue, and dropping a year from a growth window skews it (a dip year's rebound stays in)."""
     keep = [i for i in range(len(hist)) if labels is None or labels[i] not in exclude]
     if len(keep) < 2:
         raise ValueError("Keep at least two reported years in the defaults.")
@@ -274,10 +283,11 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
     pw = [(hist[i - 1], hist[i]) for i in keep if i][-years:]  # (prev, cur); prev may be excluded: its closing balances are fine
     per_rev = lambda f: _ros((f(h), h["revenue"]) for h in w)  # noqa: E731
     oi = [r[i]["oi_pct"] for i in keep[-years:] if r[i]["oi_pct"] is not None]
-    pos = all(p["revenue"] > 0 and h["revenue"] > 0 for p, h in pw)
+    gp = [(hist[i - 1], hist[i]) for i in range(1, len(hist))][-years:]  # every year: growth ignores exclusions
+    pos = all(p["revenue"] > 0 and h["revenue"] > 0 for p, h in gp)
     return {
-        # with nothing excluded the product telescopes to the plain CAGR
-        "growth": math.prod(h["revenue"] / p["revenue"] for p, h in pw) ** (1 / len(pw)) - 1 if pw and pos else 0.0,
+        # the product telescopes to the plain CAGR
+        "growth": math.prod(h["revenue"] / p["revenue"] for p, h in gp) ** (1 / len(gp)) - 1 if gp and pos else 0.0,
         "ebitda_margin": per_rev(lambda h: h["ebitda"]),
         # ponytail: Export folds exceptional items into Other Income; median drops a single one-off year
         "oi_pct": max(statistics.median(oi), 0.0) if oi else 0.0,
@@ -321,9 +331,12 @@ def detect_oneoffs(hist, labels, min_years=4):
             continue
         typical = statistics.median(v for _, v in pts)
         band = max(2 * 1.4826 * statistics.median(abs(v - typical) for _, v in pts), floor)
+        # ponytail: 25% anchors the Indian new-regime tax rate; a year nearer it than the median is the normal one
+        # (a tax holiday ending, pre-IPO disallowances). Old-regime (34.9%) firms may leave a low year unflagged.
         out += [{"year": y, "metric": key, "value": v, "typical": typical,
                  "note": f"{y} {what} was {_pct(v)}{unit}, typically {_pct(typical)}"}
-                for y, v in pts if abs(v - typical) > band]
+                for y, v in pts if abs(v - typical) > band
+                and (key != "tax_rate" or abs(v - 0.25) >= abs(typical - 0.25))]
     return sorted(out, key=lambda o: labels.index(o["year"]))
 
 
@@ -401,10 +414,10 @@ RAW = {"revenue", "other_income", "dep", "interest", "pbt", "tax", "pat", "divid
 
 
 def _returns_formulas(x, has_prev):
-    """Excel twin of returns(): blank ("") where the denominator is <= 0."""
+    """Excel twin of returns(): blank ("") where the denominator is <= ~0 (1e-6)."""
     avg = lambda f: f"(({f(0)})+({f(1)}))/2" if has_prev else f"({f(0)})"  # noqa: E731
     eq = lambda p: f'{x("share_cap", p)}+{x("reserves", p)}'  # noqa: E731
-    pos = lambda num, den: f'=IFERROR(IF(({den})>0,({num})/({den}),""),"")'  # noqa: E731
+    pos = lambda num, den: f'=IFERROR(IF(({den})>1E-6,({num})/({den}),""),"")'  # noqa: E731
     ebit = f'{x("pbt")}+{x("interest")}'
     return {
         "roe": pos(x("pat"), avg(eq)),
@@ -519,10 +532,7 @@ def _scenario_sheet(wb, scenarios, n, years, formats, head_fill):
 def to_excel(co, scenarios, n=5, active="base"):
     """Workbook bytes: historicals as values, projections as live formulas, inputs in blue.
     scenarios: {"base"|"bull"|"bear": {key: {"start", "end"}}}. Each scenario's per-year inputs (from expand())
-    sit on the Scenarios sheet; the Model sheet's driver cells pick one with CHOOSE on the selector in B3.
-    A single assumption set {key: ...} is used for all three."""
-    if "base" not in scenarios:
-        scenarios = dict.fromkeys(SCENARIOS, scenarios)
+    sit on the Scenarios sheet; the Model sheet's driver cells pick one with CHOOSE on the selector in B3."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Model"
@@ -544,7 +554,7 @@ def to_excel(co, scenarios, n=5, active="base"):
     top = 4  # header row
     rows = {key: top + 1 + i for i, (_, key, _) in enumerate(LAYOUT) if key}
     nh = len(co["hist"])
-    headers = [fy(d) for d in co["dates"]] + [fy(d, True) for d in projected_dates(co, n)]
+    headers = labels(co["dates"]) + [fy(d, True) for d in projected_dates(co, n)]
     bold, totals = Font(bold=True), {"total_liab", "total_assets", "pat", "fcf"}
     head_fill = PatternFill("solid", fgColor="DDE4EE")
     formats = {"pct": "0.0%", "days": "0", "num": "#,##0.0;(#,##0.0);-", "chk": "#,##0.00;(#,##0.00);-",

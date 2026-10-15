@@ -49,6 +49,7 @@ function ValueInput({ id, kind, value, ariaLabel, describedBy, onCommit }:
   }, [value, kind])
 
   const commit = () => {
+    if (!editing.current) { setDraft(toText(value, kind)); return } // Escape: its blur must not commit the typed text
     editing.current = false
     // thousands commas only make sense for crore amounts; "1,5" in a % box must not become 15
     const text = (kind === 'pct' ? draft : draft.replace(/,/g, '')).trim()
@@ -181,13 +182,14 @@ export default function DriverStrip({ id, label, hint, kind, history, value, bas
       <div className="strip-foot">
         <span id={hintId}>{hint}</span>
         <span className="strip-tools">
-          <button type="button" className="fade" aria-pressed={fade}
+          <button type="button" className="fade" aria-pressed={fade} aria-label={`Fade ${label}`}
             title={fade ? 'Hold one value every year' : 'Slope from a first-year value to a last-year value'}
             onClick={() => onChange({ start: value.start, end: fade ? null : value.start })}>
             Fade
           </button>
           {changed ? (
-            <button type="button" className="reset" onClick={() => onChange({ start: base, end: null })} title={`Reset to ${baseLabel}`}>
+            <button type="button" className="reset" onClick={() => onChange({ start: base, end: null })}
+              aria-label={`Reset to ${baseLabel}, ${label}`}>
               Reset to {baseLabel}
             </button>
           ) : (

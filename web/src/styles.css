@@ -135,6 +135,7 @@ a { color: var(--pencil); }
 .oneoffs li { padding: 8px 0; border-top: 1px solid var(--rule); display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
 .exclude { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); white-space: nowrap; cursor: pointer; }
 .exclude input { accent-color: var(--pencil); width: 16px; height: 16px; margin: 0; }
+.exclude input[aria-disabled="true"] { opacity: 0.5; cursor: progress; }
 .oneoff-note:empty { display: none; }
 .oneoff-note { margin: 8px 0 0; font-size: 13px; color: var(--pencil); }
 
@@ -180,7 +181,7 @@ a { color: var(--pencil); }
 .strip-foot { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ink-3); line-height: 1.35; }
 .strip-foot .base-note { white-space: nowrap; }
 .reset { background: none; border: 0; padding: 0; color: var(--pencil); font-size: 12px; white-space: nowrap; text-decoration: underline; text-underline-offset: 2px; }
-.strip-tools { display: inline-flex; align-items: baseline; gap: 10px; flex-shrink: 0; }
+.strip-tools { display: inline-flex; align-items: baseline; gap: 10px; flex-shrink: 0; position: relative; z-index: 1; } /* above the drag zone's overhang */
 .fade {
   background: none; border: 1px solid var(--rule); border-radius: 999px; padding: 0 7px;
   font: 500 11px/1.6 var(--mono); color: var(--ink-2);
@@ -222,7 +223,7 @@ a { color: var(--pencil); }
 .chart .hatch-bg { fill: var(--pencil-soft); }
 .chart .hatch-line { stroke: var(--pencil); stroke-width: 1.4; }
 .chart .is-hover .bar { opacity: 0.8; }
-.chart .bar-label { font: 500 11px var(--mono); fill: var(--ink); }
+.chart .bar-label { font: 500 11px var(--mono); fill: var(--ink); paint-order: stroke; stroke: var(--sheet); stroke-width: 3px; stroke-linejoin: round; }
 .chart .bar-label.proj { fill: var(--pencil); }
 .chart .divider { stroke: var(--ink-3); stroke-dasharray: 3 3; }
 .chart .divider-label { font: 500 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; fill: var(--pencil); }
@@ -257,6 +258,8 @@ tbody tr:hover th, tbody tr:hover td { background: var(--pencil-soft); }
 @media (max-width: 440px) {
   .tabs { padding: 0 6px; gap: 0; }
   .tab { padding-inline: 7px; } /* four statement tabs fit at 390px */
+  .strip-tools { align-items: center; }
+  .strip-tools button { min-height: 24px; } /* touch target */
 }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }

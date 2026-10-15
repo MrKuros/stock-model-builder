@@ -75,23 +75,13 @@ export default function Chart({ title, years, values, nHist, others = [] }: Prop
             {!narrow && <text className="divider-label ink" x={M.left + nHist * band - 6} y={M.top - 10} textAnchor="end">Reported</text>}
           </g>
         )}
-        {values.map((v, i) => {
-          if (v == null || !Number.isFinite(v)) return null
-          const proj = i >= nHist
-          const top = Math.min(y(v), y(0)), h = Math.max(1, Math.abs(y(v) - y(0)))
-          return (
-            <g key={years[i]} className={hover === i ? 'is-hover' : undefined}>
-              <rect className={proj ? 'bar proj' : 'bar'} x={x(i) - bw / 2} y={top} width={bw} height={h}
-                style={{ animationDelay: proj ? `${(i - nHist) * 60}ms` : undefined }} />
-              {labelled.has(i) && (
-                <text className={proj ? 'bar-label proj' : 'bar-label'} y={v >= 0 ? top - 6 : top + h + 14}
-                  {...(narrow && i === years.length - 1 ? { x: x(i) + bw / 2, textAnchor: 'end' } : { x: x(i), textAnchor: 'middle' })}>
-                  {money(v)}
-                </text>
-              )}
-            </g>
-          )
-        })}
+        {values.map((v, i) => finite(v) && (
+          <g key={years[i]} className={hover === i ? 'is-hover' : undefined}>
+            <rect className={i >= nHist ? 'bar proj' : 'bar'} x={x(i) - bw / 2} y={Math.min(y(v), y(0))} width={bw}
+              height={Math.max(1, Math.abs(y(v) - y(0)))}
+              style={{ animationDelay: i >= nHist ? `${(i - nHist) * 60}ms` : undefined }} />
+          </g>
+        ))}
         {others.map(o => (
           <g key={o.name} className={`alt alt-${o.name}`}>
             {o.values.map((v, i) => finite(v) && (
@@ -101,6 +91,14 @@ export default function Chart({ title, years, values, nHist, others = [] }: Prop
               </g>
             ))}
           </g>
+        ))}
+        {/* value labels last, so the other scenarios' markers never strike through the number */}
+        {values.map((v, i) => finite(v) && labelled.has(i) && (
+          <text key={years[i]} className={i >= nHist ? 'bar-label proj' : 'bar-label'}
+            y={v >= 0 ? Math.min(y(v), y(0)) - 6 : Math.max(y(v), y(0)) + 14}
+            {...(narrow && i === years.length - 1 ? { x: x(i) + bw / 2, textAnchor: 'end' } : { x: x(i), textAnchor: 'middle' })}>
+            {money(v)}
+          </text>
         ))}
         {years.map((yr, i) => ((years.length - 1 - i) % every ? null : (
           <text key={yr} className={i >= nHist ? 'year proj' : 'year'} x={x(i)} y={H - 10} textAnchor="middle">{shortYear(yr)}</text>

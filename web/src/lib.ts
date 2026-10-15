@@ -46,7 +46,7 @@ export interface Parsed {
   ratios: Row[]
   defaults: Record<string, number>
   checks: string[]
-  oneoffs?: OneOff[] // missing in sessions saved before one-off detection
+  oneoffs: OneOff[]
   drivers: Driver[]
   layout: LayoutLine[]
 }
