@@ -1,6 +1,7 @@
 """Export.in Excel export -> three-statement projection model (all figures in Rs crore)."""
 import calendar
 import io
+import math
 import statistics
 from datetime import datetime
 
@@ -261,15 +262,22 @@ def _ros(pairs, default=0.0):
     return sum(n for n, _ in pairs) / den if den > 0 else default
 
 
-def default_assumptions(hist, years=3):
-    """Weighted (ratio-of-sums) averages over the last `years`; growth is CAGR. Borrowings held flat."""
-    w, pw = hist[-years:], list(zip(hist, hist[1:]))[-years:]  # pw: (prev, cur)
+def default_assumptions(hist, years=3, exclude=(), labels=None):
+    """Weighted (ratio-of-sums) averages over the last `years` reported years; growth is the compound
+    year-on-year rate. Borrowings held flat. Years in `exclude` (labels like "FY2020", matched against
+    `labels`) are skipped and the window reaches further back instead."""
+    keep = [i for i in range(len(hist)) if labels is None or labels[i] not in exclude]
+    if len(keep) < 2:
+        raise ValueError("Keep at least two reported years in the defaults.")
+    r = ratios(hist)
+    w = [hist[i] for i in keep[-years:]]
+    pw = [(hist[i - 1], hist[i]) for i in keep if i][-years:]  # (prev, cur); prev may be excluded: its closing balances are fine
     per_rev = lambda f: _ros((f(h), h["revenue"]) for h in w)  # noqa: E731
-    rev = [h["revenue"] for h in hist]
-    k = min(years, len(rev) - 1)
-    oi = [x["oi_pct"] for x in ratios(hist)[-years:] if x["oi_pct"] is not None]
+    oi = [r[i]["oi_pct"] for i in keep[-years:] if r[i]["oi_pct"] is not None]
+    pos = all(p["revenue"] > 0 and h["revenue"] > 0 for p, h in pw)
     return {
-        "growth": (rev[-1] / rev[-1 - k]) ** (1 / k) - 1 if k > 0 and rev[-1] > 0 and rev[-1 - k] > 0 else 0.0,
+        # with nothing excluded the product telescopes to the plain CAGR
+        "growth": math.prod(h["revenue"] / p["revenue"] for p, h in pw) ** (1 / len(pw)) - 1 if pw and pos else 0.0,
         "ebitda_margin": per_rev(lambda h: h["ebitda"]),
         # ponytail: Export folds exceptional items into Other Income; median drops a single one-off year
         "oi_pct": max(statistics.median(oi), 0.0) if oi else 0.0,
@@ -288,6 +296,35 @@ def default_assumptions(hist, years=3):
         "ol_pct": per_rev(lambda h: h["other_liab"]),
         "debt_change": 0.0,
     }
+
+
+# (ratios() key, words for the sentence, unit, floor). The floor is the smallest gap from typical worth a flag,
+# so a very steady metric (TCS tax 22-26%) can't flag a 2 pp wobble just because its spread is tiny.
+ONEOFF = (("oi_pct", "other income", " of revenue", 0.02), ("tax_rate", "tax rate", "", 0.10),
+          ("capex_pct", "capex", " of revenue", 0.05), ("ebitda_margin", "EBITDA margin", "", 0.05))
+
+
+def _pct(v):
+    s = f"{v:.1%}"
+    return "0.0%" if s == "-0.0%" else s
+
+
+def detect_oneoffs(hist, labels, min_years=4):
+    """Years where a metric is more than 2 sigma from the company's own median: [{year, metric, value, typical,
+    note}]. sigma = 1.4826 x MAD, so the odd years themselves don't widen the band. A metric needs `min_years`
+    values; tax rate skips loss years (a rate on a loss means nothing)."""
+    r, out = ratios(hist), []
+    for key, what, unit, floor in ONEOFF:
+        pts = [(labels[i], x[key]) for i, x in enumerate(r)
+               if x[key] is not None and (key != "tax_rate" or hist[i]["pbt"] > 0)]
+        if len(pts) < min_years:
+            continue
+        typical = statistics.median(v for _, v in pts)
+        band = max(2 * 1.4826 * statistics.median(abs(v - typical) for _, v in pts), floor)
+        out += [{"year": y, "metric": key, "value": v, "typical": typical,
+                 "note": f"{y} {what} was {_pct(v)}{unit}, typically {_pct(typical)}"}
+                for y, v in pts if abs(v - typical) > band]
+    return sorted(out, key=lambda o: labels.index(o["year"]))
 
 
 def expand(assumptions, n):

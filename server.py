@@ -69,12 +69,14 @@ class ModelRequest(BaseModel):
 
 
 def _company_payload(co):
+    labels = [model.fy(d) for d in co["dates"]]
     return {
         "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"]},
-        "years": [model.fy(d) for d in co["dates"]],
+        "years": labels,
         "ratios": model.ratios(co["hist"]),
         "defaults": model.default_assumptions(co["hist"]),
         "checks": model.data_checks(co),
+        "oneoffs": model.detect_oneoffs(co["hist"], labels),
         "drivers": model.DRIVERS,
         "layout": model.LAYOUT,
     }
@@ -102,6 +104,24 @@ def sample():
     fake_export(buf)
     buf.seek(0)
     return _company_payload(model.parse_export(buf))
+
+
+class DefaultsRequest(BaseModel):
+    company: Company
+    excluded_years: list[str] = []
+
+
+@app.post("/api/defaults")
+def defaults(req: DefaultsRequest):
+    """Defaults with the user's excluded (one-off) years left out."""
+    labels = [model.fy(d) for d in req.company.dates]
+    if len(labels) != len(req.company.hist):
+        raise HTTPException(422, "company.dates and company.hist differ in length.")
+    try:
+        return model.default_assumptions(req.company.model_dump()["hist"], exclude=set(req.excluded_years),
+                                         labels=labels)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 
 @app.post("/api/project")

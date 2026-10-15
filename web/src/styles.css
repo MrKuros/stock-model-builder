@@ -116,6 +116,15 @@ a { color: var(--pencil); }
 .status .bad { color: var(--neg); }
 .check-list { margin: 10px 0 0; padding: 12px 12px 12px 30px; background: var(--amber-soft); border-radius: var(--radius); font: 13px/1.6 var(--mono); color: var(--amber); }
 
+.oneoffs { margin: 10px 0 0; padding: 12px 14px; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius); font-size: 14px; }
+.oneoffs > p { margin: 0 0 6px; }
+.oneoffs ul { list-style: none; margin: 0; padding: 0; }
+.oneoffs li { padding: 8px 0; border-top: 1px solid var(--rule); display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+.exclude { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); white-space: nowrap; cursor: pointer; }
+.exclude input { accent-color: var(--pencil); width: 16px; height: 16px; margin: 0; }
+.oneoff-note:empty { display: none; }
+.oneoff-note { margin: 8px 0 0; font-size: 13px; color: var(--pencil); }
+
 /* assumptions panel */
 .drivers {
   grid-area: drivers;

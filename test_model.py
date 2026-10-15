@@ -90,6 +90,33 @@ def main():
     d = model.default_assumptions(h)
     assert abs(d["growth"]) < 1e-9 and d["int_rate"] < 0.3 and d["oi_pct"] == 0.02, d
 
+    # one-off years: robust 2-sigma vs the company's own median, floors, >= 4 values, loss years skip tax
+    labels = [model.fy(d) for d in co["dates"]]
+    assert model.detect_oneoffs(co["hist"], labels) == [], "steady synthetic history must flag nothing"
+    odd = [dict(x) for x in co["hist"]]
+    odd[4]["other_income"] += 0.08 * odd[4]["revenue"]  # FY2020 exceptional gain, booked in other income
+    odd[4]["pbt"] += 0.08 * odd[4]["revenue"]
+    odd[7]["tax"] = 0.45 * odd[7]["pbt"]  # FY2023 tax spike
+    odd[8]["tax"], odd[8]["pbt"] = 50.0, -10.0  # FY2024 loss year: no tax-rate flag
+    odd[2]["tax"] = 0.27 * odd[2]["pbt"]  # 2 pp wobble on a steady rate: under the floor
+    found = model.detect_oneoffs(odd, labels)
+    assert [(o["year"], o["metric"]) for o in found] == [("FY2020", "oi_pct"), ("FY2023", "tax_rate")], found
+    assert found[0]["note"] == "FY2020 other income was 10.0% of revenue, typically 2.0%", found[0]["note"]
+    assert abs(found[1]["value"] - 0.45) < 1e-3 and abs(found[1]["typical"] - 0.25) < 1e-3, found[1]
+    assert model.detect_oneoffs(odd[3:6], labels[3:6]) == [], "fewer than 4 years: flag nothing"
+    # excluding years: the window skips them and reaches back; nothing excluded = unchanged
+    assert model.default_assumptions(odd, exclude=set(), labels=labels) == model.default_assumptions(odd)
+    assert model.default_assumptions(odd, exclude={"FY2025"}, labels=labels) == model.default_assumptions(odd[:-1])
+    ex = model.default_assumptions(odd, exclude={"FY2023", "FY2024"}, labels=labels)
+    assert abs(ex["tax_rate"] - 0.25) < 1e-3 and abs(ex["growth"] - 0.12) < 1e-6, ex
+    assert ex["dso"] == model._ros((odd[i]["receivables"] * 365, odd[i]["revenue"]) for i in (5, 6, 9)), ex
+    assert model.default_assumptions(odd, labels=labels)["tax_rate"] > 0.3
+    try:
+        model.default_assumptions(odd, exclude=set(labels[1:]), labels=labels)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "two" in str(e)
+
     for edit, msg in ((_bankify, "bank"), (_no_dimension, None), (_text_cell, "not a number")):
         p = tmp / f"{edit.__name__}.xlsx"
         fake_export(p)
