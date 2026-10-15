@@ -4,7 +4,7 @@ import DriverStrip from './DriverStrip'
 import Statements from './Statements'
 import {
   api, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS,
-  type ModelDoc, type Parsed, type Paths, type Projection, type Row, type Scenario,
+  type ModelDoc, type OneOff, type Parsed, type Paths, type Projection, type Row, type Scenario,
 } from './lib'
 
 const GROUPS: [string, string[]][] = [
@@ -80,7 +80,8 @@ export default function App() {
   }, [parsed, doc])
 
   return parsed && doc
-    ? <Workspace parsed={parsed} doc={doc} setDoc={f => setDoc(d => d && f(d))} onClose={close} />
+    ? <Workspace parsed={parsed} doc={doc} setDoc={f => setDoc(d => d && f(d))} onClose={close}
+        setDefaults={defaults => setParsed(p => p && { ...p, defaults })} />
     : <Landing onOpen={open} />
 }
 
@@ -148,10 +149,11 @@ interface WorkspaceProps {
   parsed: Parsed
   doc: ModelDoc
   setDoc: (f: (d: ModelDoc) => ModelDoc) => void
+  setDefaults: (d: Record<string, number>) => void
   onClose: () => void
 }
 
-function Workspace({ parsed, doc, setDoc, onClose }: WorkspaceProps) {
+function Workspace({ parsed, doc, setDoc, setDefaults, onClose }: WorkspaceProps) {
   const { company, years: histYears, ratios, defaults, checks, drivers, layout } = parsed
   const { n, active, scenarios } = doc
   const a = scenarios[active]
@@ -164,6 +166,9 @@ function Workspace({ parsed, doc, setDoc, onClose }: WorkspaceProps) {
   const [error, setError] = useState<string | null>(null)
   const [metric, setMetric] = useState(METRICS[0][0])
   const [showChecks, setShowChecks] = useState(false)
+  const [showOneoffs, setShowOneoffs] = useState(false)
+  const [pending, setPending] = useState<string | null>(null) // year whose exclusion is being applied
+  const [defaultsNote, setDefaultsNote] = useState('')
   const [exporting, setExporting] = useState(false)
   const hist = company.hist
   const nHist = hist.length
@@ -207,6 +212,22 @@ function Workspace({ parsed, doc, setDoc, onClose }: WorkspaceProps) {
     setDoc(d => ({ ...d, scenarios: next }))
   }
 
+  const excluded = doc.excluded_years
+  const oneoffYears = Object.entries((parsed.oneoffs ?? []).reduce<Record<string, OneOff[]>>(
+    (g, o) => ({ ...g, [o.year]: [...(g[o.year] ?? []), o] }), {}))
+  // fetch first, then store the year and its defaults together, so the two never disagree
+  const toggleYear = async (year: string) => {
+    const next = excluded.includes(year) ? excluded.filter(y => y !== year) : [...excluded, year]
+    setPending(year)
+    try {
+      const d = await api<Record<string, number>>('/api/defaults', postJson({ company, excluded_years: next }))
+      setDefaults(d)
+      setDoc(doc => ({ ...doc, excluded_years: next }))
+      setDefaultsNote(`Defaults ${next.length ? `now leave out ${histYears.filter(y => next.includes(y)).join(', ')}` : 'use every year again'}. ` +
+        'Your assumptions haven’t changed; Reset applies the new defaults to a scenario.')
+    } catch (e) { setError((e as Error).message) } finally { setPending(null) }
+  }
+
   return (
     <div className="workspace">
       <div className="head-area">
@@ -245,9 +266,21 @@ function Workspace({ parsed, doc, setDoc, onClose }: WorkspaceProps) {
             {checks.length} issue{checks.length > 1 ? 's' : ''} in the reported data
           </button>
         )}
+        {oneoffYears.length > 0 && (
+          <button type="button" className="warn" onClick={() => setShowOneoffs(s => !s)} aria-expanded={showOneoffs}
+            aria-controls="oneoffs">
+            {oneoffYears.length} unusual year{oneoffYears.length > 1 ? 's' : ''}
+            {excluded.length > 0 && <> · {excluded.length} left out of defaults</>}
+          </button>
+        )}
         {error && <span className="bad" role="alert">{error}</span>}
       </div>
       {showChecks && <ul className="check-list">{checks.map(c => <li key={c}>{c}</li>)}</ul>}
+      {showOneoffs && (
+        <OneOffs id="oneoffs" years={oneoffYears} histYears={histYears} excluded={excluded} pending={pending}
+          note={defaultsNote} onToggle={toggleYear} />
+      )}
+
       </div>
 
       <aside className="drivers" aria-label="Assumptions">
@@ -308,6 +341,38 @@ function Workspace({ parsed, doc, setDoc, onClose }: WorkspaceProps) {
         <Statements layout={layout} years={years} rows={rows} nHist={nHist} />
       </div>
     </div>
+  )
+}
+
+/** Flagged years as sentences, each with a switch to leave that year out of the defaults. */
+function OneOffs({ id, years, histYears, excluded, pending, note, onToggle }: {
+  id: string; years: [string, OneOff[]][]; histYears: string[]; excluded: string[]; pending: string | null
+  note: string; onToggle: (year: string) => void
+}) {
+  const used = histYears.filter(y => !excluded.includes(y)).slice(-3) // mirrors default_assumptions(years=3)
+  return (
+    <section id={id} className="oneoffs" aria-label="Unusual years">
+      <p className="muted small">
+        Years far from this company’s own history (more than 2σ from its median). Defaults use the last three
+        reported years that aren’t left out.
+      </p>
+      <ul>
+        {years.map(([year, items]) => (
+          <li key={year}>
+            <span>{items.map(o => o.note).join('. ')}.</span>
+            <label className="exclude">
+              <input type="checkbox" checked={excluded.includes(year)} disabled={pending != null}
+                aria-busy={pending === year} onChange={() => onToggle(year)} />
+              Exclude from defaults
+            </label>
+            {!used.includes(year) && !excluded.includes(year) && (
+              <span className="muted small"> Older than the years the defaults use, so excluding it changes nothing.</span>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="oneoff-note" role="status">{note}</p>
+    </section>
   )
 }
 

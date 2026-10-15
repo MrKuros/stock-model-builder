@@ -38,12 +38,15 @@ export interface ModelDoc {
   excluded_years: string[]
   saved_at: string | null
 }
+/** A reported year whose metric sits far from the company's own median (model.detect_oneoffs). */
+export interface OneOff { year: string; metric: string; value: number; typical: number; note: string }
 export interface Parsed {
   company: Company
   years: string[]
   ratios: Row[]
   defaults: Record<string, number>
   checks: string[]
+  oneoffs?: OneOff[] // missing in sessions saved before one-off detection
   drivers: Driver[]
   layout: LayoutLine[]
 }
