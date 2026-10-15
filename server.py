@@ -123,7 +123,12 @@ class ModelRequest(BaseModel):
 
     def dcf(self, co, sc, n, out):
         ex = {s: model.expand(sc[s], n) for s in model.SCENARIOS}
-        return model.valuation(out, co["hist"], self.valuation.model_dump(), ex["base"], co["market"], inputs=ex)
+        v = model.valuation(out, co["hist"], self.valuation.model_dump(), ex["base"], co["market"], inputs=ex)
+        try:  # extreme but finite inputs (shares 1e-320, rates 1e308) can overflow; JSON can't carry inf/NaN
+            json.dumps(v, allow_nan=False)
+        except ValueError:
+            raise HTTPException(422, "Those valuation inputs make the numbers too large to value. Try smaller values.")
+        return v
 
 
 class ModelDoc(ModelRequest):

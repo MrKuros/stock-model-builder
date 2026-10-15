@@ -38,7 +38,9 @@ export interface ValInputs {
 /** One scenario's DCF (model.valuation). Nulls when WACC doesn't clear terminal growth, or no shares. */
 export interface ScenarioValue {
   fcff: number[]; pv: number[] | null; pv_sum: number | null; tv: number | null; pv_tv: number | null
-  ev: number | null; equity: number | null; per_share: number | null; upside: number | null; tv_share: number | null
+  ev: number | null; minority: number | null; equity: number | null; per_share: number | null; upside: number | null
+  tv_share: number | null
+  error: string | null // this scenario only, e.g. a negative final-year FCFF (no terminal value); the WACC error is global
   grid: (number | null)[][] // value per share: WACC + steps.wacc (rows) x g + steps.g (columns)
   grid_gm: (number | null)[][] // revenue growth + steps.growth (rows) x EBITDA margin + steps.margin, every year
   implied_growth?: number | null // reverse DCF: flat revenue growth at which value per share = price; null = none in range
@@ -49,11 +51,13 @@ export type Multiple = 'pe' | 'ev_ebitda' | 'pb'
 export type Multiples = Record<Multiple, number | null> // null: no market cap, a value <= 0, or a denominator <= 0
 export interface Valuation {
   price: number | null; shares: number | null; ke: number; kd: number; tax: number; kd_after_tax: number
-  e: number; d: number; we: number; wacc: number; g: number; error: string | null
+  e: number; d: number; we: number; wacc: number; wacc_build: number; g: number; error: string | null
+  nci: number // minorities' share of profit deducted from equity (base scenario, first projected year)
   borrowings: number; cash: number; investments: number; scenarios: Record<Scenario, ScenarioValue>
   /** Each reported year end's multiples (year-end price), with their median, low and high. Missing on an old server. */
   multiples?: { hist: Record<Multiple, (number | null)[]>; median: Multiples; min: Multiples; max: Multiples }
-  steps: { wacc: number[]; g: number[]; growth: number[]; margin: number[]; implied?: [number, number] }
+  /** Missing on a server not yet restarted after an update; the panel then hides the grids. */
+  steps?: { wacc: number[]; g: number[]; growth: number[]; margin: number[]; implied?: [number, number] }
 }
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
 export interface ModelDoc {

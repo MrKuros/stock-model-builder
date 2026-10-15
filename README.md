@@ -58,7 +58,7 @@ Then open the app, drop in a Export.in export, or click **Explore with a sample 
 | Tests | Plain-assert self-check, plus LibreOffice headless for Excel recalculation |
 
 ```
-model.py          parse, checks, defaults, projection, ratios, one-offs, Excel export
+model.py          parse, checks, defaults, projection, ratios, one-offs, valuation, Excel export
 server.py         API + local model library
 test_model.py     self-check incl. Excel parity
 web/src/          App, DriverStrip (assumption strips), Chart, Statements, Valuation
