@@ -284,6 +284,17 @@ a { color: var(--pencil); }
 .split { display: inline-flex; align-items: center; gap: 8px; }
 .split-bar { display: inline-block; width: 48px; height: 6px; border-radius: 3px; background: var(--pencil-soft); overflow: hidden; }
 .split-bar span { display: block; height: 100%; background: var(--pencil); }
+.sens { margin: 14px 0 8px; }
+.sens h3 { font: 600 15px/1.3 var(--display); }
+.sens > p { margin: 2px 0 8px; }
+.sens-grids { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 8px 20px; }
+.table-wrap.sens-wrap { margin: 0; }
+.sens-table caption { text-align: left; font: 13px var(--body); color: var(--ink-2); padding: 0 0 6px; caption-side: top; }
+.sens-table th, .sens-table td { padding: 5px 8px; }
+.sens-table thead th { font: 12px var(--mono); }
+.sens-table thead th:first-child, .sens-table tbody th { font: 12px var(--mono); color: var(--ink-2); padding-left: 4px; }
+.sens-table td { color: var(--ink); } /* the shade carries pencil vs amber; ink text keeps 4.5:1 on it */
+.sens-table td.is-current { outline: 2px solid var(--ink); outline-offset: -2px; font-weight: 700; }
 
 .table-wrap { overflow-x: auto; margin: 0 -16px; }
 table { border-collapse: collapse; width: 100%; font: 13px/1.3 var(--mono); font-variant-numeric: tabular-nums; }

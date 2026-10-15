@@ -233,7 +233,7 @@ def main():
         assert ws["B3"].value == i + 1 and ws["C3"].value == s.title(), (ws["B3"].value, ws["C3"].value)
         for j, c in enumerate(projs[s]):  # incl. the per-year driver cells picked by CHOOSE
             _same(ws, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ex[s].items()}}, (s, j))
-        _same_valuation(ws.parent["Valuation"], model.valuation(projs, co["hist"], None, ex["base"], co["market"]), s)
+        _same_valuation(ws.parent["Valuation"], model.valuation(projs, co["hist"], None, ex["base"], co["market"], ex), s)
     for j, h in enumerate(co["hist"]):  # historical ratio formulas, incl. first year on closing balances
         _same(ws, rows, 2 + j, {k: h[k] for k in ("ebitda", *RETURNS)}, ("hist", j))
     # zero interest and negative EBITDA must come out blank in both
@@ -249,7 +249,8 @@ def main():
     for j, c in enumerate(proj0):
         _same(ws0, rows, 2 + len(co["hist"]) + j, c, ("zero", j))
     flat0 = model.expand({k: {"start": v, "end": None} for k, v in zero.items()}, 2)
-    val0 = model.valuation(dict.fromkeys(model.SCENARIOS, proj0), co["hist"], v0, flat0, None)
+    val0 = model.valuation(dict.fromkeys(model.SCENARIOS, proj0), co["hist"], v0, flat0, None,
+                           dict.fromkeys(model.SCENARIOS, flat0))
     assert val0["shares"] is None and val0["scenarios"]["base"]["per_share"] is None and val0["kd"] == 0.09, val0
     _same_valuation(ws0.parent["Valuation"], val0, "base")
     # debt faded to zero over 10 years: float residue (1e-14 cr) must read as no interest cover, in both
@@ -266,7 +267,8 @@ def main():
     ws10 = recalc(tmp / "payoff" / "model.xlsx", tmp / "calc10")
     for j, c in enumerate(proj10):
         _same(ws10, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ep.items()}}, ("payoff", j))
-    val10 = model.valuation(dict.fromkeys(model.SCENARIOS, proj10), co["hist"], v10, ep, co["market"])
+    val10 = model.valuation(dict.fromkeys(model.SCENARIOS, proj10), co["hist"], v10, ep, co["market"],
+                            dict.fromkeys(model.SCENARIOS, ep))
     assert "0.5 pp" in val10["error"] and val10["scenarios"]["base"]["ev"] is None and val10["e"] == 8000, val10
     _same_valuation(ws10.parent["Valuation"], val10, "base")
     vs10 = ws10.parent["Valuation"]
@@ -277,7 +279,7 @@ def main():
 
 def valuation_check(co, projs, ex):
     """DCF arithmetic, written out by hand for the synthetic company (price 1600, 5 cr shares, 200 cr debt)."""
-    v = model.valuation(projs, co["hist"], None, ex["base"], co["market"])
+    v = model.valuation(projs, co["hist"], None, ex["base"], co["market"], ex)
     last, tax = co["hist"][-1], ex["base"]["tax_rate"][0]
     we = 8000 / 8200
     wacc = we * (0.065 + 1.0 * 0.07) + (1 - we) * ex["base"]["int_rate"][0] * (1 - tax)
@@ -295,6 +297,17 @@ def valuation_check(co, projs, ex):
         assert abs(got["ev"] - (pv + tv)) < 1e-9 and abs(got["per_share"] - eq / 5) < 1e-9, (s, got["ev"], pv + tv)
         assert abs(got["upside"] - (eq / 5 / 1600 - 1)) < 1e-12 and got["grid"][2][2] == got["per_share"], s
         assert got["grid"][0][4] > got["grid"][2][2] > got["grid"][4][0], "lower WACC / higher growth = higher value"
+        gm, a = got["grid_gm"], got["grid"]
+        assert gm[2][2] == got["per_share"], (s, gm[2][2])  # the centre is the scenario as it stands
+        down = lambda g: all(g[k][i] > g[k + 1][i] for k in range(4) for i in range(5))  # noqa: E731
+        right = lambda g: all(g[k][i] < g[k][i + 1] for k in range(5) for i in range(4))  # noqa: E731
+        # value falls as WACC rises (rows) and rises with terminal growth and with margin. No rule for revenue
+        # growth: in the bear case (12% capex) growing faster destroys value at low margins, as it should
+        assert down(a) and right(a) and right(gm), (s, a, gm)
+        # a cell is the full projection re-run with the shift on every year
+        up = dict(ex[s], growth=[x + 0.02 for x in ex[s]["growth"]], ebitda_margin=[x - 0.01 for x in ex[s]["ebitda_margin"]])
+        one = model.valuation({s: model.project(co["hist"], up, 5)}, co["hist"], None, ex["base"], co["market"])
+        assert abs(gm[3][1] - one["scenarios"][s]["per_share"]) < 1e-9, (s, gm[3][1])
     assert v["scenarios"]["bull"]["per_share"] > v["scenarios"]["base"]["per_share"] > v["scenarios"]["bear"]["per_share"]
     # year-end discounting is worth less than mid-year; typed price/shares win over market data
     ye = model.valuation(projs, co["hist"], {"mid_year": False, "price": 800.0, "shares": 10.0}, ex["base"], co["market"])
@@ -305,6 +318,9 @@ def valuation_check(co, projs, ex):
     assert bad["error"] and bad["scenarios"]["base"]["per_share"] is None, bad["error"]
     mid = bad["scenarios"]["base"]["grid"][2]  # WACC 5.4% against growth 4, 4.5, 5, 5.5, 6%
     assert None not in mid[:2] and mid[2:] == [None] * 3, mid
+    assert "grid_gm" not in bad["scenarios"]["base"]  # only asked for with inputs
+    bad = model.valuation(projs, co["hist"], {"wacc_override": 0.054, "g": 0.05}, ex["base"], co["market"], ex)
+    assert bad["scenarios"]["bear"]["grid_gm"] == [[None] * 5] * 5  # same WACC and growth: every cell fails
     assert "above zero" in model.valuation(projs, co["hist"], {"wacc_override": -0.01, "g": -0.1}, ex["base"],
                                            None)["error"]
 
@@ -433,10 +449,13 @@ def _same_valuation(vs, v, s):
     cells += [(at[label], 2, sv[k]) for label, k in VAL_SCEN.items()]
     cells += [(at["Discount period (years)"], 2 + j, p) for j, p in enumerate(v["period"])]
     cells += [(at[label], 2 + j, None if sv[k] is None else sv[k][j]) for label, k in VAL_YEARS.items() for j in range(n)]
-    top = next(r for label, r in at.items() if label.startswith("VALUE PER SHARE"))
+    top = next(r for label, r in at.items() if label.startswith("VALUE PER SHARE (Rs): WACC"))
     cells += [(top, 2 + i, v["g"] + dg) for i, dg in enumerate(model.GRID_G)]
     cells += [(top + 1 + k, 1, v["wacc"] + dw) for k, dw in enumerate(model.GRID_WACC)]
     cells += [(top + 1 + k, 2 + i, x) for k, row in enumerate(sv["grid"]) for i, x in enumerate(row)]
+    top = next(r for label, r in at.items() if label.startswith("VALUE PER SHARE (Rs): REVENUE")) + 1
+    assert vs.cell(top, 2).value == "-2 pp" and vs.cell(top + 1, 1).value == "-4 pp", vs.cell(top, 2).value
+    cells += [(top + 1 + k, 2 + i, x) for k, row in enumerate(sv["grid_gm"]) for i, x in enumerate(row)]
     for r, c, want in cells:
         got = vs.cell(r, c).value
         if want is None:
