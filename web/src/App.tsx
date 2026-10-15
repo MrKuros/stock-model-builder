@@ -178,7 +178,7 @@ function Landing({ onOpen }: { onOpen: (o: Opened) => void }) {
 
   return (
     <main className="landing">
-      <p className="wordmark">Financial model</p>
+      <p className="wordmark">Stock Model Builder</p>
       <h1>Turn a company’s reported numbers into a forecast you can steer.</h1>
       <p className="lede">
         Reported years come in <span className="ink-word">ink</span>. You set the future in{' '}
@@ -302,6 +302,10 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
 
   const byKey = Object.fromEntries(drivers.map(d => [d[0], d]))
   const balanced = proj?.every(r => Math.abs(r.chk_bs ?? 0) < 0.5 && Math.abs(r.chk_cash ?? 0) < 0.5)
+  // A check that fails must say so; a small gap in the first year only comes from rounding in the reported balance sheet
+  const offIdx = proj ? proj.findIndex(r => Math.abs(r.chk_bs ?? 0) >= 0.5 || Math.abs(r.chk_cash ?? 0) >= 0.5) : -1
+  const off = offIdx >= 0 ? Math.max(Math.abs(proj![offIdx].chk_bs ?? 0), Math.abs(proj![offIdx].chk_cash ?? 0)) : 0
+  const roundingOnly = offIdx === 0 && off <= 2 && proj!.slice(1).every(r => Math.abs(r.chk_bs ?? 0) < 0.5 && Math.abs(r.chk_cash ?? 0) < 0.5)
   const borrowed = proj ? proj.reduce((s, r) => s + (r.revolver ?? 0), 0) : 0
   const m = METRICS.find(x => x[0] === metric)!
   const others = proj ? SCENARIOS.filter(s => s !== active).map(s => ({
@@ -365,6 +369,9 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
 
       <div className="status" aria-live="polite">
         {balanced && <span className="ok">Balance sheet balances in every projected year</span>}
+        {offIdx >= 0 && (roundingOnly
+          ? <span className="ok">Balance sheet balances; {projYears[0]} cash is off by Rs {money(off)} cr from rounding in the reported figures</span>
+          : <span className="bad" role="alert">Balance check fails in {projYears[offIdx]} by Rs {money(off)} cr</span>)}
         {checks.length > 0 && (
           <button type="button" className="warn" onClick={() => setShowChecks(s => !s)} aria-expanded={showChecks}>
             {checks.length} issue{checks.length > 1 ? 's' : ''} in the reported data
