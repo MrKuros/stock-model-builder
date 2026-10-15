@@ -309,6 +309,18 @@ def valuation_check(co, projs, ex):
         one = model.valuation({s: model.project(co["hist"], up, 5)}, co["hist"], None, ex["base"], co["market"])
         assert abs(gm[3][1] - one["scenarios"][s]["per_share"]) < 1e-9, (s, gm[3][1])
     assert v["scenarios"]["bull"]["per_share"] > v["scenarios"]["base"]["per_share"] > v["scenarios"]["bear"]["per_share"]
+    # reverse DCF: the implied flat growth, plugged back in, gives today's price (within 0.1%)
+    # bear (12% capex) can't reach Rs 1,600 at any growth: value barely moves with it, so no solution in range
+    assert v["scenarios"]["bear"]["implied_growth"] is None
+    for s in ("base", "bull"):
+        x = v["scenarios"][s]["implied_growth"]
+        back = model.valuation({s: model.project(co["hist"], dict(ex[s], growth=x), 5)}, co["hist"], None, ex["base"],
+                               co["market"])["scenarios"][s]["per_share"]
+        assert -0.3 < x < 0.8 and abs(back / 1600 - 1) < 0.001, (s, x, back)
+    # no solution in range, no price, and a WACC error all come back as None
+    far = model.valuation(projs, co["hist"], {"price": 1e7}, ex["base"], co["market"], ex)
+    assert far["scenarios"]["base"]["implied_growth"] is None, far["scenarios"]["base"]["implied_growth"]
+    assert model.valuation(projs, co["hist"], None, ex["base"], None, ex)["scenarios"]["base"]["implied_growth"] is None
     # year-end discounting is worth less than mid-year; typed price/shares win over market data
     ye = model.valuation(projs, co["hist"], {"mid_year": False, "price": 800.0, "shares": 10.0}, ex["base"], co["market"])
     assert ye["scenarios"]["base"]["ev"] < v["scenarios"]["base"]["ev"] and ye["e"] == 8000 and ye["price"] == 800, ye
@@ -321,6 +333,7 @@ def valuation_check(co, projs, ex):
     assert "grid_gm" not in bad["scenarios"]["base"]  # only asked for with inputs
     bad = model.valuation(projs, co["hist"], {"wacc_override": 0.054, "g": 0.05}, ex["base"], co["market"], ex)
     assert bad["scenarios"]["bear"]["grid_gm"] == [[None] * 5] * 5  # same WACC and growth: every cell fails
+    assert bad["scenarios"]["bear"]["implied_growth"] is None
     assert "above zero" in model.valuation(projs, co["hist"], {"wacc_override": -0.01, "g": -0.1}, ex["base"],
                                            None)["error"]
 
@@ -437,7 +450,7 @@ VAL_CELLS = {"Cost of debt, pre-tax": "kd", "Tax rate": "tax", "Share price (Rs)
 VAL_SCEN = {"PV of explicit years": "pv_sum", "Terminal value (Gordon growth on final-year FCFF)": "tv",
             "PV of terminal value": "pv_tv", "Enterprise value": "ev", "Equity value": "equity",
             "Value per share (Rs)": "per_share", "Upside vs share price": "upside",
-            "Terminal value share of EV": "tv_share"}
+            "Terminal value share of EV": "tv_share", "Revenue growth implied by share price": "implied_growth"}
 VAL_YEARS = {"Free cash flow to firm": "fcff", "Discount factor": "df", "Present value": "pv"}
 
 

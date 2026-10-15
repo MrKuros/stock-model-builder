@@ -447,6 +447,7 @@ GRID_G = (-0.01, -0.005, 0.0, 0.005, 0.01)
 # second grid: shifts added to every projected year of revenue growth (rows) and EBITDA margin (columns)
 GRID_GROWTH = (-0.04, -0.02, 0.0, 0.02, 0.04)
 GRID_MARGIN = (-0.02, -0.01, 0.0, 0.01, 0.02)
+IMPLIED_RANGE = (-0.30, 0.80)  # reverse DCF: flat revenue growth searched between these
 
 
 def _dcf(fcff, period, w, g):
@@ -464,7 +465,8 @@ def valuation(projs, hist, val, base, market, inputs=None):
     """DCF (free cash flow to firm) of each scenario, discounted from the last reported year end.
     projs: {scenario: project() rows}; val: VALUATION-shaped inputs; base: the base scenario's per-year inputs
     (expand()), for the default cost of debt and the WACC tax rate; market: the company's market data.
-    inputs: {scenario: expand()} adds "grid_gm" per scenario (re-runs project() 25 times each).
+    inputs: {scenario: expand()} adds "grid_gm" per scenario (re-runs project() 25 times each) and
+    "implied_growth" (reverse DCF, about 50 more runs each).
     Mirrors the Valuation sheet in to_excel()."""
     v, last = {**VALUATION, **(val or {})}, hist[-1]
     market = market or {}
@@ -501,10 +503,12 @@ def valuation(projs, hist, val, base, market, inputs=None):
         if inputs:
             out[s]["grid_gm"] = [[_shifted(hist, inputs[s], dgr, dm, period, wacc, g, per_share) for dm in GRID_MARGIN]
                                  for dgr in GRID_GROWTH]
+            out[s]["implied_growth"] = _implied(hist, inputs[s], period, wacc, g, per_share, price)
     return {"inputs": v, "price": price, "shares": shares, "ke": ke, "kd": kd, "tax": tax, "kd_after_tax": kd_at,
             "e": e, "d": d, "we": we, "wacc": wacc, "g": g, "period": period, "error": error,
             "borrowings": last["borrowings"], "cash": last["cash"], "investments": last["investments"],
-            "steps": {"wacc": GRID_WACC, "g": GRID_G, "growth": GRID_GROWTH, "margin": GRID_MARGIN}, "scenarios": out}
+            "steps": {"wacc": GRID_WACC, "g": GRID_G, "growth": GRID_GROWTH, "margin": GRID_MARGIN,
+                      "implied": IMPLIED_RANGE}, "scenarios": out}
 
 
 def _shifted(hist, a, dgr, dm, period, wacc, g, per_share):
@@ -513,6 +517,36 @@ def _shifted(hist, a, dgr, dm, period, wacc, g, per_share):
     fcff = [r["fcff"] for r in project(hist, a, len(period))]
     v = per_share((_dcf(fcff, period, wacc, g) or {}).get("ev"))
     return v if v is not None and math.isfinite(v) else None
+
+
+def _implied(hist, a, period, wacc, g, per_share, price):
+    """Reverse DCF: the flat revenue growth (every projected year, other drivers as they are) at which value per
+    share equals the price. None without a price or per-share value, or when no growth in IMPLIED_RANGE gets there."""
+    def gap(x):
+        v = per_share((_dcf([r["fcff"] for r in project(hist, {**a, "growth": x}, len(period))], period, wacc, g)
+                       or {}).get("ev"))
+        return v - price if v is not None and math.isfinite(v) else None
+    if not price or gap(0.0) is None:
+        return None
+    # ponytail: value isn't always monotonic in growth (heavy capex makes growth burn cash), so scan 5 pp steps for
+    # sign changes and bisect the one nearest the scenario's own average growth; a root inside one step can be missed
+    lo, hi = IMPLIED_RANGE
+    xs = [lo + i * 0.05 for i in range(round((hi - lo) / 0.05) + 1)]
+    ys = [gap(x) for x in xs]
+    pairs = [(xs[i], xs[i + 1], ys[i]) for i in range(len(xs) - 1)
+             if ys[i] is not None and ys[i + 1] is not None and (ys[i] == 0 or ys[i] * ys[i + 1] < 0)]
+    if not pairs:
+        return xs[-1] if ys[-1] == 0 else None
+    mean = sum(a["growth"]) / len(a["growth"])
+    lo, hi, ylo = min(pairs, key=lambda p: abs((p[0] + p[1]) / 2 - mean))
+    while hi - lo > 1e-10:
+        mid = (lo + hi) / 2
+        ym = gap(mid)
+        if ylo * ym <= 0:
+            hi = mid
+        else:
+            lo, ylo = mid, ym
+    return (lo + hi) / 2
 
 
 def projected_dates(co, n):
@@ -649,9 +683,10 @@ def _scenario_sheet(wb, scenarios, n, years, formats, head_fill):
     return lambda s, key, j: f"Scenarios!{get_column_letter(2 + j)}{rows[s, key]}"
 
 
-def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm):
+def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, implied):
     """'Valuation' sheet: the DCF of whichever scenario Model!B3 picks. Mirrors valuation().
-    at(key, j) -> Model sheet ref for column j (0 = first reported year); gm: {scenario: grid_gm} values."""
+    at(key, j) -> Model sheet ref for column j (0 = first reported year); gm: {scenario: grid_gm} values;
+    implied: {scenario: implied_growth}."""
     v, m, nh = {**VALUATION, **(val or {})}, co.get("market") or {}, len(co["hist"])
     price = _pos(v["price"] if v["price"] is not None else m.get("price"))
     shares = _pos(v["shares"] if v["shares"] is not None else m.get("shares"))
@@ -746,6 +781,11 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm):
     put("upside", "Upside vs share price",
         f'=IFERROR(IF(ISNUMBER({ref["per_share"]}),{ref["per_share"]}/{ref["price"]}-1,""),"")', pct)
     put("tv_share", "Terminal value share of EV", f'=IFERROR(IF({ref["ev"]}>0,{ref["pv_tv"]}/{ref["ev"]},""),"")', pct)
+    # ponytail: the reverse DCF is a search over whole projections, so like the second grid it ships as values
+    x = ['""' if implied[s] is None else repr(implied[s]) for s in SCENARIOS]
+    put("implied", "Revenue growth implied by share price", f"=CHOOSE(Model!$B$3,{','.join(x)})", pct)
+    vs.cell(r, 3, "Flat every projected year, other inputs as set; value at export (re-run in the app)").font = Font(
+        italic=True, color="808080")
 
     head("VALUE PER SHARE (Rs): WACC (rows) x TERMINAL GROWTH (columns)")
     top = r
@@ -860,7 +900,8 @@ def to_excel(co, scenarios, n=5, active="base", val=None):
     v = valuation({s: project(co["hist"], ex[s], n) for s in SCENARIOS}, co["hist"], val, ex["base"],
                   co.get("market"), inputs=ex)
     _valuation_sheet(wb, co, n, val, src, lambda k, j: f"{get_column_letter(2 + j)}{rows[k]}", headers[nh:],
-                     formats, head_fill, {s: x["grid_gm"] for s, x in v["scenarios"].items()})
+                     formats, head_fill, {s: x["grid_gm"] for s, x in v["scenarios"].items()},
+                     {s: x["implied_growth"] for s, x in v["scenarios"].items()})
     cash_proj = f"{get_column_letter(2 + nh)}{rows['cash']}:{get_column_letter(1 + len(headers))}{rows['cash']}"
     ws.conditional_formatting.add(cash_proj, CellIsRule(operator="lessThan", formula=["0"],
                                                         font=Font(color="C00000", bold=True),

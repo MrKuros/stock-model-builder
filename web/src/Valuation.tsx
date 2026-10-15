@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { niceTicks } from './Chart'
-import { dec2, fmt, money, noNegZero, type Market, type Scenario, type ValInputs, type Valuation } from './lib'
+import { dec2, fmt, money, noNegZero, type Market, type Path, type Scenario, type ValInputs, type Valuation } from './lib'
 
 const ORDER: Scenario[] = ['bear', 'base', 'bull']
 const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
@@ -55,10 +55,12 @@ interface Props {
   market?: Market
   active: Scenario
   asOf: string // last reported year: the valuation date
+  growth: Path // the active scenario's revenue growth, for the reverse DCF sentence
+  n: number
   onChange: (f: (p: ValInputs) => ValInputs) => void
 }
 
-export default function ValuationPanel({ inputs, defaults, v, market, active, asOf, onChange }: Props) {
+export default function ValuationPanel({ inputs, defaults, v, market, active, asOf, growth, n, onChange }: Props) {
   const set = (k: keyof ValInputs) => (x: number | null) => onChange(p => ({ ...p, [k]: x }))
   const buildUp = v ? v.we * v.ke + (1 - v.we) * v.kd_after_tax : null
   const edited = JSON.stringify(inputs) !== JSON.stringify(defaults)
@@ -109,6 +111,7 @@ export default function ValuationPanel({ inputs, defaults, v, market, active, as
           ? <p className="val-empty">Enter shares to get a per-share value.</p>
           : <Ruler v={v} active={active} />}
         {v.shares != null && v.price == null && <p className="muted small">Enter a share price to see the upside.</p>}
+        <Implied v={v} active={active} growth={growth} n={n} />
         <div className="table-wrap" tabIndex={0} role="region" aria-label="Valuation by scenario">
           <table className="val-table">
             <thead>
@@ -144,6 +147,23 @@ export default function ValuationPanel({ inputs, defaults, v, market, active, as
       </>}
     </section>
   )
+}
+
+/** Reverse DCF in one sentence: the flat revenue growth today's price implies, against the scenario's own. */
+function Implied({ v, active, growth, n }: { v: Valuation; active: Scenario; growth: Path; n: number }) {
+  const x = v.scenarios[active].implied_growth, range = v.steps?.implied
+  if (x === undefined || !range || v.price == null || v.shares == null) return null // old server, or nothing to solve
+  const yours = growth.end == null ? fmt(growth.start, 'pct') : `${fmt(growth.start, 'pct')} fading to ${fmt(growth.end, 'pct')}`
+  return x == null
+    ? <p className="implied">
+        No flat revenue growth between {fmt(range[0], 'pct')} and +{fmt(range[1], 'pct')} a year gets the{' '}
+        {NAMES[active].toLowerCase()} case to today’s price of Rs {rs(v.price)}, with its other assumptions as set.
+      </p>
+    : <p className="implied">
+        Today’s price of Rs {rs(v.price)} implies revenue growth of <b>{fmt(x, 'pct')}</b> a year for {n} years,
+        versus your <span className="pencil-num">{yours}</span> ({NAMES[active].toLowerCase()} case, other
+        assumptions as set). The dashed line on the revenue growth strip marks it.
+      </p>
 }
 
 /** Share of EV from the explicit years vs the terminal value, as words and a thin bar. */

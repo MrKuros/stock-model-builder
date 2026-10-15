@@ -41,12 +41,13 @@ export interface ScenarioValue {
   ev: number | null; equity: number | null; per_share: number | null; upside: number | null; tv_share: number | null
   grid: (number | null)[][] // value per share: WACC + steps.wacc (rows) x g + steps.g (columns)
   grid_gm: (number | null)[][] // revenue growth + steps.growth (rows) x EBITDA margin + steps.margin, every year
+  implied_growth?: number | null // reverse DCF: flat revenue growth at which value per share = price; null = none in range
 }
 export interface Valuation {
   price: number | null; shares: number | null; ke: number; kd: number; tax: number; kd_after_tax: number
   e: number; d: number; we: number; wacc: number; g: number; error: string | null
   borrowings: number; cash: number; investments: number; scenarios: Record<Scenario, ScenarioValue>
-  steps: { wacc: number[]; g: number[]; growth: number[]; margin: number[] }
+  steps: { wacc: number[]; g: number[]; growth: number[]; margin: number[]; implied?: [number, number] }
 }
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
 export interface ModelDoc {
