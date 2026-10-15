@@ -121,7 +121,21 @@ def main():
     a["debt_change"] = 25.0
     a["mi_pct"] = -0.05  # exercise the minority path in the Excel parity check below
     a["capex_pct"] = 0.35  # heavy capex: forces the automatic shortfall borrowing
-    proj = model.project(co["hist"], a, n=5)
+
+    # per-year paths: end None = flat, else a straight line from first to last projected year
+    e = model.expand({"g": {"start": 0.1, "end": 0.02}, "f": {"start": 3.0, "end": None}, "x": 7.0}, 5)
+    assert e["f"] == [3.0] * 5 and e["x"] == [7.0] * 5 and e["g"][0] == 0.1 and abs(e["g"][-1] - 0.02) < 1e-15, e
+    assert abs(e["g"][2] - 0.06) < 1e-15 and model.expand({"g": {"start": 1, "end": 9}}, 1) == {"g": [1]}, e
+    flat = model.expand({k: {"start": v, "end": None} for k, v in a.items()}, 5)
+    assert model.project(co["hist"], flat, 5) == model.project(co["hist"], a, 5), "flat path must equal legacy floats"
+    paths = {k: {"start": v, "end": None} for k, v in a.items()}
+    paths.update(growth={"start": 0.18, "end": 0.04}, ebitda_margin={"start": 0.2, "end": 0.26},
+                 capex_pct={"start": 0.35, "end": 0.08}, dso={"start": 30.0, "end": 75.0},
+                 debt_change={"start": 25.0, "end": -60.0}, payout={"start": 0.1, "end": 0.5})
+    ea = model.expand(paths, 5)
+    proj = model.project(co["hist"], ea, n=5)
+    assert proj[0]["revenue"] == co["hist"][-1]["revenue"] * 1.18
+    assert abs(proj[-1]["revenue"] / proj[-2]["revenue"] - 1.04) < 1e-12, "last year must use the end value"
     for c in proj:
         assert abs(c["chk_bs"]) < 1e-6 and abs(c["chk_cash"]) < 1e-6, c
         assert c["cash"] >= -1e-9, c
@@ -134,14 +148,14 @@ def main():
         assert "Data Sheet" in str(e)
 
     out = tmp / "model.xlsx"
-    out.write_bytes(model.to_excel(co, a, n=5))
+    out.write_bytes(model.to_excel(co, paths, n=5))
     if not shutil.which("soffice"):
         print("SKIP Excel formula check: soffice not found")
         return
     ws = recalc(out, tmp / "calc")
     rows = {key: 5 + i for i, (_, key, _) in enumerate(model.LAYOUT) if key}
-    for j, c in enumerate(proj):
-        _same(ws, rows, 2 + len(co["hist"]) + j, c, ("proj", j))
+    for j, c in enumerate(proj):  # incl. the per-year blue input cells
+        _same(ws, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ea.items()}}, ("proj", j))
     for j, h in enumerate(co["hist"]):  # historical ratio formulas, incl. first year on closing balances
         _same(ws, rows, 2 + j, {k: h[k] for k in ("ebitda", *RETURNS)}, ("hist", j))
     # zero interest and negative EBITDA must come out blank in both

@@ -30,9 +30,14 @@ class Company(BaseModel):
     hist: list[dict[str, float | None]]
 
 
+class DriverPath(BaseModel):
+    start: FiniteFloat
+    end: FiniteFloat | None = None  # None = flat; else a straight fade from start to end over the projection
+
+
 class ModelRequest(BaseModel):
     company: Company
-    a: dict[str, FiniteFloat]
+    a: dict[str, DriverPath]
     n: int = 5
 
     def args(self):
@@ -41,11 +46,11 @@ class ModelRequest(BaseModel):
         missing = {k for k, _, _ in model.DRIVERS} - self.a.keys()
         if missing:
             raise HTTPException(422, f"Missing assumptions: {sorted(missing)}")
-        return self.company.model_dump(), self.a, self.n
+        return self.company.model_dump(), {k: v.model_dump() for k, v in self.a.items()}, self.n
 
     def projection(self):
         co, a, n = self.args()
-        proj = model.project(co["hist"], a, n)
+        proj = model.project(co["hist"], model.expand(a, n), n)
         if any(v is not None and not math.isfinite(v) for row in proj for v in row.values()):
             raise HTTPException(422, "Those assumptions make the numbers too large to project. Try smaller values.")
         return co, a, n, proj

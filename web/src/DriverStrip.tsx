@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { fmt, noNegZero, type Kind } from './lib'
+import { fmt, noNegZero, type Kind, type Path } from './lib'
 
 const W = 260, H = 44, HIST_END = 166, PROJ_START = 184, PROJ_END = W - 10, PAD_Y = 6
 const MIN_SPAN: Record<Kind, number> = { pct: 0.04, days: 10, num: 50 } // keeps rounding noise from looking like volatility
@@ -9,16 +9,18 @@ const STEP: Record<Kind, { drag: number; key: number }> = {
   num: { drag: 1, key: 10 },
 }
 
+type End = 'start' | 'end'
+
 interface Props {
   id: string
   label: string
   hint: string
   kind: Kind
   history: (number | null)[]
-  value: number
+  value: Path
   base: number
   baseLabel: string
-  onChange: (v: number) => void
+  onChange: (p: Path) => void
 }
 
 function domainOf(vals: number[], kind: Kind): [number, number] {
@@ -37,35 +39,62 @@ function domainOf(vals: number[], kind: Kind): [number, number] {
 const toText = (v: number, kind: Kind) =>
   noNegZero(kind === 'pct' ? (v * 100).toFixed(1) : String(Math.round(v)))
 
-export default function DriverStrip({ id, label, hint, kind, history, value, base, baseLabel, onChange }: Props) {
-  const known = history.filter((v): v is number => v != null && Number.isFinite(v))
-  const live = domainOf([...known, value, base], kind)
-  const [frozen, setFrozen] = useState<[number, number] | null>(null) // fixed scale while dragging
-  const [lo, hi] = frozen ?? live
-  const y = (v: number) => PAD_Y + (1 - (Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo)) * (H - 2 * PAD_Y)
-  const svgRef = useRef<SVGSVGElement>(null)
-
+/** Typed value box: commits on blur/Enter, Escape restores. */
+function ValueInput({ id, kind, value, ariaLabel, describedBy, onCommit }:
+  { id: string; kind: Kind; value: number; ariaLabel?: string; describedBy: string; onCommit: (v: number) => void }) {
   const [draft, setDraft] = useState(toText(value, kind))
   const editing = useRef(false)
   useEffect(() => {
     if (!editing.current) setDraft(toText(value, kind))
   }, [value, kind])
 
-  const fromPointer = (clientY: number, [l, h]: [number, number]) => {
-    const r = svgRef.current!.getBoundingClientRect()
-    const vy = ((clientY - r.top) / r.height) * H
-    const v = l + (1 - (vy - PAD_Y) / (H - 2 * PAD_Y)) * (h - l)
-    const s = STEP[kind].drag
-    onChange(Math.round(Math.max(l, Math.min(h, v)) / s) * s)
-  }
-
-  const commitDraft = () => {
+  const commit = () => {
     editing.current = false
     // thousands commas only make sense for crore amounts; "1,5" in a % box must not become 15
     const text = (kind === 'pct' ? draft : draft.replace(/,/g, '')).trim()
     const n = /^-?(\d+\.?\d*|\.\d+)$/.test(text) ? parseFloat(text) : NaN
-    if (Number.isFinite(n)) onChange(kind === 'pct' ? n / 100 : n)
+    if (Number.isFinite(n)) onCommit(kind === 'pct' ? n / 100 : n)
     else setDraft(toText(value, kind))
+  }
+
+  return (
+    <input
+      id={id}
+      inputMode="decimal"
+      value={draft}
+      aria-label={ariaLabel}
+      aria-describedby={describedBy}
+      onFocus={e => { editing.current = true; e.currentTarget.select() }}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={e => {
+        if (e.key === 'Enter') e.currentTarget.blur()
+        if (e.key === 'Escape') { setDraft(toText(value, kind)); editing.current = false; e.currentTarget.blur() }
+      }}
+    />
+  )
+}
+
+export default function DriverStrip({ id, label, hint, kind, history, value, base, baseLabel, onChange }: Props) {
+  const fade = value.end != null
+  const end = value.end ?? value.start
+  const known = history.filter((v): v is number => v != null && Number.isFinite(v))
+  const live = domainOf([...known, value.start, end, base], kind)
+  // fixed scale and the handle being dragged, so the strip doesn't rescale under the pointer
+  const [drag, setDrag] = useState<{ dom: [number, number]; which: End } | null>(null)
+  const [lo, hi] = drag?.dom ?? live
+  const y = (v: number) => PAD_Y + (1 - (Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo)) * (H - 2 * PAD_Y)
+  const svgRef = useRef<SVGSVGElement>(null)
+
+  const snap = (v: number) => Math.round(v / STEP[kind].drag) * STEP[kind].drag
+  const set = (which: End, v: number) =>
+    onChange(which === 'start' ? { start: v, end: value.end } : { start: value.start, end: v })
+
+  const fromPointer = (clientY: number, [l, h]: [number, number], which: End) => {
+    const r = svgRef.current!.getBoundingClientRect()
+    const vy = ((clientY - r.top) / r.height) * H
+    const v = l + (1 - (vy - PAD_Y) / (H - 2 * PAD_Y)) * (h - l)
+    set(which, snap(Math.max(l, Math.min(h, v))))
   }
 
   const n = history.length
@@ -73,27 +102,47 @@ export default function DriverStrip({ id, label, hint, kind, history, value, bas
   const pts = history.map((v, i) => (v == null || !Number.isFinite(v) ? null : [hx(i), y(v)] as const))
   const path = pts.reduce((d, p, i) => (p ? d + `${d && pts[i - 1] ? 'L' : 'M'}${p[0]},${p[1]}` : d), '')
   const showZero = lo < 0 && hi > 0
-  const changed = Math.abs(value - base) > STEP[kind].drag / 2
+  const changed = fade || Math.abs(value.start - base) > STEP[kind].drag / 2
   const scale = kind === 'pct' ? 100 : 1 // aria values in the units the user sees
+  const hintId = `${id}-hint`
+
+  const handle = (which: End, cx: number, v: number, name: string) => (
+    <circle
+      className="handle"
+      cx={cx}
+      cy={y(v)}
+      r={6}
+      tabIndex={0}
+      role="slider"
+      aria-label={name}
+      aria-orientation="vertical"
+      aria-valuemin={+(lo * scale).toFixed(1)}
+      aria-valuemax={+(hi * scale).toFixed(1)}
+      aria-valuenow={+(v * scale).toFixed(1)}
+      aria-valuetext={fmt(v, kind)}
+      onKeyDown={e => {
+        const s = STEP[kind].key * (e.shiftKey ? 10 : 1)
+        const map: Record<string, number> = { ArrowUp: v + s, ArrowRight: v + s, ArrowDown: v - s, ArrowLeft: v - s, Home: base }
+        if (e.key in map) {
+          e.preventDefault()
+          set(which, snap(map[e.key]))
+        }
+      }}
+    />
+  )
 
   return (
     <div className="strip">
       <div className="strip-head">
         <label htmlFor={`${id}-input`} className="strip-label">{label}</label>
         <span className="strip-value">
-          <input
-            id={`${id}-input`}
-            inputMode="decimal"
-            value={draft}
-            aria-describedby={`${id}-hint`}
-            onFocus={e => { editing.current = true; e.currentTarget.select() }}
-            onChange={e => setDraft(e.target.value)}
-            onBlur={commitDraft}
-            onKeyDown={e => {
-              if (e.key === 'Enter') e.currentTarget.blur()
-              if (e.key === 'Escape') { setDraft(toText(value, kind)); editing.current = false; e.currentTarget.blur() }
-            }}
-          />
+          <ValueInput id={`${id}-input`} kind={kind} value={value.start} describedBy={hintId}
+            ariaLabel={fade ? `${label}, first projected year` : undefined} onCommit={v => set('start', v)} />
+          {fade && <>
+            <span className="arrow" aria-hidden="true">→</span>
+            <ValueInput id={`${id}-end`} kind={kind} value={end} describedBy={hintId}
+              ariaLabel={`${label}, last projected year`} onCommit={v => set('end', v)} />
+          </>}
           <span className="unit">{kind === 'pct' ? '%' : kind === 'days' ? 'days' : 'cr'}</span>
         </span>
       </div>
@@ -104,29 +153,11 @@ export default function DriverStrip({ id, label, hint, kind, history, value, bas
         <path className="ink-line" d={path} />
         {pts.map((p, i) => p && <circle key={i} className="ink-dot" cx={p[0]} cy={p[1]} r={i === n - 1 ? 2.6 : 1.8} />)}
         <line className="base-line" x1={PROJ_START} x2={PROJ_END} y1={y(base)} y2={y(base)} />
-        <line className="pencil-line" x1={PROJ_START} x2={PROJ_END} y1={y(value)} y2={y(value)} />
-        <circle
-          className="handle"
-          cx={PROJ_END}
-          cy={y(value)}
-          r={6}
-          tabIndex={0}
-          role="slider"
-          aria-label={label}
-          aria-orientation="vertical"
-          aria-valuemin={+(lo * scale).toFixed(1)}
-          aria-valuemax={+(hi * scale).toFixed(1)}
-          aria-valuenow={+(value * scale).toFixed(1)}
-          aria-valuetext={fmt(value, kind)}
-          onKeyDown={e => {
-            const s = STEP[kind].key * (e.shiftKey ? 10 : 1)
-            const map: Record<string, number> = { ArrowUp: value + s, ArrowRight: value + s, ArrowDown: value - s, ArrowLeft: value - s, Home: base }
-            if (e.key in map) {
-              e.preventDefault()
-              onChange(Math.round(map[e.key] / STEP[kind].drag) * STEP[kind].drag)
-            }
-          }}
-        />
+        <line className="pencil-line" x1={PROJ_START} x2={PROJ_END} y1={y(value.start)} y2={y(end)} />
+        {fade
+          ? <>{handle('start', PROJ_START, value.start, `${label}, first projected year`)}
+              {handle('end', PROJ_END, end, `${label}, last projected year`)}</>
+          : handle('start', PROJ_END, value.start, label)}
       </svg>
       {/* Drag zone over the projection side only, so taps and swipes on history still scroll the page. */}
       <div
@@ -134,24 +165,35 @@ export default function DriverStrip({ id, label, hint, kind, history, value, bas
         style={{ left: `${((PROJ_START - 12) / W) * 100}%` }}
         aria-hidden="true"
         onPointerDown={e => {
-          setFrozen(live)
+          // with a fade, the half of the zone you grab picks the handle
+          const r = svgRef.current!.getBoundingClientRect()
+          const x = ((e.clientX - r.left) / r.width) * W
+          const which: End = fade && x >= (PROJ_START + PROJ_END) / 2 ? 'end' : 'start'
+          setDrag({ dom: live, which })
           e.currentTarget.setPointerCapture(e.pointerId)
-          if (e.pointerType !== 'touch') fromPointer(e.clientY, live) // touch: only a deliberate drag moves it
+          if (e.pointerType !== 'touch') fromPointer(e.clientY, live, which) // touch: only a deliberate drag moves it
         }}
-        onPointerMove={e => { if (frozen) fromPointer(e.clientY, frozen) }}
-        onPointerUp={() => setFrozen(null)}
-        onPointerCancel={() => setFrozen(null)}
+        onPointerMove={e => { if (drag) fromPointer(e.clientY, drag.dom, drag.which) }}
+        onPointerUp={() => setDrag(null)}
+        onPointerCancel={() => setDrag(null)}
       />
       </div>
-      <div className="strip-foot" id={`${id}-hint`}>
-        <span>{hint}</span>
-        {changed ? (
-          <button type="button" className="reset" onClick={() => onChange(base)} title={`Reset to ${baseLabel}`}>
-            Reset to {baseLabel}
+      <div className="strip-foot">
+        <span id={hintId}>{hint}</span>
+        <span className="strip-tools">
+          <button type="button" className="fade" aria-pressed={fade}
+            title={fade ? 'Hold one value every year' : 'Slope from a first-year value to a last-year value'}
+            onClick={() => onChange({ start: value.start, end: fade ? null : value.start })}>
+            Fade
           </button>
-        ) : (
-          <span className="base-note">{baseLabel}</span>
-        )}
+          {changed ? (
+            <button type="button" className="reset" onClick={() => onChange({ start: base, end: null })} title={`Reset to ${baseLabel}`}>
+              Reset to {baseLabel}
+            </button>
+          ) : (
+            <span className="base-note">{baseLabel}</span>
+          )}
+        </span>
       </div>
     </div>
   )
