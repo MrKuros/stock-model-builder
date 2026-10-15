@@ -4,6 +4,7 @@ import math
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -35,25 +36,36 @@ class DriverPath(BaseModel):
     end: FiniteFloat | None = None  # None = flat; else a straight fade from start to end over the projection
 
 
+Scenario = Literal["base", "bull", "bear"]
+
+
 class ModelRequest(BaseModel):
+    """The model document (version 3) minus what the engine ignores (excluded_years, saved_at)."""
     company: Company
-    a: dict[str, DriverPath]
+    scenarios: dict[Scenario, dict[str, DriverPath]]
+    active: Scenario = "base"
     n: int = 5
 
     def args(self):
         if not 1 <= self.n <= 15:
             raise HTTPException(422, "Projection years must be between 1 and 15.")
-        missing = {k for k, _, _ in model.DRIVERS} - self.a.keys()
-        if missing:
-            raise HTTPException(422, f"Missing assumptions: {sorted(missing)}")
-        return self.company.model_dump(), {k: v.model_dump() for k, v in self.a.items()}, self.n
+        if len(self.scenarios) != len(model.SCENARIOS):
+            raise HTTPException(422, f"Need all three scenarios: {list(model.SCENARIOS)}")
+        for s, a in self.scenarios.items():
+            missing = {k for k, _, _ in model.DRIVERS} - a.keys()
+            if missing:
+                raise HTTPException(422, f"Missing assumptions in {s}: {sorted(missing)}")
+        sc = {s: {k: v.model_dump() for k, v in a.items()} for s, a in self.scenarios.items()}
+        return self.company.model_dump(), sc, self.n
 
     def projection(self):
-        co, a, n = self.args()
-        proj = model.project(co["hist"], model.expand(a, n), n)
-        if any(v is not None and not math.isfinite(v) for row in proj for v in row.values()):
-            raise HTTPException(422, "Those assumptions make the numbers too large to project. Try smaller values.")
-        return co, a, n, proj
+        co, sc, n = self.args()
+        out = {s: model.project(co["hist"], model.expand(sc[s], n), n) for s in model.SCENARIOS}
+        for s, proj in out.items():
+            if any(v is not None and not math.isfinite(v) for row in proj for v in row.values()):
+                raise HTTPException(422, f"Those {s} assumptions make the numbers too large to project. "
+                                         "Try smaller values.")
+        return co, sc, n, out
 
 
 def _company_payload(co):
@@ -94,15 +106,15 @@ def sample():
 
 @app.post("/api/project")
 def project(req: ModelRequest):
-    co, a, n, proj = req.projection()
-    return {"years": [model.fy(d, True) for d in model.projected_dates(co, n)], "proj": proj}
+    co, _, n, out = req.projection()
+    return {"years": [model.fy(d, True) for d in model.projected_dates(co, n)], "scenarios": out}
 
 
 @app.post("/api/export")
 def export(req: ModelRequest):
-    co, a, n, _ = req.projection()
+    co, sc, n, _ = req.projection()
     safe = re.sub(r"[^\w\- ]+", "", co["name"], flags=re.ASCII).strip() or "company"  # headers are latin-1
-    return Response(model.to_excel(co, a, n),
+    return Response(model.to_excel(co, sc, n, req.active),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{safe} model.xlsx"'})
 

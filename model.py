@@ -7,6 +7,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Font, PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 
 # Screener "Data Sheet" row label -> our key. Labels matched case-insensitively.
@@ -42,6 +43,10 @@ DRIVERS = [
     ("ol_pct", "Other liabilities % revenue", "pct"),
     ("debt_change", "Planned borrowing change per year", "num"),
 ]
+
+# Scenario order is also the Excel selector value (1, 2, 3). The UI seeds bull/bear from base
+# (growth +/- 3 pp, EBITDA margin +/- 1.5 pp, all else equal); the engine just takes three assumption sets.
+SCENARIOS = ("base", "bull", "bear")
 
 LAYOUT = [  # (label, key, kind); kind "head" = section title, None key = blank row
     ("ASSUMPTIONS", None, "head"),
@@ -445,18 +450,59 @@ def _proj_formula(key, x):
     }[key]
 
 
-def to_excel(co, a, n=5):
+def _scenario_sheet(wb, scenarios, n, years, formats, head_fill):
+    """'Scenarios' sheet: one block of blue per-year input cells per scenario. Returns src(scenario, key, j) -> ref."""
+    sc = wb.create_sheet("Scenarios")
+    sc["A1"] = "Per-year inputs for each scenario. The Model sheet uses the one picked in its cell B3."
+    sc["A1"].font = Font(italic=True, color="808080")
+    sc.cell(3, 1, "Assumption").font = Font(bold=True)
+    for j, y in enumerate(years):
+        sc.cell(3, 2 + j, y).font = Font(bold=True)
+    rows, r = {}, 4
+    for s in SCENARIOS:
+        for j in range(n + 1):
+            sc.cell(r, 1 + j).fill = head_fill
+        sc.cell(r, 1, s.upper()).font = Font(bold=True)
+        inputs = expand(scenarios[s], n)
+        for key, label, kind in DRIVERS:
+            r += 1
+            rows[s, key] = r
+            sc.cell(r, 1, label)
+            for j in range(n):
+                c = sc.cell(r, 2 + j, inputs[key][j])
+                c.number_format, c.font = formats[kind], Font(color="0000FF")
+        r += 2
+    sc.column_dimensions["A"].width = 46
+    for j in range(n):
+        sc.column_dimensions[get_column_letter(2 + j)].width = 11
+    sc.freeze_panes = "B4"
+    return lambda s, key, j: f"Scenarios!{get_column_letter(2 + j)}{rows[s, key]}"
+
+
+def to_excel(co, scenarios, n=5, active="base"):
     """Workbook bytes: historicals as values, projections as live formulas, inputs in blue.
-    a: {key: {"start", "end"}} (or floats); each projected year gets its own input cell from expand()."""
-    inputs = expand(a, n)
+    scenarios: {"base"|"bull"|"bear": {key: {"start", "end"}}}. Each scenario's per-year inputs (from expand())
+    sit on the Scenarios sheet; the Model sheet's driver cells pick one with CHOOSE on the selector in B3.
+    A single assumption set {key: ...} is used for all three."""
+    if "base" not in scenarios:
+        scenarios = dict.fromkeys(SCENARIOS, scenarios)
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Model"
     ws["A1"] = co["name"]
     ws["A1"].data_type = "s"  # a name starting with '=' must not become a live formula
     ws["A1"].font = Font(bold=True, size=14)
-    ws["A2"] = "Rs crore. Source: Screener.in export. Blue = input, black = formula."
+    ws["A2"] = ("Rs crore. Source: Screener.in export. Blue = input (B3 and the Scenarios sheet), "
+                "green = picked from the Scenarios sheet, black = formula.")
     ws["A2"].font = Font(italic=True, color="808080")
+    ws["A3"] = "Scenario (1 = base, 2 = bull, 3 = bear)"
+    ws["B3"] = SCENARIOS.index(active) + 1
+    ws["B3"].font = Font(bold=True, color="0000FF")
+    ws["C3"] = '=CHOOSE(B3,"Base","Bull","Bear")'
+    pick = DataValidation(type="whole", operator="between", formula1="1", formula2="3", showErrorMessage=True,
+                          error="Enter 1 (base), 2 (bull) or 3 (bear).")
+    ws.add_data_validation(pick)
+    pick.add("B3")
 
     top = 4  # header row
     rows = {key: top + 1 + i for i, (_, key, _) in enumerate(LAYOUT) if key}
@@ -467,6 +513,7 @@ def to_excel(co, a, n=5):
     formats = {"pct": "0.0%", "days": "0", "num": "#,##0.0;(#,##0.0);-", "chk": "#,##0.00;(#,##0.00);-",
                "x": '0.0"x";-0.0"x"'}
     drivers = {k for k, _, _ in DRIVERS}
+    src = _scenario_sheet(wb, scenarios, n, headers[nh:], formats, head_fill)
 
     ws.cell(top, 1, "Rs crore").font = bold
     for j, h in enumerate(headers):
@@ -488,14 +535,14 @@ def to_excel(co, a, n=5):
             col, prev = get_column_letter(2 + j), get_column_letter(1 + j)
             x = lambda k, p=0, col=col, prev=prev: f"{prev if p else col}{rows[k]}"  # noqa: E731
             cell = ws.cell(r, 2 + j)
-            is_input = j >= nh and key in drivers
             if j < nh:
                 h = co["hist"][j]  # missing cash-flow lines stay blank instead of 0-based formulas
                 cell.value = h.get(key) if key in RAW or h.get(key, 0) is None else _hist_formula(key, x, j > 0)
             else:
-                cell.value = inputs[key][j - nh] if is_input else _proj_formula(key, x)
+                cell.value = (f"=CHOOSE($B$3,{','.join(src(s, key, j - nh) for s in SCENARIOS)})"
+                              if key in drivers else _proj_formula(key, x))
             cell.number_format = formats[kind]
-            cell.font = Font(bold=key in totals, color="0000FF" if is_input else None)
+            cell.font = Font(bold=key in totals, color="008000" if j >= nh and key in drivers else None)
         ws.cell(r, 1).font = Font(bold=key in totals)
 
     ws.column_dimensions["A"].width = 34

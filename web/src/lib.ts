@@ -13,7 +13,31 @@ export const flat = (start: number): Path => ({ start, end: null })
 export const flatAll = (d: Record<string, number>): Paths =>
   Object.fromEntries(Object.entries(d).map(([k, v]) => [k, flat(v)]))
 
+export const SCENARIOS = ['base', 'bull', 'bear'] as const
+export type Scenario = typeof SCENARIOS[number]
+export type Scenarios = Record<Scenario, Paths>
+
+/** Bull and bear start from base: growth ± 3 pp, EBITDA margin ± 1.5 pp, everything else equal. */
+export const SHIFT: Record<string, number> = { growth: 0.03, ebitda_margin: 0.015 }
+export function seed(base: Paths): Scenarios {
+  const move = (sign: number): Paths => Object.fromEntries(Object.entries(base).map(([k, p]) => {
+    const d = (SHIFT[k] ?? 0) * sign
+    return [k, d ? { start: p.start + d, end: p.end == null ? null : p.end + d } : p]
+  }))
+  return { base, bull: move(1), bear: move(-1) }
+}
+
 export interface Company { name: string; dates: string[]; hist: Row[] }
+/** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
+export interface ModelDoc {
+  version: 3
+  company: Company
+  n: number
+  active: Scenario
+  scenarios: Scenarios
+  excluded_years: string[]
+  saved_at: string | null
+}
 export interface Parsed {
   company: Company
   years: string[]
@@ -23,7 +47,7 @@ export interface Parsed {
   drivers: Driver[]
   layout: LayoutLine[]
 }
-export interface Projection { years: string[]; proj: Row[] }
+export interface Projection { years: string[]; scenarios: Record<Scenario, Row[]> }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init)

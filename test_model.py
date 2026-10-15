@@ -147,15 +147,28 @@ def main():
     except ValueError as e:
         assert "Data Sheet" in str(e)
 
-    out = tmp / "model.xlsx"
-    out.write_bytes(model.to_excel(co, paths, n=5))
+    # scenarios: bull/bear seeded like the UI (growth +/- 3 pp, EBITDA margin +/- 1.5 pp), bear also edited
+    bump = lambda p, d: {"start": p["start"] + d, "end": None if p["end"] is None else p["end"] + d}  # noqa: E731
+    seeded = {s: dict(paths, growth=bump(paths["growth"], sign * 0.03),
+                      ebitda_margin=bump(paths["ebitda_margin"], sign * 0.015))
+              for s, sign in (("base", 0), ("bull", 1), ("bear", -1))}
+    seeded["bear"]["capex_pct"] = {"start": 0.12, "end": None}
+    ex = {s: model.expand(seeded[s], 5) for s in model.SCENARIOS}
+    projs = {s: model.project(co["hist"], ex[s], n=5) for s in model.SCENARIOS}
+    assert projs["base"] == proj
+    assert projs["bull"][-1]["revenue"] > proj[-1]["revenue"] > projs["bear"][-1]["revenue"]
+
     if not shutil.which("soffice"):
         print("SKIP Excel formula check: soffice not found")
         return
-    ws = recalc(out, tmp / "calc")
     rows = {key: 5 + i for i, (_, key, _) in enumerate(model.LAYOUT) if key}
-    for j, c in enumerate(proj):  # incl. the per-year blue input cells
-        _same(ws, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ea.items()}}, ("proj", j))
+    for i, s in enumerate(model.SCENARIOS):  # export opens on the active scenario: selector = 1, 2, 3
+        (tmp / s).mkdir()
+        (tmp / s / "model.xlsx").write_bytes(model.to_excel(co, seeded, n=5, active=s))
+        ws = recalc(tmp / s / "model.xlsx", tmp / s / "calc")
+        assert ws["B3"].value == i + 1 and ws["C3"].value == s.title(), (ws["B3"].value, ws["C3"].value)
+        for j, c in enumerate(projs[s]):  # incl. the per-year driver cells picked by CHOOSE
+            _same(ws, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ex[s].items()}}, (s, j))
     for j, h in enumerate(co["hist"]):  # historical ratio formulas, incl. first year on closing balances
         _same(ws, rows, 2 + j, {k: h[k] for k in ("ebitda", *RETURNS)}, ("hist", j))
     # zero interest and negative EBITDA must come out blank in both
