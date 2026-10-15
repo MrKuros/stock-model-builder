@@ -172,7 +172,7 @@ export default function ValuationPanel({ inputs, defaults, v, market, active, as
 function Implied({ v, active, growth, n }: { v: Valuation; active: Scenario; growth: Path; n: number }) {
   const x = v.scenarios[active].implied_growth, range = v.steps?.implied
   if (x === undefined || !range || v.price == null || v.shares == null) return null // old server, or nothing to solve
-  const yours = growth.end == null ? fmt(growth.start, 'pct') : `${fmt(growth.start, 'pct')} fading to ${fmt(growth.end, 'pct')}`
+  const yours = growth.end == null || growth.end === growth.start ? fmt(growth.start, 'pct') : `${fmt(growth.start, 'pct')} fading to ${fmt(growth.end, 'pct')}`
   return x == null
     ? <p className="implied">
         No flat revenue growth between {fmt(range[0], 'pct')} and +{fmt(range[1], 'pct')} a year gets the{' '}
