@@ -6,6 +6,13 @@ export type Driver = [key: string, label: string, kind: Kind]
 export type LineKind = Kind | 'x' // 'x' = multiple, e.g. 2.4x
 export type LayoutLine = [label: string, key: string | null, kind: LineKind | 'chk' | 'head' | null]
 
+/** One assumption over the projection: end null = flat, else a straight line from start (first year) to end (last). */
+export interface Path { start: number; end: number | null }
+export type Paths = Record<string, Path>
+export const flat = (start: number): Path => ({ start, end: null })
+export const flatAll = (d: Record<string, number>): Paths =>
+  Object.fromEntries(Object.entries(d).map(([k, v]) => [k, flat(v)]))
+
 export interface Company { name: string; dates: string[]; hist: Row[] }
 export interface Parsed {
   company: Company

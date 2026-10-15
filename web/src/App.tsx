@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Chart from './Chart'
 import DriverStrip from './DriverStrip'
 import Statements from './Statements'
-import { api, fmt, groupKeys, money, postJson, type Parsed, type Projection, type Row } from './lib'
+import { api, flat, flatAll, fmt, groupKeys, money, postJson, type Parsed, type Paths, type Projection, type Row } from './lib'
 
 const GROUPS: [string, string[]][] = [
   ['Growth and margins', ['growth', 'ebitda_margin', 'oi_pct']],
@@ -34,9 +34,9 @@ const METRICS: [string, string, (r: Row) => number | null][] = [
   ['net_cash', 'Net cash', r => (r.cash ?? 0) + (r.investments ?? 0) - (r.borrowings ?? 0)],
 ]
 const HORIZONS = [3, 5, 7, 10]
-const STORE = 'financial-model:v2' // bump when the saved shape or the driver list changes
+const STORE = 'financial-model:v3' // bump when the saved shape or the driver list changes
 
-interface Saved { parsed: Parsed; a: Record<string, number>; n: number }
+interface Saved { parsed: Parsed; a: Paths; n: number }
 
 /** Last session, or null if missing, corrupt, or saved by an older version of the app. */
 function load(): Saved | null {
@@ -44,7 +44,8 @@ function load(): Saved | null {
     const s = JSON.parse(localStorage.getItem(STORE) ?? 'null')
     const keys: string[] = s?.parsed?.drivers?.map((d: unknown[]) => d[0]) ?? []
     const ok = s?.parsed?.company?.hist?.length && s.parsed.years?.length && s.parsed.layout?.length &&
-      keys.length && keys.every(k => Number.isFinite(s.a?.[k]) && Number.isFinite(s.parsed.defaults?.[k])) &&
+      keys.length && keys.every(k => Number.isFinite(s.a?.[k]?.start) && (s.a[k].end === null || Number.isFinite(s.a[k].end)) &&
+        Number.isFinite(s.parsed.defaults?.[k])) &&
       HORIZONS.includes(s.n)
     return ok ? s : null
   } catch { return null }
@@ -53,10 +54,10 @@ function load(): Saved | null {
 export default function App() {
   const saved = useMemo(load, [])
   const [parsed, setParsed] = useState<Parsed | null>(saved?.parsed ?? null)
-  const [a, setA] = useState<Record<string, number>>(saved?.a ?? {})
+  const [a, setA] = useState<Paths>(saved?.a ?? {})
   const [n, setN] = useState(saved?.n ?? 5)
 
-  const open = (p: Parsed) => { setParsed(p); setA(p.defaults); setN(5) }
+  const open = (p: Parsed) => { setParsed(p); setA(flatAll(p.defaults)); setN(5) }
   const close = () => { setParsed(null); try { localStorage.removeItem(STORE) } catch { /* private mode */ } }
 
   useEffect(() => {
@@ -131,8 +132,8 @@ function Landing({ onOpen }: { onOpen: (p: Parsed) => void }) {
 
 interface WorkspaceProps {
   parsed: Parsed
-  a: Record<string, number>
-  setA: React.Dispatch<React.SetStateAction<Record<string, number>>>
+  a: Paths
+  setA: React.Dispatch<React.SetStateAction<Paths>>
   n: number
   setN: (n: number) => void
   onClose: () => void
@@ -218,9 +219,9 @@ function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
       <aside className="drivers" aria-label="Assumptions">
         <div className="drivers-head">
           <h2>Assumptions</h2>
-          <button type="button" className="link" onClick={() => setA(defaults)}>Reset all</button>
+          <button type="button" className="link" onClick={() => setA(flatAll(defaults))}>Reset all</button>
         </div>
-        <p className="muted small">Dots are reported years. Drag the pencil line, use arrow keys, or type a value.</p>
+        <p className="muted small">Dots are reported years. Drag the pencil line, use arrow keys, or type a value. Fade slopes it from the first projected year to the last.</p>
         {GROUPS.map(([group, keys]) => (
           <section key={group} className="group">
             <h3>{group}</h3>
@@ -232,7 +233,7 @@ function Workspace({ parsed, a, setA, n, setN, onClose }: WorkspaceProps) {
                 hint={HINTS[k] ?? ''}
                 kind={byKey[k][2]}
                 history={ratios.map(r => r[k])}
-                value={a[k] ?? defaults[k]}
+                value={a[k] ?? flat(defaults[k])}
                 base={defaults[k]}
                 baseLabel={k === 'debt_change' ? 'no new debt' : `default ${fmt(defaults[k], byKey[k][2])}`}
                 onChange={v => setA(prev => ({ ...prev, [k]: v }))}

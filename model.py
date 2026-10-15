@@ -285,31 +285,44 @@ def default_assumptions(hist, years=3):
     }
 
 
+def expand(assumptions, n):
+    """{key: {"start", "end"}} -> {key: [n floats]}. end None = flat; otherwise a straight line from start
+    (first projected year) to end (last projected year). A bare float is treated as flat."""
+    out = {}
+    for k, v in assumptions.items():
+        s, e = (v, None) if isinstance(v, (int, float)) else (v["start"], v.get("end"))
+        # ponytail: with one projected year there is no path to walk, so start wins
+        out[k] = [s if e is None or n < 2 else s + (e - s) * t / (n - 1) for t in range(n)]
+    return out
+
+
 def project(hist, a, n=5):
-    """Mirrors the Excel formulas in to_excel(); keep both in sync (test_model.py checks this)."""
+    """Mirrors the Excel formulas in to_excel(); keep both in sync (test_model.py checks this).
+    a[key] is a float (every year) or a list of n per-year values (see expand())."""
     out, p = [], hist[-1]
-    for _ in range(n):
+    for t in range(n):
+        y = {k: v[t] if isinstance(v, list) else v for k, v in a.items()}  # this year's inputs
         c = {}
-        c["revenue"] = p["revenue"] * (1 + a["growth"])
-        c["ebitda"] = c["revenue"] * a["ebitda_margin"]
-        c["other_income"] = c["revenue"] * a["oi_pct"]
-        c["dep"] = p["net_block"] * a["dep_pct"]
-        c["interest"] = p["borrowings"] * a["int_rate"]
+        c["revenue"] = p["revenue"] * (1 + y["growth"])
+        c["ebitda"] = c["revenue"] * y["ebitda_margin"]
+        c["other_income"] = c["revenue"] * y["oi_pct"]
+        c["dep"] = p["net_block"] * y["dep_pct"]
+        c["interest"] = p["borrowings"] * y["int_rate"]
         c["pbt"] = c["ebitda"] + c["other_income"] - c["dep"] - c["interest"]
-        c["tax"] = max(0.0, c["pbt"] * a["tax_rate"])
+        c["tax"] = max(0.0, c["pbt"] * y["tax_rate"])
         # ponytail: minority share / associates flow through cash and reserves; no separate minority-interest liability
-        c["pat"] = (c["pbt"] - c["tax"]) * (1 + a["mi_pct"])
-        c["dividend"] = max(0.0, c["pat"] * a["payout"])
+        c["pat"] = (c["pbt"] - c["tax"]) * (1 + y["mi_pct"])
+        c["dividend"] = max(0.0, c["pat"] * y["payout"])
         c["share_cap"] = p["share_cap"]
         c["reserves"] = p["reserves"] + c["pat"] - c["dividend"]
-        planned = max(0.0, p["borrowings"] + a["debt_change"])
-        c["other_liab"] = c["revenue"] * a["ol_pct"]
-        c["capex"] = c["revenue"] * a["capex_pct"]
+        planned = max(0.0, p["borrowings"] + y["debt_change"])
+        c["other_liab"] = c["revenue"] * y["ol_pct"]
+        c["capex"] = c["revenue"] * y["capex_pct"]
         c["net_block"] = p["net_block"] + c["capex"] - c["dep"]
         c["cwip"], c["investments"] = p["cwip"], p["investments"]
-        c["receivables"] = c["revenue"] * a["dso"] / 365
-        c["inventory"] = c["revenue"] * a["dio"] / 365
-        c["other_ca"] = c["revenue"] * a["oca_pct"]
+        c["receivables"] = c["revenue"] * y["dso"] / 365
+        c["inventory"] = c["revenue"] * y["dio"] / 365
+        c["other_ca"] = c["revenue"] * y["oca_pct"]
         non_cash = sum(c[k] for k in ("net_block", "cwip", "investments", "receivables", "inventory", "other_ca"))
         # revolver: borrow whatever keeps cash >= 0. Interest runs on opening debt, so no circularity.
         # ponytail: never repaid automatically; lower 'Borrowings change' to pay it down
@@ -433,7 +446,9 @@ def _proj_formula(key, x):
 
 
 def to_excel(co, a, n=5):
-    """Workbook bytes: historicals as values, projections as live formulas, inputs in blue."""
+    """Workbook bytes: historicals as values, projections as live formulas, inputs in blue.
+    a: {key: {"start", "end"}} (or floats); each projected year gets its own input cell from expand()."""
+    inputs = expand(a, n)
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Model"
@@ -478,7 +493,7 @@ def to_excel(co, a, n=5):
                 h = co["hist"][j]  # missing cash-flow lines stay blank instead of 0-based formulas
                 cell.value = h.get(key) if key in RAW or h.get(key, 0) is None else _hist_formula(key, x, j > 0)
             else:
-                cell.value = a[key] if is_input else _proj_formula(key, x)
+                cell.value = inputs[key][j - nh] if is_input else _proj_formula(key, x)
             cell.number_format = formats[kind]
             cell.font = Font(bold=key in totals, color="0000FF" if is_input else None)
         ws.cell(r, 1).font = Font(bold=key in totals)
