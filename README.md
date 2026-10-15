@@ -23,7 +23,9 @@ Reported years are drawn in **ink**. Your assumptions are drawn in **blue pencil
 - **Scenarios:** base, bull and bear, shown as overlays on the chart and compared in a single sentence.
 - **Return ratios:** ROE, ROCE, asset turnover, net debt/EBITDA and interest cover, for history and projection.
 - **One-off detection:** unusual years (tax, capex, other income, margin) are flagged with robust statistics (median and MAD). You can leave them out of the defaults.
-- **DCF valuation:** free cash flow to firm discounted at a WACC you build (risk-free rate, equity risk premium, beta, cost of debt), Gordon terminal value, and a bridge to value per share. A price ruler puts today's price (ink) next to the bear, base and bull values (pencil). The Excel export has a live Valuation sheet with a WACC × growth grid.
+- **DCF valuation:** free cash flow to firm discounted at a WACC you build (risk-free rate, equity risk premium, beta, cost of debt), Gordon terminal value, and a bridge to value per share. A price ruler puts today's price (ink) next to the bear, base and bull values (pencil). The Excel export has a live Valuation sheet.
+- **Sensitivity and reverse DCF:** value per share across WACC × terminal growth and revenue growth × EBITDA margin, and the flat revenue growth today's price implies.
+- **Multiples cross-check:** P/E, EV/EBITDA and P/B at today's price and at each scenario's value, against the company's own year-end multiples, with a flag when one sits outside its historical range.
 - **Model library:** models autosave to `models/` locally, and you can reopen any of them from the start page.
 - **Excel export:** every projected cell is a live formula. Inputs are blue, and a scenario selector switches the whole workbook between base, bull and bear.
 
@@ -59,7 +61,7 @@ Then open the app, drop in a Export.in export, or click **Explore with a sample 
 model.py          parse, checks, defaults, projection, ratios, one-offs, Excel export
 server.py         API + local model library
 test_model.py     self-check incl. Excel parity
-web/src/          App, DriverStrip (assumption strips), Chart, Statements
+web/src/          App, DriverStrip (assumption strips), Chart, Statements, Valuation
 ```
 
 ## Design notes
@@ -79,6 +81,6 @@ web/src/          App, DriverStrip (assumption strips), Chart, Statements
 ## Roadmap
 
 1. ~~Daily driver: scenarios, fades, ratios, one-offs, model library~~ ✓
-2. Valuation: DCF (FCFF), sensitivity tables, reverse DCF, multiples
+2. ~~Valuation: DCF (FCFF), sensitivity tables, reverse DCF, multiples~~ ✓
 3. Richer data: BSE/NSE XBRL, annual-report notes (segments, debt maturity), quarterly/TTM
 4. Analyst toolkit: forecast-vs-actual tracking, anomaly radar, peer comparison, watchlist

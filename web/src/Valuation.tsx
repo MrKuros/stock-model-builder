@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { niceTicks } from './Chart'
-import { dec2, fmt, money, noNegZero, type Market, type Path, type Scenario, type ValInputs, type Valuation } from './lib'
+import { dec2, fmt, money, noNegZero, type Market, type Multiple, type Path, type Scenario, type ValInputs, type Valuation } from './lib'
 
 const ORDER: Scenario[] = ['bear', 'base', 'bull']
 const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
@@ -55,12 +55,13 @@ interface Props {
   market?: Market
   active: Scenario
   asOf: string // last reported year: the valuation date
+  next?: string // first projected year
   growth: Path // the active scenario's revenue growth, for the reverse DCF sentence
   n: number
   onChange: (f: (p: ValInputs) => ValInputs) => void
 }
 
-export default function ValuationPanel({ inputs, defaults, v, market, active, asOf, growth, n, onChange }: Props) {
+export default function ValuationPanel({ inputs, defaults, v, market, active, asOf, next, growth, n, onChange }: Props) {
   const set = (k: keyof ValInputs) => (x: number | null) => onChange(p => ({ ...p, [k]: x }))
   const buildUp = v ? v.we * v.ke + (1 - v.we) * v.kd_after_tax : null
   const edited = JSON.stringify(inputs) !== JSON.stringify(defaults)
@@ -138,6 +139,7 @@ export default function ValuationPanel({ inputs, defaults, v, market, active, as
           </table>
         </div>
         {v.shares != null && v.steps && <Sensitivity v={v} active={active} />/* steps: a server not yet restarted has none */}
+        {v.shares != null && v.multiples && next && <Multiples v={v} active={active} asOf={asOf} next={next} />}
         <p className="muted small">
           Equity value = enterprise value − borrowings Rs {money(v.borrowings)} cr + cash Rs {money(v.cash)} cr +
           investments Rs {money(v.investments)} cr ({asOf}). Terminal value: Gordon growth at {fmt(v.g, 'pct')} on the
@@ -305,6 +307,75 @@ function Grid({ id, title, corner, grid, rows, cols, price }: {
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+const MULTS: [Multiple, string, string][] = [
+  ['pe', 'P/E', 'market cap / net profit'],
+  ['ev_ebitda', 'EV/EBITDA', 'enterprise value / EBITDA'],
+  ['pb', 'P/B', 'market cap / book equity'],
+]
+
+/** Today's price and the active scenario's value as P/E, EV/EBITDA and P/B, against the company's own history. */
+function Multiples({ v, active, asOf, next }: { v: Valuation; active: Scenario; asOf: string; next: string }) {
+  const h = v.multiples!, m = v.scenarios[active].multiples!, ps = v.scenarios[active].per_share
+  const years = h.hist.pe.length
+  const priced = MULTS.some(([k]) => h.median[k] != null)
+  const x = (val: number | null) => (val == null ? '–' : fmt(val, 'x'))
+  /** A multiple with a ▲/▼ when it sits outside the history's low–high range. */
+  const cell = (k: Multiple, val: number | null, pencil: boolean) => {
+    const lo = h.min[k], hi = h.max[k]
+    const dir = val == null || lo == null || hi == null ? 0 : val > hi ? 1 : val < lo ? -1 : 0
+    return (
+      <td className={`${pencil ? 'pencil-num' : ''}${dir ? ' is-out' : ''}`}>
+        {x(val)}
+        {dir !== 0 && <><span className="mult-flag" aria-hidden="true"> {dir > 0 ? '▲' : '▼'}</span>
+          <span className="visually-hidden"> ({dir > 0 ? 'above the historical high' : 'below the historical low'})</span></>}
+      </td>
+    )
+  }
+  return (
+    <div className="mult">
+      <h3>Multiples cross-check · {NAMES[active]} scenario</h3>
+      <p className="muted small">
+        {priced
+          ? <>The company’s own multiples at each of its {years} reported year ends set the reference. ▲ / ▼ marks a
+            multiple above the historical high or below the low.</>
+          : <>This file has no year-end share prices, so there is no history to compare with.</>}{' '}
+        EV = market cap + borrowings − cash − investments. Blank where the value or the earnings are zero or negative.
+      </p>
+      <div className="table-wrap" tabIndex={0} role="region" aria-labelledby="mult-cap">
+        <table className="mult-table">
+          <caption id="mult-cap" className="visually-hidden">Multiples: history, today’s price and the {NAMES[active].toLowerCase()} value per share</caption>
+          <thead>
+            <tr>
+              <td rowSpan={2} />
+              <th scope="colgroup" colSpan={2}>History</th>
+              <th scope="colgroup" colSpan={2}>Price{v.price != null && <> Rs {rs(v.price)}</>}</th>
+              <th scope="colgroup" colSpan={2} className="pencil-num">
+                {NAMES[active]} value{ps != null && <> Rs {rs(ps)}</>}
+              </th>
+            </tr>
+            <tr>
+              <th scope="col">Median</th><th scope="col">Low–high</th>
+              <th scope="col">{asOf}</th><th scope="col">{next}</th>
+              <th scope="col" className="pencil-num">{asOf}</th><th scope="col" className="pencil-num">{next}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {MULTS.map(([k, name, what]) => (
+              <tr key={k}>
+                <th scope="row"><abbr title={what}>{name}</abbr></th>
+                <td>{x(h.median[k])}</td>
+                <td>{h.min[k] == null ? '–' : `${x(h.min[k])}–${x(h.max[k])}`}</td>
+                {cell(k, m.price_last[k], false)}{cell(k, m.price_next[k], false)}
+                {cell(k, m.value_last[k], true)}{cell(k, m.value_next[k], true)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }

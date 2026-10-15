@@ -459,7 +459,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
           </div>
         </section>
         <ValuationPanel inputs={valuation} defaults={parsed.valuation} v={proj ? projection!.valuation : null}
-          market={company.market} active={active} asOf={histYears[nHist - 1]} growth={a.growth} n={n}
+          market={company.market} active={active} asOf={histYears[nHist - 1]} next={projYears[0]} growth={a.growth} n={n}
           onChange={f => setDoc(d => ({ ...d, valuation: f(d.valuation) }))} />
       </main>
       <div className="tables">
