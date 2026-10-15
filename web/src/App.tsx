@@ -288,6 +288,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
   const projYears = proj ? projection!.years : []
   const years = [...histYears, ...projYears]
   const rows = proj ? [...hist, ...proj] : hist
+  const implied = proj ? projection!.valuation.scenarios[active].implied_growth ?? null : null // reverse DCF
 
   const exportXlsx = async () => {
     setExporting(true)
@@ -429,6 +430,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
                 base={seeded[active][k].start}
                 baseLabel={k === 'debt_change' ? 'no new debt' : `default ${fmt(seeded[active][k].start, byKey[k][2])}`}
                 onChange={v => setA(prev => ({ ...prev, [k]: v }))}
+                ghost={k === 'growth' ? implied : null}
               />
             ))}
           </section>
@@ -457,7 +459,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
           </div>
         </section>
         <ValuationPanel inputs={valuation} defaults={parsed.valuation} v={proj ? projection!.valuation : null}
-          market={company.market} active={active} asOf={histYears[nHist - 1]}
+          market={company.market} active={active} asOf={histYears[nHist - 1]} growth={a.growth} n={n}
           onChange={f => setDoc(d => ({ ...d, valuation: f(d.valuation) }))} />
       </main>
       <div className="tables">

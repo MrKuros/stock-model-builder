@@ -21,6 +21,7 @@ interface Props {
   base: number
   baseLabel: string
   onChange: (p: Path) => void
+  ghost?: number | null // a reference value drawn as a thin dashed ink line (revenue growth: what the price implies)
 }
 
 function domainOf(vals: number[], kind: Kind): [number, number] {
@@ -76,11 +77,11 @@ function ValueInput({ id, kind, value, ariaLabel, describedBy, onCommit }:
   )
 }
 
-export default function DriverStrip({ id, label, hint, kind, history, value, base, baseLabel, onChange }: Props) {
+export default function DriverStrip({ id, label, hint, kind, history, value, base, baseLabel, onChange, ghost }: Props) {
   const fade = value.end != null
   const end = value.end ?? value.start
   const known = history.filter((v): v is number => v != null && Number.isFinite(v))
-  const live = domainOf([...known, value.start, end, base], kind)
+  const live = domainOf([...known, value.start, end, base, ...(ghost == null ? [] : [ghost])], kind)
   // fixed scale and the handle being dragged, so the strip doesn't rescale under the pointer
   const [drag, setDrag] = useState<{ dom: [number, number]; which: End } | null>(null)
   const [lo, hi] = drag?.dom ?? live
@@ -154,6 +155,14 @@ export default function DriverStrip({ id, label, hint, kind, history, value, bas
         <path className="ink-line" d={path} />
         {pts.map((p, i) => p && <circle key={i} className="ink-dot" cx={p[0]} cy={p[1]} r={i === n - 1 ? 2.6 : 1.8} />)}
         <line className="base-line" x1={PROJ_START} x2={PROJ_END} y1={y(base)} y2={y(base)} />
+        {ghost != null && <g className="ghost">
+          <line x1={PROJ_START} x2={PROJ_END} y1={y(ghost)} y2={y(ghost)} />
+          {/* label on the far side from the pencil line, flipped when that side has no room */}
+          <text x={PROJ_END} y={(ghost >= (value.start + end) / 2 ? y(ghost) >= 10 : y(ghost) > H - 9)
+            ? y(ghost) - 3.5 : y(ghost) + 9} textAnchor="end">
+            price implies {fmt(ghost, kind)}
+          </text>
+        </g>}
         <line className="pencil-line" x1={PROJ_START} x2={PROJ_END} y1={y(value.start)} y2={y(end)} />
         {fade
           ? <>{handle('start', PROJ_START, value.start, `${label}, first projected year`)}
