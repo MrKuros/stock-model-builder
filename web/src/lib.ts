@@ -42,11 +42,17 @@ export interface ScenarioValue {
   grid: (number | null)[][] // value per share: WACC + steps.wacc (rows) x g + steps.g (columns)
   grid_gm: (number | null)[][] // revenue growth + steps.growth (rows) x EBITDA margin + steps.margin, every year
   implied_growth?: number | null // reverse DCF: flat revenue growth at which value per share = price; null = none in range
+  /** At today's price and at this value per share, on the last reported (last) and first projected (next) year. */
+  multiples?: Record<'price_last' | 'price_next' | 'value_last' | 'value_next', Multiples>
 }
+export type Multiple = 'pe' | 'ev_ebitda' | 'pb'
+export type Multiples = Record<Multiple, number | null> // null: no market cap, a value <= 0, or a denominator <= 0
 export interface Valuation {
   price: number | null; shares: number | null; ke: number; kd: number; tax: number; kd_after_tax: number
   e: number; d: number; we: number; wacc: number; g: number; error: string | null
   borrowings: number; cash: number; investments: number; scenarios: Record<Scenario, ScenarioValue>
+  /** Each reported year end's multiples (year-end price), with their median, low and high. Missing on an old server. */
+  multiples?: { hist: Record<Multiple, (number | null)[]>; median: Multiples; min: Multiples; max: Multiples }
   steps: { wacc: number[]; g: number[]; growth: number[]; margin: number[]; implied?: [number, number] }
 }
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */

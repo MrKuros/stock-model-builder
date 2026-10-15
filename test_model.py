@@ -3,6 +3,7 @@ import io
 import json
 import re
 import shutil
+import statistics
 import subprocess
 import tempfile
 import zipfile
@@ -243,7 +244,8 @@ def main():
     (tmp / "zero").mkdir()
     # ... with no market data (book equity weights, no per-share value), typed cost of debt, year-end discounting
     bare = dict(co, market=None)
-    v0 = {"kd": 0.09, "mid_year": False, "rf": 0.07, "beta": 1.3, "g": 0.03}
+    # typed shares without a price: no upside or price multiples; the value is negative, so no value multiples
+    v0 = {"kd": 0.09, "mid_year": False, "rf": 0.07, "beta": 1.3, "g": 0.03, "shares": 5.0}
     (tmp / "zero" / "model.xlsx").write_bytes(model.to_excel(bare, dict.fromkeys(model.SCENARIOS, zero), n=2, val=v0))
     ws0 = recalc(tmp / "zero" / "model.xlsx", tmp / "calc0")
     for j, c in enumerate(proj0):
@@ -251,7 +253,9 @@ def main():
     flat0 = model.expand({k: {"start": v, "end": None} for k, v in zero.items()}, 2)
     val0 = model.valuation(dict.fromkeys(model.SCENARIOS, proj0), co["hist"], v0, flat0, None,
                            dict.fromkeys(model.SCENARIOS, flat0))
-    assert val0["shares"] is None and val0["scenarios"]["base"]["per_share"] is None and val0["kd"] == 0.09, val0
+    m0 = val0["scenarios"]["base"]["multiples"]
+    assert val0["e"] == co["hist"][-1]["share_cap"] + co["hist"][-1]["reserves"] and val0["kd"] == 0.09, val0
+    assert val0["scenarios"]["base"]["per_share"] < 0 and {x for b in m0.values() for x in b.values()} == {None}, m0
     _same_valuation(ws0.parent["Valuation"], val0, "base")
     # debt faded to zero over 10 years: float residue (1e-14 cr) must read as no interest cover, in both
     payoff = {k: {"start": v, "end": None} for k, v in model.default_assumptions(co["hist"]).items()}
@@ -321,6 +325,24 @@ def valuation_check(co, projs, ex):
     far = model.valuation(projs, co["hist"], {"price": 1e7}, ex["base"], co["market"], ex)
     assert far["scenarios"]["base"]["implied_growth"] is None, far["scenarios"]["base"]["implied_growth"]
     assert model.valuation(projs, co["hist"], None, ex["base"], None, ex)["scenarios"]["base"]["implied_growth"] is None
+    # multiples, by hand: FY2016 at Rs 500 x 5 cr = 2,500 cr against net profit 120, EBITDA 200, book 450
+    h0, mu = co["hist"][0], v["multiples"]
+    assert abs(mu["hist"]["pe"][0] - 2500 / 120) < 1e-9 and abs(mu["hist"]["pb"][0] - 2500 / 450) < 1e-9, mu
+    assert abs(mu["hist"]["ev_ebitda"][0] - (2500 + 200 - h0["cash"] - 60) / 200) < 1e-9, mu
+    assert mu["hist"]["pe"][-1] is None and mu["min"]["pe"] == mu["hist"]["pe"][-2]  # last year has no price
+    assert mu["median"]["pe"] == statistics.median(mu["hist"]["pe"][:-1]) and mu["max"]["pe"] == 2500 / 120
+    for s in model.SCENARIOS:
+        m, sv = v["scenarios"][s]["multiples"], v["scenarios"][s]
+        assert abs(m["price_last"]["pe"] - 8000 / last["pat"]) < 1e-9, m
+        assert abs(m["value_next"]["pe"] - sv["equity"] / projs[s][0]["pat"]) < 1e-9, m
+        assert abs(m["value_last"]["ev_ebitda"] - sv["ev"] / last["ebitda"]) < 1e-9, m
+    assert model._multiples(100.0, 0.0, dict(last, pat=-1.0, ebitda=0.0, reserves=-last["share_cap"])) == dict.fromkeys(
+        model.MULTIPLES)  # denominators <= 0 are blank
+    assert model._multiples(-1.0, 0.0, last) == dict.fromkeys(model.MULTIPLES)  # so is a negative value
+    assert model._hist_multiples(co["hist"], {}, 5.0)["median"] == dict.fromkeys(model.MULTIPLES)  # no price history
+    bare = model.valuation(projs, co["hist"], None, ex["base"], None)
+    nb = bare["scenarios"]["base"]
+    assert nb["per_share"] is None and set(nb["multiples"]["value_last"].values()) == {None}, nb["multiples"]
     # year-end discounting is worth less than mid-year; typed price/shares win over market data
     ye = model.valuation(projs, co["hist"], {"mid_year": False, "price": 800.0, "shares": 10.0}, ex["base"], co["market"])
     assert ye["scenarios"]["base"]["ev"] < v["scenarios"]["base"]["ev"] and ye["e"] == 8000 and ye["price"] == 800, ye
@@ -469,6 +491,13 @@ def _same_valuation(vs, v, s):
     top = next(r for label, r in at.items() if label.startswith("VALUE PER SHARE (Rs): REVENUE")) + 1
     assert vs.cell(top, 2).value == "-2 pp" and vs.cell(top + 1, 1).value == "-4 pp", vs.cell(top, 2).value
     cells += [(top + 1 + k, 2 + i, x) for k, row in enumerate(sv["grid_gm"]) for i, x in enumerate(row)]
+    # multiples: each reported year, then median / low / high, at price (last, next year), at value (last, next)
+    mu = v["multiples"]
+    for k, label in model.MULTIPLE_LABELS:
+        cells += [(at[label], 2 + j, x) for j, x in enumerate(mu["hist"][k])]
+        want = [mu["median"][k], mu["min"][k], mu["max"][k],
+                *(sv["multiples"][b][k] for b in ("price_last", "price_next", "value_last", "value_next"))]
+        cells += [(at[label.split(" (")[0]], 2 + i, x) for i, x in enumerate(want)]
     for r, c, want in cells:
         got = vs.cell(r, c).value
         if want is None:

@@ -466,7 +466,8 @@ def valuation(projs, hist, val, base, market, inputs=None):
     projs: {scenario: project() rows}; val: VALUATION-shaped inputs; base: the base scenario's per-year inputs
     (expand()), for the default cost of debt and the WACC tax rate; market: the company's market data.
     inputs: {scenario: expand()} adds "grid_gm" per scenario (re-runs project() 25 times each) and
-    "implied_growth" (reverse DCF, about 50 more runs each).
+    "implied_growth" (reverse DCF, about 50 more runs each). "multiples": P/E, EV/EBITDA and P/B at each reported
+    year end; per scenario at today's price and at its value per share (see _multiples()).
     Mirrors the Valuation sheet in to_excel()."""
     v, last = {**VALUATION, **(val or {})}, hist[-1]
     market = market or {}
@@ -504,11 +505,49 @@ def valuation(projs, hist, val, base, market, inputs=None):
             out[s]["grid_gm"] = [[_shifted(hist, inputs[s], dgr, dm, period, wacc, g, per_share) for dm in GRID_MARGIN]
                                  for dgr in GRID_GROWTH]
             out[s]["implied_growth"] = _implied(hist, inputs[s], period, wacc, g, per_share, price)
+        # multiples at today's price and at this value per share, on the last reported and first projected year
+        out[s]["multiples"] = {f"{k}_{t}": _multiples(p * shares if p is not None and shares else None, -bridge, r)
+                               for k, p in (("price", price), ("value", ps))
+                               for t, r in (("last", last), ("next", rows[0]))}
     return {"inputs": v, "price": price, "shares": shares, "ke": ke, "kd": kd, "tax": tax, "kd_after_tax": kd_at,
             "e": e, "d": d, "we": we, "wacc": wacc, "g": g, "period": period, "error": error,
             "borrowings": last["borrowings"], "cash": last["cash"], "investments": last["investments"],
+            "multiples": _hist_multiples(hist, market, shares),
             "steps": {"wacc": GRID_WACC, "g": GRID_G, "growth": GRID_GROWTH, "margin": GRID_MARGIN,
                       "implied": IMPLIED_RANGE}, "scenarios": out}
+
+
+MULTIPLES = ("pe", "ev_ebitda", "pb")
+MULTIPLE_LABELS = (("pe", "P/E (market cap / net profit)"),
+                   ("ev_ebitda", "EV/EBITDA (EV = market cap + borrowings - cash - investments)"),
+                   ("pb", "P/B (market cap / book equity)"))
+
+
+def _multiples(mcap, ev_net, r):
+    """P/E, EV/EBITDA, P/B of a market cap against year r's net profit, EBITDA and book equity (share capital +
+    reserves). ev_net: borrowings - cash - investments. None without a positive market cap (a negative DCF value
+    has no meaningful multiple) or when a denominator is <= 0."""
+    if mcap is None or mcap <= 0:
+        return dict.fromkeys(MULTIPLES)
+    book = r["share_cap"] + r["reserves"]
+    return {"pe": mcap / r["pat"] if r["pat"] > 0 else None,
+            "ev_ebitda": (mcap + ev_net) / r["ebitda"] if r["ebitda"] > 0 else None,
+            "pb": mcap / book if book > 0 else None}
+
+
+def _hist_multiples(hist, market, shares):
+    """Multiples at each reported year end's price, plus the median, min and max of each across the years.
+    Mirrored by the MULTIPLES rows of the Valuation sheet."""
+    years, ph, sh = [], market.get("price_hist") or [], market.get("shares_hist") or []
+    for i, h in enumerate(hist):
+        p, s = (_pos(x[i]) if i < len(x) else None for x in (ph, sh))
+        # ponytail: a year without Screener's adjusted share count uses today's count (typed or from the export)
+        s = s or shares
+        years.append(_multiples(p * s if p and s else None, h["borrowings"] - h["cash"] - h["investments"], h))
+    out = {"hist": {k: [y[k] for y in years] for k in MULTIPLES}}
+    for name, f in (("median", statistics.median), ("min", min), ("max", max)):
+        out[name] = {k: f(xs) if (xs := [x for x in out["hist"][k] if x is not None]) else None for k in MULTIPLES}
+    return out
 
 
 def _shifted(hist, a, dgr, dm, period, wacc, g, per_share):
@@ -712,7 +751,7 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, imp
     def head(title):
         nonlocal r
         r += 2
-        for j in range(n + 2):
+        for j in range(max(n, nh, 7) + 1):
             vs.cell(r, 1 + j).fill = head_fill
         vs.cell(r, 1, title).font = Font(bold=True)
 
@@ -818,8 +857,63 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, gm, imp
         for i in range(len(GRID_MARGIN)):
             x = ['""' if gm[s][k][i] is None else repr(gm[s][k][i]) for s in SCENARIOS]
             vs.cell(r, 2 + i, f"=CHOOSE(Model!$B$3,{','.join(x)})").number_format = rs
+
+    # multiples: every reported year at its year-end price, then today's price and the DCF value against the last
+    # reported year and the first projected one (the selector's scenario). Mirrors _hist_multiples() / _multiples().
+    head("MULTIPLES AT EACH REPORTED YEAR END")
+    hl = labels(co["dates"])
+    for j, y in enumerate(hl):
+        vs.cell(r, 2 + j, y).font = Font(bold=True)
+    hr, ph, sh, xf = {}, m.get("price_hist") or [], m.get("shares_hist") or [], '0.0"x";-0.0"x"'
+    model_at = lambda k, j: f"Model!{at(k, j)}"  # noqa: E731
+
+    def mult(cap, net, k, j):
+        """P/E, EV/EBITDA, P/B formulas of market cap ref `cap` against Model column j; net = borrowings - cash
+        - investments ("" when cap is blank or <= 0, or a denominator is <= 0)."""
+        x = lambda key: model_at(key, j)  # noqa: E731
+        book = f'{x("share_cap")}+{x("reserves")}'
+        num, den = {"pe": (cap, x("pat")), "ev_ebitda": (f"({cap}+{net})", x("ebitda")), "pb": (cap, book)}[k]
+        return f'=IFERROR(IF(AND(ISNUMBER({cap}),{cap}>0,{den}>0),{num}/({den}),""),"")'
+
+    for key, label, fmt, f in (
+        ("price", "Year-end share price (Rs)", rs, lambda j, c: _pos(ph[j]) if j < len(ph) else None),
+        ("shares", "Shares (crore; today's if not reported)", rs,
+         lambda j, c: (_pos(sh[j]) if j < len(sh) else None) or f'=IF(ISNUMBER({ref["shares"]}),{ref["shares"]},"")'),
+        ("cap", "Market cap", num, lambda j, c: f'=IF(AND(ISNUMBER({c}{hr["price"]}),ISNUMBER({c}{hr["shares"]})),'
+                                                f'{c}{hr["price"]}*{c}{hr["shares"]},"")'),
+        *((k, label, xf, lambda j, c, k=k: mult(f"{c}{hr['cap']}", f"{model_at('borrowings', j)}-"
+                                                    f"{model_at('cash', j)}-{model_at('investments', j)}", k, j))
+          for k, label in MULTIPLE_LABELS),
+    ):
+        r += 1
+        hr[key] = r
+        vs.cell(r, 1, label)
+        for j in range(nh):
+            c = vs.cell(r, 2 + j, f(j, get_column_letter(2 + j)))
+            c.number_format = fmt
+            if key in ("price", "shares") and not str(c.value).startswith("="):
+                c.font = blue
+
+    nxt, last_y = years[0], hl[-1]
+    head("MULTIPLES CROSS-CHECK: HISTORY vs TODAY'S PRICE vs DCF VALUE (scenario in Model!B3)")
+    heads = ("History median", "History low", "History high", f"Price, {last_y}", f"Price, {nxt}",
+             f"Value, {last_y}", f"Value, {nxt}")
+    for i, h in enumerate(heads):
+        vs.cell(r, 2 + i, h).font = Font(bold=True)
+    net = f"{ref['borrowings']}-{ref['cash']}-{ref['investments']}"
+    cap_p = f'IF(AND(ISNUMBER({ref["price"]}),ISNUMBER({ref["shares"]})),{ref["price"]}*{ref["shares"]},"")'
+    cap_v = f'IFERROR({ref["per_share"]}*{ref["shares"]},"")'
+    for k, label in MULTIPLE_LABELS:
+        r += 1
+        span_h = f"$B${hr[k]}:${get_column_letter(1 + nh)}${hr[k]}"
+        vs.cell(r, 1, label.split(" (")[0])
+        cells = [f'=IF(COUNT({span_h})=0,"",{fn}({span_h}))' for fn in ("MEDIAN", "MIN", "MAX")]
+        cells += [mult(cap, net, k, j) for cap in (cap_p, cap_v) for j in (nh - 1, nh)]
+        for i, x in enumerate(cells):
+            vs.cell(r, 2 + i, x).number_format = xf
+
     vs.column_dimensions["A"].width = 50
-    for j in range(max(n, len(GRID_G))):
+    for j in range(max(n, len(GRID_G), nh, len(heads))):
         vs.column_dimensions[get_column_letter(2 + j)].width = 12
 
 
