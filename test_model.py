@@ -44,6 +44,9 @@ def fake_screener(path, years=10):
     ws.title = "Data Sheet"
     ws.append(["COMPANY NAME", "Test Industries Ltd"])
     ws.append([])
+    ws.append(["META"])  # like the real export: Number of shares is a formula with no cached value
+    for row in (["Number of shares", None], ["Face Value", 10], ["Current Price", 1600], ["Market Capitalization", 8000]):
+        ws.append(row)
     ws.append(["PROFIT & LOSS"])
     ws.append(["Report Date", *dates])
     for k, v in pl.items():
@@ -58,6 +61,9 @@ def fake_screener(path, years=10):
     ws.append(["CASH FLOW:"])
     ws.append(["Report Date", *dates])
     ws.append(["Cash from Operating Activity", *[100.0] * years])
+    ws.append(["PRICE:", *[round(500 * 1.1 ** i, 2) for i in range(years - 1)], None])  # last year blank
+    ws.append(["DERIVED:"])
+    ws.append(["Adjusted Equity Shares in Cr", *[5.0] * years])
     wb.save(path)
 
 
@@ -79,6 +85,18 @@ def main():
     assert co["hist"][0]["revenue"] == 1000.0, "quarterly Sales leaked into annual data"
     assert model.data_checks(co) == [], model.data_checks(co)
     assert co["hist"][1]["cfi"] is None and co["hist"][1]["net_cf"] is None, "missing CF rows must not be 0"
+    m = co["market"]
+    assert m["price"] == 1600 and m["shares"] == 5.0 and m["shares_hist"] == [5.0] * 10, m
+    assert m["price_hist"][0] == 500 and m["price_hist"][-1] is None and len(m["price_hist"]) == 10, m
+    # no market cap: shares fall back to the latest adjusted count; no META/PRICE/DERIVED at all: all null, no error
+    p = tmp / "no_mcap.xlsx"
+    fake_screener(p)
+    _edit_rows(p, lambda label, row: label == "Market Capitalization" and setattr(row[1], "value", None))
+    assert model.parse_screener(p)["market"]["shares"] == 5.0
+    _edit_rows(p, lambda label, row: label in ("META", "Current Price", "PRICE:", "Adjusted Equity Shares in Cr")
+               and [setattr(c, "value", None) for c in row])
+    assert model.parse_screener(p)["market"] == {"price": None, "shares": None, "price_hist": [None] * 10,
+                                                  "shares_hist": [None] * 10}
 
     a = model.default_assumptions(co["hist"])
     assert abs(a["growth"] - 0.12) < 1e-3 and abs(a["ebitda_margin"] - 0.2) < 1e-3, a
@@ -252,7 +270,11 @@ def library_check(root, co, scenarios):
         else:
             raise AssertionError(f"{fn.__name__}{args}: expected {status}")
 
-    company = {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"]}
+    company = {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
+               "market": co["market"]}
+    old = server.ModelDoc.model_validate({"version": 3, "company": {k: company[k] for k in ("name", "dates", "hist")},
+                                          "scenarios": scenarios})  # saved before market data existed
+    assert old.company.market.price is None and old.company.market.price_hist == [], old.company.market
     data = {"version": 3, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
             "excluded_years": ["FY2020"], "saved_at": None}
     doc = server.ModelDoc.model_validate(data)

@@ -44,10 +44,19 @@ def _disk(_, exc):
 REQUIRED = [*model.PL.values(), *model.BS.values(), "ebitda", "other_ca"]  # always numbers from parse_screener
 
 
+class Market(BaseModel):
+    """Share price (Rs) and count (crore) from the export; null when Screener left it out."""
+    price: FiniteFloat | None = None
+    shares: FiniteFloat | None = None
+    price_hist: list[FiniteFloat | None] = []
+    shares_hist: list[FiniteFloat | None] = []
+
+
 class Company(BaseModel):
     name: str
     dates: list[datetime]
     hist: list[dict[str, float | None]]
+    market: Market = Market()  # version-3 documents saved before 2.1 have none
 
     @model_validator(mode="after")
     def _years(self):
@@ -108,7 +117,8 @@ class ModelDoc(ModelRequest):
 def _company_payload(co, excluded=()):
     labels = model.labels(co["dates"])
     return {
-        "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"]},
+        "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
+                    "market": co.get("market") or Market().model_dump()},
         "years": labels,
         "ratios": model.ratios(co["hist"]),
         "defaults": model.default_assumptions(co["hist"], exclude=set(excluded), labels=labels),

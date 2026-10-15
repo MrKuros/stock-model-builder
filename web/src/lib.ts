@@ -27,7 +27,9 @@ export function seed(base: Paths): Scenarios {
   return { base, bull: move(1), bear: move(-1) }
 }
 
-export interface Company { name: string; dates: string[]; hist: Row[] }
+/** Share price (Rs) and count (crore) from the export; null when Screener left them out. */
+export interface Market { price: number | null; shares: number | null; price_hist: (number | null)[]; shares_hist: (number | null)[] }
+export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market }
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
 export interface ModelDoc {
   version: 3
@@ -87,6 +89,10 @@ export function clock(iso: string): string {
 }
 
 const inr = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 })
+
+const inr2 = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+/** A share price or share count to 2 decimals, Indian grouping. */
+export const dec2 = (v: number) => inr2.format(v)
 
 /** Rs crore, Indian digit grouping, accounting-style negatives. */
 export function money(v: number | null | undefined): string {
