@@ -3,7 +3,8 @@ import type { KeyboardEvent } from 'react'
 export type Row = Record<string, number | null>
 export type Kind = 'pct' | 'days' | 'num'
 export type Driver = [key: string, label: string, kind: Kind]
-export type LayoutLine = [label: string, key: string | null, kind: Kind | 'head' | null]
+export type LineKind = Kind | 'x' // 'x' = multiple, e.g. 2.4x
+export type LayoutLine = [label: string, key: string | null, kind: LineKind | 'chk' | 'head' | null]
 
 export interface Company { name: string; dates: string[]; hist: Row[] }
 export interface Parsed {
@@ -45,8 +46,9 @@ export function money(v: number | null | undefined): string {
   return r < 0 ? `(${s})` : s
 }
 
-export function fmt(v: number | null | undefined, kind: Kind): string {
+export function fmt(v: number | null | undefined, kind: LineKind): string {
   if (v == null || !Number.isFinite(v)) return '–'
+  if (kind === 'x') return `${noNegZero(v.toFixed(1))}x`
   if (kind === 'pct') return `${noNegZero((v * 100).toFixed(1))}%`
   if (kind === 'days') return `${Math.round(v)}`
   return money(v)

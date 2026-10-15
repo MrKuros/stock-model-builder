@@ -67,6 +67,11 @@ LAYOUT = [  # (label, key, kind); kind "head" = section title, None key = blank 
     ("Capex", "capex", "num"), ("Free cash flow", "fcf", "num"),
     ("Borrowed to cover cash shortfall", "revolver", "num"),
     ("", None, None),
+    ("RATIOS", None, "head"),
+    ("Return on equity", "roe", "pct"), ("Return on capital employed", "roce", "pct"),
+    ("Asset turnover", "asset_turnover", "x"), ("Net debt / EBITDA", "nd_ebitda", "x"),
+    ("Interest cover", "int_cover", "x"),
+    ("", None, None),
     ("CHECKS (should be 0)", None, "head"),
     ("Assets - liabilities", "chk_bs", "chk"), ("Cash roll-forward", "chk_cash", "chk"),
 ]
@@ -154,6 +159,7 @@ def parse_export(file):
         p = hist[-1] if hist else None
         h["capex"] = h["net_block"] - p["net_block"] + h["cwip"] - p["cwip"] + h["dep"] if p else None
         h["fcf"] = h["cfo"] - h["capex"] if p and h["cfo"] is not None else None
+        h.update(returns(h, p))
         hist.append(h)
     # ponytail: heuristic, tuned on 15 real exports: lenders' loan books sit in Other Assets at 2.7-9.4x revenue;
     # non-financials stay under ~1.6x (ADANIPORTS: infra loans/advances ~1.2x). Revisit if a real lender slips under 2x.
@@ -201,6 +207,23 @@ def fy(d, projected=False):
 
 def _div(a, b):
     return a / b if b else None
+
+
+def returns(c, p=None):
+    """Return ratios for year c; p = previous year (None: averages fall back to closing balances).
+    Blank (None) when the denominator is <= 0: a ratio on negative equity or EBITDA means nothing.
+    EBIT = PBT + interest. Mirrored by _returns_formulas()."""
+    avg = lambda f: (f(c) + f(p)) / 2 if p else f(c)  # noqa: E731
+    eq = lambda r: r["share_cap"] + r["reserves"]  # noqa: E731
+    pos = lambda num, den: num / den if den > 0 else None  # noqa: E731
+    ebit = c["pbt"] + c["interest"]
+    return {
+        "roe": pos(c["pat"], avg(eq)),
+        "roce": pos(ebit, avg(lambda r: eq(r) + r["borrowings"])),
+        "asset_turnover": pos(c["revenue"], avg(lambda r: r["total_assets"])),
+        "nd_ebitda": pos(c["borrowings"] - c["cash"] - c["investments"], c["ebitda"]),
+        "int_cover": pos(ebit, c["interest"]),
+    }
 
 
 def ratios(hist):
@@ -303,6 +326,7 @@ def project(hist, a, n=5):
         c["fcf"] = c["cfo"] - c["capex"]
         c["chk_bs"] = c["total_assets"] - c["total_liab"]
         c["chk_cash"] = p["cash"] + c["net_cf"] - c["cash"]
+        c.update(returns(c, p))
         out.append(c)
         p = c
     return out
@@ -319,6 +343,21 @@ def projected_dates(co, n):
 RAW = {"revenue", "other_income", "dep", "interest", "pbt", "tax", "pat", "dividend", "share_cap", "reserves",
        "borrowings", "other_liab", "net_block", "cwip", "investments", "receivables", "inventory", "other_ca",
        "cash", "cfo", "cfi", "cff"}
+
+
+def _returns_formulas(x, has_prev):
+    """Excel twin of returns(): blank ("") where the denominator is <= 0."""
+    avg = lambda f: f"(({f(0)})+({f(1)}))/2" if has_prev else f"({f(0)})"  # noqa: E731
+    eq = lambda p: f'{x("share_cap", p)}+{x("reserves", p)}'  # noqa: E731
+    pos = lambda num, den: f'=IFERROR(IF(({den})>0,({num})/({den}),""),"")'  # noqa: E731
+    ebit = f'{x("pbt")}+{x("interest")}'
+    return {
+        "roe": pos(x("pat"), avg(eq)),
+        "roce": pos(ebit, avg(lambda p: f'{eq(p)}+{x("borrowings", p)}')),
+        "asset_turnover": pos(x("revenue"), avg(lambda p: x("total_assets", p))),
+        "nd_ebitda": pos(f'{x("borrowings")}-{x("cash")}-{x("investments")}', x("ebitda")),
+        "int_cover": pos(ebit, x("interest")),
+    }
 
 
 def _hist_formula(key, x, has_prev):
@@ -350,6 +389,7 @@ def _hist_formula(key, x, has_prev):
         "capex": f'={x("net_block")}-{x("net_block", 1)}+{x("cwip")}-{x("cwip", 1)}+{x("dep")}',
         "fcf": f'={x("cfo")}-{x("capex")}',
         "chk_bs": f'=ROUND({x("total_assets")}-{x("total_liab")},2)',
+        **_returns_formulas(x, has_prev),
     }.get(key)
 
 
@@ -388,6 +428,7 @@ def _proj_formula(key, x):
         "fcf": f'={x("cfo")}-{x("capex")}',
         "chk_bs": f'=ROUND({x("total_assets")}-{x("total_liab")},2)',
         "chk_cash": f'=ROUND({x("cash", 1)}+{x("net_cf")}-{x("cash")},2)',
+        **_returns_formulas(x, True),
     }[key]
 
 
@@ -408,7 +449,8 @@ def to_excel(co, a, n=5):
     headers = [fy(d) for d in co["dates"]] + [fy(d, True) for d in projected_dates(co, n)]
     bold, totals = Font(bold=True), {"total_liab", "total_assets", "pat", "fcf"}
     head_fill = PatternFill("solid", fgColor="DDE4EE")
-    formats = {"pct": "0.0%", "days": "0", "num": "#,##0.0;(#,##0.0);-", "chk": "#,##0.00;(#,##0.00);-"}
+    formats = {"pct": "0.0%", "days": "0", "num": "#,##0.0;(#,##0.0);-", "chk": "#,##0.00;(#,##0.00);-",
+               "x": '0.0"x";-0.0"x"'}
     drivers = {k for k, _, _ in DRIVERS}
 
     ws.cell(top, 1, "Rs crore").font = bold

@@ -105,6 +105,18 @@ def main():
     except ValueError as e:
         assert "Export to Excel" in str(e)
 
+    # return ratios: averages of opening and closing balances, first year on closing
+    h0, h1 = co["hist"][0], co["hist"][1]
+    eq = lambda h: h["share_cap"] + h["reserves"]  # noqa: E731
+    assert abs(h0["roe"] - h0["pat"] / eq(h0)) < 1e-12
+    assert abs(h1["roe"] - h1["pat"] / ((eq(h0) + eq(h1)) / 2)) < 1e-12
+    assert abs(h1["roce"] - (h1["pbt"] + h1["interest"]) / ((eq(h0) + eq(h1) + 400) / 2)) < 1e-12
+    assert abs(h1["asset_turnover"] - h1["revenue"] / ((h0["total_assets"] + h1["total_assets"]) / 2)) < 1e-12
+    assert abs(h1["int_cover"] - (h1["pbt"] + 20) / 20) < 1e-12
+    assert abs(h1["nd_ebitda"] - (200 - h1["cash"] - 60) / h1["ebitda"]) < 1e-12
+    neg = model.returns(dict(h1, interest=0.0, ebitda=-1.0, reserves=-1000.0), h0)
+    assert neg["int_cover"] is None and neg["nd_ebitda"] is None and neg["roe"] is None, neg
+
     assert abs(a["mi_pct"]) < 1e-3, a  # synthetic PAT = PBT - tax
     a["debt_change"] = 25.0
     a["mi_pct"] = -0.05  # exercise the minority path in the Excel parity check below
@@ -129,13 +141,32 @@ def main():
     ws = recalc(out, tmp / "calc")
     rows = {key: 5 + i for i, (_, key, _) in enumerate(model.LAYOUT) if key}
     for j, c in enumerate(proj):
-        col = 2 + len(co["hist"]) + j
-        for key, v in c.items():
-            got = ws.cell(rows[key], col).value
-            assert abs(got - v) < 1e-6 * max(1, abs(v)), (key, j, got, v)
-    hist_ebitda = ws.cell(rows["ebitda"], 2).value
-    assert abs(hist_ebitda - co["hist"][0]["ebitda"]) < 1e-6
+        _same(ws, rows, 2 + len(co["hist"]) + j, c, ("proj", j))
+    for j, h in enumerate(co["hist"]):  # historical ratio formulas, incl. first year on closing balances
+        _same(ws, rows, 2 + j, {k: h[k] for k in ("ebitda", *RETURNS)}, ("hist", j))
+    # zero interest and negative EBITDA must come out blank in both
+    zero = dict(a, int_rate=0.0, ebitda_margin=-0.05)
+    proj0 = model.project(co["hist"], zero, n=2)
+    assert all(c["int_cover"] is None and c["nd_ebitda"] is None for c in proj0), proj0
+    (tmp / "zero").mkdir()
+    (tmp / "zero" / "model.xlsx").write_bytes(model.to_excel(co, zero, n=2))
+    ws0 = recalc(tmp / "zero" / "model.xlsx", tmp / "calc0")
+    for j, c in enumerate(proj0):
+        _same(ws0, rows, 2 + len(co["hist"]) + j, c, ("zero", j))
     print("OK: parse, checks, projection, Excel formulas match Python")
+
+
+RETURNS = ("roe", "roce", "asset_turnover", "nd_ebitda", "int_cover")
+
+
+def _same(ws, rows, col, values, where):
+    """Recalculated Excel column equals Python; Python None = blank cell."""
+    for key, v in values.items():
+        got = ws.cell(rows[key], col).value
+        if v is None:
+            assert got in (None, ""), (key, where, got)
+        else:
+            assert isinstance(got, (int, float)) and abs(got - v) < 1e-6 * max(1, abs(v)), (key, where, got, v)
 
 
 def _edit_rows(path, fn):
