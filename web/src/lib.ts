@@ -77,9 +77,18 @@ export interface Filing {
 /** Something read by AI that could change a number: shown with its source and checks, used only once approved. */
 export interface Proposal {
   id: string; kind: 'mapping' | 'oneoff_note' | 'ar_note'; field: string; value: unknown; unit: string | null
-  period: string | null; source: { file: string; page?: number | null; quote?: string | null; tag?: string | null }
+  period: string | null; source: { file: string | null; page?: number | null; quote?: string | null; tag?: string | null }
   reasoning: string; checks: Check[]; status: 'proposed' | 'approved' | 'rejected'; ai: boolean
   filing?: string // a mapping: the id of the filing whose unmapped tag it maps
+  report?: string | null // a one-off note: the report it was read from (null: from the numbers only)
+  from_numbers?: boolean
+}
+/** An attached annual-report PDF (POST /api/report); its page text stays on the server. */
+export interface Report { id: string; file: string; year: string; pages: number }
+/** An approved one-off explanation, notes[`oneoff:${year}`]: words only, AI-written, never a number. */
+export interface OneOffNote {
+  proposal: string; summary: string; file: string | null; page: number | null; quote: string | null
+  from_numbers: boolean; ai: true
 }
 /** POST /api/mappings/approve | reject: the decided proposal and the filings re-read by rules with mappings.json. */
 export interface Decided { proposal: Proposal; filings: Filing[]; missing: string[] }
@@ -97,6 +106,7 @@ export interface ModelDoc {
   filings: Filing[]
   proposals: Proposal[]
   notes: Record<string, unknown>
+  reports: Report[]
 }
 /** A reported year whose metric sits far from the company's own median (model.detect_oneoffs). */
 export interface OneOff { year: string; metric: string; value: number; typical: number; note: string }
