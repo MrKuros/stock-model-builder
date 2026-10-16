@@ -59,7 +59,8 @@ export interface Valuation {
   price: number | null; shares: number | null; ke: number; kd: number; tax: number; kd_after_tax: number
   e: number; d: number; we: number; wacc: number; wacc_build: number; g: number; error: string | null
   nci: number // minorities' share of profit deducted from equity (base scenario, first projected year)
-  borrowings: number; cash: number; investments: number; scenarios: Record<Scenario, ScenarioValue>
+  borrowings: number // incl. lease liabilities
+  lease?: number; cash: number; investments: number; scenarios: Record<Scenario, ScenarioValue>
   /** Each reported year end's multiples (year-end price), with their median, low and high. Missing on an old server. */
   multiples?: { hist: Record<Multiple, (number | null)[]>; median: Multiples; min: Multiples; max: Multiples }
   /** Missing on a server not yet restarted after an update; the panel then hides the grids. */
@@ -96,8 +97,17 @@ export interface ModelDoc {
 }
 /** A reported year whose metric sits far from the company's own median (model.detect_oneoffs). */
 export interface OneOff { year: string; metric: string; value: number; typical: number; note: string }
+/** Where the upgraded drivers' history comes from (model.upgrade): attached annual filings, else Export. */
+export interface Sources {
+  basis: 'cogs' | 'revenue' // inventory and payable days run on this
+  drivers: Record<string, string> // driver key (and 'lease') -> a short sentence, e.g. "Trade payables from XBRL FY2024, on COGS"
+  notes: string[] // filings that weren't used, and why
+  used: Record<'payables' | 'lease' | 'capex', string[]> // year labels
+}
 export interface Parsed {
   company: Company
+  hist?: Row[] // company.hist with the filings' payables, leases and cash-flow capex (missing on an old server)
+  sources?: Sources
   years: string[]
   ratios: Row[]
   defaults: Record<string, number>

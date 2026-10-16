@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
-import { api, dec2, money, type Check, type Company, type Filing, type Proposal } from './lib'
+import type { Upgrade } from './App'
+import { api, dec2, fmt, money, type Check, type Company, type Filing, type Proposal, type Sources as Used } from './lib'
 
 const KIND: Record<Filing['kind'], string> = { quarter: 'Quarter', half: 'Half year', annual: 'Year', other: 'Period' }
 const PER_SHARE = new Set(['eps_basic', 'eps_diluted', 'face_value'])
@@ -48,10 +49,13 @@ interface Props {
   proposals: Proposal[]
   onFilings: (f: (fs: Filing[]) => Filing[]) => void
   onProposals: (f: (ps: Proposal[]) => Proposal[]) => void
+  sources?: Used // what the filings add to the model (missing on an old server)
+  upgrades: Upgrade[] // defaults the last filing change moved
+  onApply: () => void // use them in all three scenarios
 }
 
 /** Exchange filings attached to the model, read by fixed rules, and AI proposals waiting for a decision. */
-export default function Sources({ company, filings, proposals, onFilings, onProposals }: Props) {
+export default function Sources({ company, filings, proposals, onFilings, onProposals, sources, upgrades, onApply }: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState('')
@@ -84,13 +88,22 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
   const decide = (p: Proposal, status: Proposal['status']) =>
     onProposals(ps => ps.map(x => (x.id === p.id ? { ...x, status } : x)))
   const sorted = [...filings].sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''))
+  const apply = () => {
+    onApply()
+    setNote('New defaults applied to base, bull and bear.')
+    head.current?.focus() // the button is gone
+  }
+  const d = sources?.drivers ?? {}
+  const used = sources ? [sources.used.payables.length > 0 && d.dpo, d.ol_pct, d.lease,
+    sources.used.capex.length > 0 && d.capex_pct].filter((x): x is string => !!x) : []
 
   return (
     <section className="sources" aria-labelledby="src-head">
       <div className="val-top"><h2 id="src-head" ref={head} tabIndex={-1}>Sources &amp; proposals</h2></div>
       <p className="muted small">
-        Results filings from the exchanges, read by fixed rules and checked against the Export figures. They’re kept
-        with the model for reference and don’t change the projection.
+        Results filings from the exchanges, read by fixed rules and checked against the Export figures. An annual
+        filing whose revenue matches Export’s adds that year’s trade payables, lease liabilities and cash-flow capex
+        to the model; the totals don’t move. Other filings are kept for reference.
       </p>
       <label className={`drop drop-small ${over ? 'is-over' : ''}`} aria-busy={!!busy}
         onDragOver={e => { e.preventDefault(); setOver(true) }} onDragLeave={() => setOver(false)}
@@ -102,6 +115,31 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
       </label>
       {error && <p className="error" role="alert">{error}</p>}
       <p className="src-note" role="status">{note}</p>
+      <div aria-live="polite">
+        {upgrades.length > 0 && (
+          <div className="src-upgrade">
+            <p className="small">
+              The filings moved these defaults:{' '}
+              {upgrades.map((u, i) => <span key={u.key}>{i > 0 && '; '}{u.label.toLowerCase()} now{' '}
+                <span className="pencil-num">{fmt(u.to, u.kind)}</span> (base uses {fmt(u.from, u.kind)})</span>)}.
+              Your assumptions haven’t changed.
+            </p>
+            <button type="button" onClick={apply}>Use the new defaults in base, bull and bear</button>
+          </div>
+        )}
+      </div>
+      {(used.length > 0 || (sources?.notes.length ?? 0) > 0) && (
+        <section className="src-used" aria-labelledby="src-used-head">
+          <h3 id="src-used-head" className="src-sub">In the model from filings</h3>
+          <ul className="src-checks">
+            {used.map(t => <li key={t} className="is-pass"><span aria-hidden="true" className="src-mark">✓</span>{t}.</li>)}
+            {sources?.notes.map(t => (
+              <li key={t} className="is-note"><span aria-hidden="true" className="src-mark">–</span>
+                <span className="visually-hidden">Not used: </span>{t}</li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {sorted.length > 0 && (
         <ul className="src-list" aria-label="Filings">

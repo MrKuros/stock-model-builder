@@ -7,13 +7,13 @@ import ValuationPanel from './Valuation'
 import {
   api, dec2, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS, when, clock,
   type ModelDoc, type ModelSummary, type OneOff, type Market, type Opened, type Parsed, type Paths, type Projection, type Row,
-  type Scenario, type Ttm,
+  type Kind, type Scenario, type Ttm,
 } from './lib'
 
 const GROUPS: [string, string[]][] = [
   ['Growth and margins', ['growth', 'ebitda_margin', 'oi_pct']],
   ['Investment', ['capex_pct', 'dep_pct']],
-  ['Working capital', ['dso', 'dio', 'oca_pct', 'ol_pct']],
+  ['Working capital', ['dso', 'cogs_pct', 'dio', 'dpo', 'oca_pct', 'ol_pct']],
   ['Financing and tax', ['debt_change', 'int_rate', 'tax_rate', 'mi_pct', 'payout']],
 ]
 const HINTS: Record<string, string> = {
@@ -23,21 +23,27 @@ const HINTS: Record<string, string> = {
   capex_pct: 'Spend on new fixed assets, share of sales',
   dep_pct: 'Share of last year’s net block written off',
   dso: 'Days of sales waiting to be collected',
+  cogs_pct: 'Materials, purchases and inventory change, share of sales. Sets the base for inventory and payable days',
   dio: 'Days of sales held as stock',
+  dpo: 'Days of sales owed to suppliers',
   oca_pct: 'Advances, deposits and other current assets',
   ol_pct: 'Payables, provisions and other liabilities',
   debt_change: 'Net new debt you plan each year. Shortfalls are borrowed automatically',
-  int_rate: 'Interest as share of last year’s borrowings',
+  int_rate: 'Interest as share of last year’s borrowings and lease liabilities',
   tax_rate: 'Tax as share of profit before tax',
   mi_pct: 'Associates’ profit added, minority holders’ share taken out',
   payout: 'Share of net profit paid as dividend',
 }
+// defaults an attached annual filing can move (payables, cash-flow capex); inventory days and COGS come from Export
+const UPGRADED = ['dpo', 'ol_pct', 'capex_pct']
+/** A default the filings moved, offered to all three scenarios in one click: base's value now, the new default. */
+export interface Upgrade { key: string; label: string; kind: Kind; from: number; to: number }
 const METRICS: [string, string, (r: Row) => number | null][] = [
   ['revenue', 'Revenue', r => r.revenue],
   ['ebitda', 'EBITDA', r => r.ebitda],
   ['pat', 'Net profit', r => r.pat],
   ['fcf', 'Free cash flow', r => r.fcf],
-  ['net_cash', 'Net cash', r => (r.cash ?? 0) + (r.investments ?? 0) - (r.borrowings ?? 0)],
+  ['net_cash', 'Net cash', r => (r.cash ?? 0) + (r.investments ?? 0) - (r.borrowings ?? 0) - (r.lease ?? 0)],
 ]
 const HORIZONS = [3, 5, 7, 10]
 const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
@@ -140,7 +146,8 @@ export default function App() {
   if (booting) return <main className="landing"><p className="muted" role="status">Opening your last model…</p></main>
   return parsed && doc
     ? <Workspace parsed={parsed} doc={doc} setDoc={f => setDoc(d => d && f(d))} onClose={close} save={save}
-        onRetry={flush} setDefaults={defaults => setParsed(p => p && { ...p, defaults })} />
+        onRetry={flush} setDefaults={defaults => setParsed(p => p && { ...p, defaults })}
+        setParsed={next => setParsed(p => p && { ...next, restated: p.restated })} />
     : <Landing onOpen={open} />
 }
 
@@ -248,14 +255,15 @@ interface WorkspaceProps {
   doc: ModelDoc
   setDoc: (f: (d: ModelDoc) => ModelDoc) => void
   setDefaults: (d: Record<string, number>) => void
+  setParsed: (p: Parsed) => void // the dashboard payload again, after the filings changed
   onClose: () => void
   save: SaveState
   onRetry: () => Promise<string | false>
 }
 
-function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }: WorkspaceProps) {
+function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save, onRetry }: WorkspaceProps) {
   const { company, years: histYears, ratios, defaults, checks, drivers, layout } = parsed
-  const { n, active, scenarios, valuation } = doc
+  const { n, active, scenarios, valuation, filings } = doc
   const a = scenarios[active]
   const setN = (n: number) => setDoc(d => ({ ...d, n }))
   const setActive = (active: Scenario) => setDoc(d => ({ ...d, active }))
@@ -277,16 +285,43 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
     const at = await onRetry()
     if (at) { setRetried(at); back.current?.focus() } // the Try again button is gone
   }
-  const hist = company.hist
+  const hist = parsed.hist ?? company.hist // with the filings' payables, leases and cash-flow capex
   const nHist = hist.length
+  const sources = parsed.sources
 
   useEffect(() => {
     const ctl = new AbortController()
-    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation }, ctl.signal))
+    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation, filings }, ctl.signal))
       .then(p => { setProjection(p); setError(null) })
       .catch(e => { if (e.name !== 'AbortError') { setProjection(null); setError(e.message) } })
     return () => ctl.abort()
-  }, [company, scenarios, n, valuation])
+  }, [company, scenarios, n, valuation, filings])
+
+  // A filing attached or removed changes the history (payables, leases, cash-flow capex) and so the defaults; like
+  // excluding a year, it never changes the assumptions by itself. The upgraded defaults are offered in one click.
+  const filingIds = filings.map(f => f.id).join()
+  const seenIds = useRef(filingIds)
+  const [upgrades, setUpgrades] = useState<Upgrade[]>([])
+  useEffect(() => {
+    if (filingIds === seenIds.current) return
+    seenIds.current = filingIds
+    const before = parsed.defaults
+    api<Parsed>('/api/company', postJson({ company, excluded_years: doc.excluded_years, filings }))
+      .then(p => {
+        setParsed(p)
+        // moved now, or offered before and not taken; and only where base still differs from the new default
+        const keys = UPGRADED.filter(k => upgrades.some(u => u.key === k) || Math.abs((p.defaults[k] ?? 0) - (before[k] ?? 0)) > 1e-9)
+        setUpgrades(keys.filter(k => p.defaults[k] != null && Math.abs((scenarios.base[k]?.start ?? 0) - p.defaults[k]) > 1e-9)
+          .map(k => ({ key: k, label: byKey[k]?.[1] ?? k, kind: byKey[k]?.[2] ?? 'pct', from: scenarios.base[k]?.start ?? 0, to: p.defaults[k] })))
+      })
+      .catch(e => setError((e as Error).message))
+  }, [filingIds]) // eslint-disable-line react-hooks/exhaustive-deps
+  const applyUpgrades = () => {
+    const next = Object.fromEntries(upgrades.map(u => [u.key, flat(u.to)]))
+    setDoc(d => ({ ...d, scenarios: { base: { ...d.scenarios.base, ...next }, bull: { ...d.scenarios.bull, ...next },
+      bear: { ...d.scenarios.bear, ...next } } }))
+    setUpgrades([])
+  }
 
   const proj = projection?.scenarios[active].length === n ? projection.scenarios[active] : null // null while a new horizon loads
   const projYears = proj ? projection!.years : []
@@ -297,7 +332,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
   const exportXlsx = async () => {
     setExporting(true)
     try {
-      const res = await fetch('/api/export', postJson({ company, scenarios, active, n, valuation }))
+      const res = await fetch('/api/export', postJson({ company, scenarios, active, n, valuation, filings }))
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? 'Export failed. Try again.')
       const url = URL.createObjectURL(await res.blob())
       const link = Object.assign(document.createElement('a'), { href: url, download: `${company.name} model.xlsx` })
@@ -307,6 +342,15 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
   }
 
   const byKey = Object.fromEntries(drivers.map(d => [d[0], d]))
+  const onCogs = sources?.basis === 'cogs'
+  const nonZero = (k: string) => !!a[k] && (a[k].start !== 0 || (a[k].end ?? 0) !== 0)
+  // COGS % only does something when days run on COGS; payable days once a filing gives payables (or the user set some)
+  const shown = (k: string) => !sources || (k === 'cogs_pct' ? onCogs
+    : k === 'dpo' ? sources.used.payables.length > 0 || nonZero(k) : true)
+  const hintFor = (k: string) => (onCogs && k === 'dio' ? 'Days of cost of goods sold held as stock'
+    : onCogs && k === 'dpo' ? 'Days of cost of goods sold owed to suppliers'
+    : k === 'ol_pct' && sources?.used.payables.length ? 'Provisions, advances and other liabilities; trade payables are separate'
+    : HINTS[k] ?? '')
   const balanced = proj?.every(r => Math.abs(r.chk_bs ?? 0) < 0.5 && Math.abs(r.chk_cash ?? 0) < 0.5)
   // A check that fails must say so; a small gap in the first year only comes from rounding in the reported balance sheet
   const offIdx = proj ? proj.findIndex(r => Math.abs(r.chk_bs ?? 0) >= 0.5 || Math.abs(r.chk_cash ?? 0) >= 0.5) : -1
@@ -334,7 +378,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
     const next = excluded.includes(year) ? excluded.filter(y => y !== year) : [...excluded, year]
     setPending(year)
     try {
-      const d = await api<Record<string, number>>('/api/defaults', postJson({ company, excluded_years: next }))
+      const d = await api<Record<string, number>>('/api/defaults', postJson({ company, excluded_years: next, filings }))
       setDefaults(d)
       setDoc(doc => ({ ...doc, excluded_years: next }))
       setDefaultsNote(`Defaults ${next.length ? `now leave out ${histYears.filter(y => next.includes(y)).join(', ')}` : 'use every year again'}. ` +
@@ -446,12 +490,13 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
         {GROUPS.map(([group, keys]) => (
           <section key={group} className="group">
             <h3>{group}</h3>
-            {keys.filter(k => byKey[k]).map(k => (
+            {keys.filter(k => byKey[k] && shown(k)).map(k => (
               <DriverStrip
                 key={`${company.name}-${k}`}
                 id={k}
                 label={byKey[k][1]}
-                hint={HINTS[k] ?? ''}
+                hint={hintFor(k)}
+                source={sources?.drivers[k]}
                 kind={byKey[k][2]}
                 history={ratios.map(r => r[k])}
                 value={a[k] ?? flat(seeded[active][k].start)} // a model saved before this driver existed
@@ -490,12 +535,14 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
         <ValuationPanel inputs={valuation} defaults={parsed.valuation} v={proj ? projection!.valuation : null}
           market={company.market} active={active} asOf={histYears[nHist - 1]} next={projYears[0]} growth={a.growth} n={n}
           onChange={f => setDoc(d => ({ ...d, valuation: f(d.valuation) }))} />
-        <Sources company={company} filings={doc.filings} proposals={doc.proposals}
+        <Sources company={company} filings={doc.filings} proposals={doc.proposals} sources={sources}
+          upgrades={upgrades} onApply={applyUpgrades}
           onFilings={f => setDoc(d => ({ ...d, filings: f(d.filings) }))}
           onProposals={f => setDoc(d => ({ ...d, proposals: f(d.proposals) }))} />
       </main>
       <div className="tables">
         <Statements layout={layout} years={years} rows={rows} nHist={nHist}
+          hide={sources?.basis === 'cogs' ? undefined : new Set(['cogs'])}
           quarterly={company.quarters?.dates.length ? {
             quarters: company.quarters, ttm: parsed.ttm ?? null, ttmPrev: parsed.ttm_prev ?? null,
             fy: histYears[nHist - 1], last: hist[nHist - 1], prev: nHist > 1 ? hist[nHist - 2] : null,
@@ -562,7 +609,7 @@ function Readout({ hist, proj, histYear, projYear, n, ttm }: {
   const cagr = r0 > 0 && r1 > 0 ? (r1 / r0) ** (1 / n) - 1 : null
   const margin = (r: Row) => (r.revenue ? (r.pat ?? 0) / r.revenue : null)
   const fcf = proj.reduce((s, r) => s + (r.fcf ?? 0), 0)
-  const netCash = (end.cash ?? 0) + (end.investments ?? 0) - (end.borrowings ?? 0)
+  const netCash = (end.cash ?? 0) + (end.investments ?? 0) - (end.borrowings ?? 0) - (end.lease ?? 0)
   const P = ({ children }: { children: React.ReactNode }) => <span className="pencil-num">{children}</span>
   const ttmGrowth = growth(ttm?.values.sales, r0)
 

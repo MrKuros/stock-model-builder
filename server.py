@@ -106,6 +106,32 @@ class Valuation(BaseModel):
     shares: FiniteFloat | None = Field(V["shares"], gt=0)
 
 
+class Check(BaseModel):
+    name: str
+    pass_: bool | None = Field(alias="pass")  # None = nothing to compare with (a note)
+    detail: str
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+
+class Filing(BaseModel):
+    """An attached XBRL filing (model.parse_xbrl plus id and file name). Read by rules; an annual one that ties to
+    Export adds payables, leases and cash-flow capex to its year (model.upgrade)."""
+    id: str
+    file: str
+    kind: Literal["quarter", "half", "annual", "other"]
+    company: str | None = None
+    period_start: str | None = None
+    period_end: str | None
+    consolidated: bool | None = None
+    facts: dict[str, FiniteFloat]
+    unmapped: list[dict] = []
+    checks: list[Check] = []
+    model_config = ConfigDict(extra="allow")  # later Phase 3 features may add fields; keep them on save
+
+
+NEW_DRIVERS = ("cogs_pct", "dpo")  # added in 3.4; scenarios saved before lack them
+
+
 class ModelRequest(BaseModel):
     """The model document (version 4) minus what the engine ignores (excluded_years, saved_at)."""
     company: Company
@@ -113,6 +139,24 @@ class ModelRequest(BaseModel):
     active: Scenario = "base"
     n: int = 5
     valuation: Valuation = Valuation()
+    filings: list[Filing] = []
+
+    @model_validator(mode="after")
+    def _new_drivers(self):
+        """Scenarios saved before 3.4 get COGS % revenue at its default (0 for them: their company has no COGS
+        line, so inventory days stay on revenue) and payable days at 0: their other-liabilities % still includes
+        payables, so a default would count them twice. Their numbers stay exactly as they were."""
+        if all(k in a for a in self.scenarios.values() for k in NEW_DRIVERS):
+            return self
+        d = model.default_assumptions(self.upgraded()["hist"])
+        for a in self.scenarios.values():
+            a.setdefault("cogs_pct", DriverPath(start=d["cogs_pct"]))
+            a.setdefault("dpo", DriverPath(start=0.0))
+        return self
+
+    def upgraded(self):
+        """The company with what the attached filings add (model.upgrade), as the engine uses it."""
+        return model.upgrade(self.company.model_dump(), [f.model_dump() for f in self.filings])
 
     def args(self):
         if not 1 <= self.n <= 15:
@@ -124,7 +168,7 @@ class ModelRequest(BaseModel):
             if missing:
                 raise HTTPException(422, f"Missing assumptions in {s}: {sorted(missing)}")
         sc = {s: {k: v.model_dump() for k, v in a.items()} for s, a in self.scenarios.items()}
-        return self.company.model_dump(), sc, self.n
+        return self.upgraded(), sc, self.n
 
     def projection(self):
         co, sc, n = self.args()
@@ -145,28 +189,6 @@ class ModelRequest(BaseModel):
         return v
 
 
-class Check(BaseModel):
-    name: str
-    pass_: bool | None = Field(alias="pass")  # None = nothing to compare with (a note)
-    detail: str
-    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
-
-
-class Filing(BaseModel):
-    """An attached XBRL filing (model.parse_xbrl plus id and file name). Read by rules; feeds no number yet."""
-    id: str
-    file: str
-    kind: Literal["quarter", "half", "annual", "other"]
-    company: str | None = None
-    period_start: str | None = None
-    period_end: str | None
-    consolidated: bool | None = None
-    facts: dict[str, FiniteFloat]
-    unmapped: list[dict] = []
-    checks: list[Check] = []
-    model_config = ConfigDict(extra="allow")  # later Phase 3 features may add fields; keep them on save
-
-
 class ModelDoc(ModelRequest):
     """The full model document as saved in the library. Version 3 (before valuation) loads with default inputs;
     versions 3 and 4 load with empty Phase 3 blocks."""
@@ -176,7 +198,6 @@ class ModelDoc(ModelRequest):
     # ponytail: untyped until the features that fill them land. proposals: [{id, kind (mapping | oneoff_note | ar_note), field, value, unit, period, source: {file,
     # page, quote, tag}, reasoning, checks: [{name, pass, detail}], status (proposed | approved | rejected), ai}];
     # notes: approved oneoff_note / ar_note results keyed for display
-    filings: list[Filing] = []
     proposals: list[dict] = []
     notes: dict = {}
 
@@ -186,18 +207,21 @@ class ModelDoc(ModelRequest):
         return self
 
 
-def _company_payload(co, excluded=()):
-    labels, q = model.labels(co["dates"]), co.get("quarters")
+def _company_payload(co, excluded=(), filings=()):
+    """What the dashboard derives from the company. Ratios, defaults and one-offs use the upgraded history (with the
+    filings' payables, leases and cash-flow capex); "company" stays as parsed, for the document."""
+    labels, q, up = model.labels(co["dates"]), co.get("quarters"), model.upgrade(co, filings)
     return {
         "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
                     "market": co.get("market") or Market().model_dump(),
                     "quarters": q and {"dates": [d.isoformat() for d in q["dates"]], "rows": q["rows"]}},
         "ttm": model.ttm(q), "ttm_prev": model.ttm(q, 4),  # last four quarters, and the four before them
         "years": labels,
-        "ratios": model.ratios(co["hist"]),
-        "defaults": model.default_assumptions(co["hist"], exclude=set(excluded), labels=labels),
+        "hist": up["hist"], "sources": up["sources"],
+        "ratios": model.ratios(up["hist"]),
+        "defaults": model.default_assumptions(up["hist"], exclude=set(excluded), labels=labels),
         "checks": model.data_checks(co),
-        "oneoffs": model.detect_oneoffs(co["hist"], labels),
+        "oneoffs": model.detect_oneoffs(up["hist"], labels),
         "valuation": model.VALUATION,  # defaults for a new document
         "drivers": model.DRIVERS,
         "layout": model.LAYOUT,
@@ -258,16 +282,26 @@ def sample():
 class DefaultsRequest(BaseModel):
     company: Company
     excluded_years: list[str] = []
+    filings: list[Filing] = []
+
+    def payload(self):
+        try:
+            return _company_payload(self.company.model_dump(), self.excluded_years,
+                                    [f.model_dump() for f in self.filings])
+        except ValueError as e:
+            raise HTTPException(422, str(e))
 
 
 @app.post("/api/defaults")
 def defaults(req: DefaultsRequest):
-    """Defaults with the user's excluded (one-off) years left out."""
-    try:
-        return model.default_assumptions(req.company.model_dump()["hist"], exclude=set(req.excluded_years),
-                                         labels=model.labels(req.company.dates))
-    except ValueError as e:
-        raise HTTPException(422, str(e))
+    """Defaults with the user's excluded (one-off) years left out, on the history the filings upgrade."""
+    return req.payload()["defaults"]
+
+
+@app.post("/api/company")
+def refresh(req: DefaultsRequest):
+    """Everything the dashboard derives from the company, again: after a filing is attached or removed."""
+    return req.payload()
 
 
 @app.post("/api/project")
@@ -411,7 +445,7 @@ def open_model(model_id: str):
     """The saved document plus everything the dashboard derives from the company, defaults honouring exclusions."""
     doc = load_model(model_id)
     try:
-        parsed = _company_payload(doc.company.model_dump(), doc.excluded_years)
+        parsed = _company_payload(doc.company.model_dump(), doc.excluded_years, [f.model_dump() for f in doc.filings])
     except ValueError as e:
         raise HTTPException(422, str(e))
     return {"id": model_id, "doc": doc.model_dump(mode="json"), "parsed": parsed}

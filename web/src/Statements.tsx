@@ -7,9 +7,13 @@ const ALL_TABS = [['PROFIT & LOSS', 'Profit & loss'], ['BALANCE SHEET', 'Balance
 
 /** The quarterly tab's inputs: the export's quarters, TTM (and a year earlier), the last reported year (and the one before). */
 export interface QuarterProps { quarters: Quarters; ttm: Ttm | null; ttmPrev: Ttm | null; fy: string; last: Row; prev: Row | null }
-interface Props { layout: LayoutLine[]; years: string[]; rows: Row[]; nHist: number; quarterly: QuarterProps | null }
+interface Props {
+  layout: LayoutLine[]; years: string[]; rows: Row[]; nHist: number; quarterly: QuarterProps | null
+  hide?: Set<string> // lines that mean nothing for this company (COGS when days run on revenue)
+}
+const OPTIONAL = new Set(['cogs', 'lease', 'payables']) // shown only when some year has them
 
-export default function Statements({ layout, years, rows, nHist, quarterly }: Props) {
+export default function Statements({ layout, years, rows, nHist, quarterly, hide }: Props) {
   const TABS = quarterly ? ALL_TABS : ALL_TABS.slice(0, 4) // no Quarters block in the export: no tab
   const [picked, setTab] = useState<string>(TABS[0][0])
   const tab = TABS.some(t => t[0] === picked) ? picked : TABS[0][0]
@@ -17,7 +21,8 @@ export default function Statements({ layout, years, rows, nHist, quarterly }: Pr
   let section = ''
   for (const [label, key, kind] of layout) {
     if (kind === 'head') section = label
-    else if (key && section === tab) lines.push([label, key, kind as LineKind])
+    else if (key && section === tab && !hide?.has(key) && !(OPTIONAL.has(key) && rows.every(r => !r[key])))
+      lines.push([label, key, kind as LineKind])
   }
 
   return (
@@ -54,9 +59,9 @@ export default function Statements({ layout, years, rows, nHist, quarterly }: Pr
       </div>
       {tab === 'RATIOS' && (
         <p className="muted small">
-          ROE = net profit / average equity. ROCE = EBIT / average (equity + borrowings), EBIT = profit before tax +
+          ROE = net profit / average equity. ROCE = EBIT / average (equity + borrowings + lease liabilities), EBIT = profit before tax +
           interest. Asset turnover = revenue / average total assets. Averages use opening and closing balances; the
-          first year uses closing. Net debt = borrowings − cash − investments. – means not meaningful (zero or
+          first year uses closing. Net debt = borrowings + lease liabilities − cash − investments. – means not meaningful (zero or
           negative denominator).
         </p>
       )}

@@ -156,7 +156,7 @@ export default function ValuationPanel({ inputs, defaults, v, market, active, as
         {v.shares != null && v.steps && <Sensitivity v={v} active={active} />/* steps: a server not yet restarted has none */}
         {v.shares != null && v.multiples && next && <Multiples v={v} active={active} asOf={asOf} next={next} />}
         <p className="muted small">
-          Equity value = enterprise value − borrowings Rs {money(v.borrowings)} cr + cash Rs {money(v.cash)} cr +
+          Equity value = enterprise value − borrowings{v.lease ? ' and lease liabilities' : ''} Rs {money(v.borrowings)} cr + cash Rs {money(v.cash)} cr +
           investments Rs {money(v.investments)} cr ({asOf})
           {v.nci > 0 && <> − minority interest, estimated as minorities’ {fmt(v.nci, 'pct')} share of profit</>}.
           Terminal value: Gordon growth at {fmt(v.g, 'pct')} on the

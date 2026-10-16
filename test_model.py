@@ -2,6 +2,7 @@
 import calendar
 import io
 import json
+import os
 import re
 import shutil
 import statistics
@@ -108,6 +109,7 @@ def main():
     assert co["hist"][1]["cfi"] is None and co["hist"][1]["net_cf"] is None, "missing CF rows must not be 0"
     quarters_check(tmp, co)
     xbrl_check(co)
+    pins_check(co)
     m = co["market"]
     assert m["price"] == 1600 and m["shares"] == 5.0 and m["shares_hist"] == [5.0] * 10, m
     assert m["price_hist"][0] == 500 and m["price_hist"][-1] is None and len(m["price_hist"]) == 10, m
@@ -244,6 +246,7 @@ def main():
 
     valuation_check(co, projs, ex)
     library_check(tmp / "models", co, seeded)
+    upgrade_check(tmp, co, excel=bool(shutil.which("soffice")))
 
     if not shutil.which("soffice"):
         print("SKIP Excel formula check: soffice not found")
@@ -463,6 +466,167 @@ def xbrl_check(co):
             raise AssertionError(bad)
 
 
+# Outputs of the engine before 3.4 (commit 29e0cc6), default assumptions, base, 5 years. Export-only models must
+# reproduce them: TCS is on revenue (bit for bit); the synthetic company is on COGS, where inventory days now count on
+# COGS, so its days default doubles (COGS is half of revenue) and the inventory it projects is the same.
+PIN_KEYS = ("revenue", "pat", "inventory", "receivables", "other_liab", "borrowings", "cash", "net_block", "capex",
+            "fcff", "interest")
+PINS = {
+    "synthetic": {
+        "defaults": {"growth": 0.12000067516402613, "ebitda_margin": 0.20000080431973322, "oi_pct": 0.01999942302421856,
+                     "dep_pct": 0.09014084507042254, "int_rate": 0.1, "tax_rate": 0.25000359934923766,
+                     "payout": 0.29999520084465137, "mi_pct": -5.4560079532378e-17, "capex_pct": 0.037965072133637055,
+                     "dso": 43.80017614602157, "dio": 29.200117430681047, "oca_pct": 0.029998444981849188,
+                     "ol_pct": 0.1499989275736891, "debt_change": 0.0},
+        "first": (3105.8514722838577, 445.407546891067, 248.46911702175962, 372.70367553263947, 465.874390045742, 200.0,
+                  534.8128789046038, 818.5054244773941, 117.9138751816195, 338.69672889591345, 20.0),
+        "last": (4887.1292052405015, 722.0047005385113, 390.9719087450235, 586.4578631175352, 733.0641397001308, 200.0,
+                 1796.358714567698, 1119.131157568024, 185.54021280335996, 528.7618686285541, 20.0),
+        "per_share": 1097.1241320193562, "wacc": 0.1335365765869531},
+    "TCS": {
+        "defaults": {"growth": 0.10072809184198905, "ebitda_margin": 0.27408899696100636, "oi_pct": 0.029257911805745815,
+                     "dep_pct": 0.2135380938682481, "int_rate": 0.2073558882470824, "tax_rate": 0.24300193617671728,
+                     "payout": 0.5474221233972694, "mi_pct": -0.003406819852750826, "capex_pct": 0.02544814438075979,
+                     "dso": 68.65923920365962, "dio": 0.01795380130841401, "oca_pct": 0.21834773700835564,
+                     "ol_pct": 0.18815027727341746, "debt_change": 0.0},
+        "first": (180714.23593434223, 36750.75840037819, 8.889061604293238, 33993.703979513935, 34001.433598300275,
+                  7795.0, 19970.81859959611, 21131.057696511387, 4598.84196771583, 28106.701728215114,
+                  1616.3391488860073),
+        "last": (265284.9222554354, 55636.92082412305, 13.048966532307247, 49902.08475139777, 49913.43167881716, 7795.0,
+                 84063.65395172854, 25567.463455587153, 6751.009003594956, 44232.24769933669, 1616.3391488860073),
+        "per_share": 1272.814030514745, "wacc": 0.13480481681094378},
+}
+
+
+def _pinned(co, pin, where):
+    d = model.default_assumptions(co["hist"])
+    ex = model.expand({k: {"start": v, "end": None} for k, v in d.items()}, 5)
+    pr = model.project(co["hist"], ex, 5)
+    v = model.valuation({"base": pr}, co["hist"], None, ex, co["market"])
+    near = lambda a, b: abs(a - b) <= 1e-9 * max(1.0, abs(b))  # noqa: E731
+    old = pin["defaults"]
+    for k, want in old.items():
+        got = d[k] * d["cogs_pct"] if k == "dio" and model.on_cogs(co["hist"]) else d[k]
+        assert near(got, want), (where, k, got, want)  # on COGS: days x COGS share = the old days on revenue
+    assert d["dpo"] == 0.0, (where, d["dpo"])
+    for t, rows in (("first", pr[0]), ("last", pr[-1])):
+        for k, want in zip(PIN_KEYS, pin[t]):
+            assert near(rows[k], want), (where, t, k, rows[k], want)
+        assert rows["payables"] == 0.0 and rows["lease"] == 0.0, (where, rows["payables"], rows["lease"])
+    assert near(v["scenarios"]["base"]["per_share"], pin["per_share"]) and near(v["wacc"], pin["wacc"]), where
+
+
+def pins_check(co):
+    """Export-only models give the numbers they gave before 3.4. Real exports: set REAL_EXPORTS to a folder with
+    <NAME>/<NAME>.xlsx (TCS is pinned); skipped without it."""
+    _pinned(co, PINS["synthetic"], "synthetic")
+    assert model.on_cogs(co["hist"]) and model.upgrade(co)["hist"] == co["hist"], "no filings: history unchanged"
+    real = os.environ.get("REAL_EXPORTS")
+    tcs = Path(real or ".") / "TCS" / "TCS.xlsx"
+    if real and tcs.exists():
+        t = model.parse_export(tcs)
+        assert not model.on_cogs(t["hist"]), "TCS: Rs 14 cr of materials, days stay on revenue"
+        _pinned(t, PINS["TCS"], "TCS")
+    else:
+        print("SKIP real-export pins: set REAL_EXPORTS to a folder holding TCS/TCS.xlsx")
+
+
+def _filing(co, end_i=-1, extra=""):
+    """An annual fake_xbrl for reported year end_i, read with ties against co, as the client stores it."""
+    sub = dict(co, dates=co["dates"][:len(co["dates"]) + end_i + 1], hist=co["hist"][:len(co["hist"]) + end_i + 1])
+    f = model.parse_xbrl(fake_xbrl(sub, extra=extra), company=co)
+    return {"id": f"f{end_i}", "file": f"fy{sub['dates'][-1].year}.xml", **f}
+
+
+def _fact(tag, v, c="OneI"):
+    return f'<in-bse-fin:{tag} contextRef="{c}" unitRef="INR" decimals="-7">{v * 1e7:.2f}</in-bse-fin:{tag}>'
+
+
+def upgrade_check(tmp, co, excel):
+    """3.4: annual filings add trade payables, lease liabilities and cash-flow capex to their year by rules; totals
+    don't move; days run on COGS where it matters; Excel equals Python for selectors 1-3."""
+    h24, h25 = co["hist"][-2], co["hist"][-1]
+    f25 = _filing(co, -1, _fact("TradePayablesCurrent", 0.06 * h25["revenue"]) + _fact("LeaseLiabilitiesNoncurrent", 30.0))
+    f24 = _filing(co, -2, _fact("TradePayablesCurrent", 0.05 * h24["revenue"]))
+    quarter = {"id": "q", "file": "q.xml", **model.parse_xbrl(fake_xbrl(co, quarter=True), company=co)}
+    off = dict(_filing(dict(co, hist=[*co["hist"][:-1], dict(h25, revenue=h25["revenue"] * 1.05)])), file="off.xml",
+               consolidated=False)  # revenue 5% from Export's: not used
+    up = model.upgrade(co, [off, quarter, f24, f25])
+    u24, u25 = up["hist"][-2], up["hist"][-1]
+    assert "payables" not in co["hist"][-1], "upgrade() must not touch the parsed company"
+    assert abs(u25["payables"] - 0.06 * h25["revenue"]) < 1e-6 and abs(u25["other_liab"] + u25["payables"]
+                                                                          - h25["other_liab"]) < 1e-9, u25
+    assert u25["lease"] == 30.0 and u25["borrowings"] == h25["borrowings"] - 30 and "lease" not in u24, u25
+    assert u25["capex"] == u25["capex_cf"] == 88.25 == u24["capex"] and u25["fcf"] == 100.0 - 88.25, u25
+    for u, h in zip(up["hist"], co["hist"]):  # the split never moves a total, a debt figure or a return ratio
+        liab = u["share_cap"] + u["reserves"] + u["borrowings"] + (u.get("lease") or 0) + (u.get("payables") or 0)
+        assert abs(liab + u["other_liab"] - h["total_liab"]) < 1e-9 and model._debt(u) == h["borrowings"], u
+        assert all(u[k] == h[k] for k in RETURNS), u
+    src = up["sources"]
+    assert src["used"] == {"payables": ["FY2024", "FY2025"], "lease": ["FY2025"], "capex": ["FY2024", "FY2025"]}, src
+    assert src["basis"] == "cogs" and src["drivers"]["dpo"] == "Trade payables from XBRL FY2024, FY2025, on COGS", src
+    assert src["notes"] == [], "the consolidated filing already covers FY2025; the second one is simply not needed"
+    later = dict(co, dates=co["dates"][:-1], hist=co["hist"][:-1])  # FY2025 isn't in this file
+    assert "isn't one of the reported years" in model.upgrade(later, [f25])["sources"]["notes"][0]
+    note = model.upgrade(co, [off])["sources"]["notes"]
+    assert len(note) == 1 and "off.xml" in note[0] and "1%" in note[0], note
+    # no lease element: Export's borrowings less the filing's (150 + 50) are the leases; equal = none
+    d30 = dict(co, hist=[*co["hist"][:-1], dict(h25, borrowings=230.0, other_liab=h25["other_liab"] - 30)])
+    assert model.upgrade(d30, [_filing(d30)])["hist"][-1]["lease"] == 30.0
+    assert "lease" not in model.upgrade(co, [_filing(co)])["hist"][-1]
+    big = model.upgrade(co, [_filing(co, -1, _fact("TradePayablesCurrent", 2 * h25["other_liab"]))])
+    assert "payables" not in big["hist"][-1] and "exceed" in big["sources"]["notes"][0], big["sources"]
+    # defaults: payable days and other liabilities from the split years only; capex per year where a filing has it
+    d = model.default_assumptions(up["hist"])
+    pay = up["hist"][-2:]
+    assert abs(d["dpo"] - sum(h["payables"] * 365 for h in pay) / sum(h["cogs"] for h in pay)) < 1e-9, d["dpo"]
+    assert abs(d["ol_pct"] - sum(h["other_liab"] for h in pay) / sum(h["revenue"] for h in pay)) < 1e-12, d["ol_pct"]
+    r = model.ratios(up["hist"])
+    assert d["capex_pct"] == statistics.median([r[-3]["capex_pct"], 88.25 / h24["revenue"], 88.25 / h25["revenue"]])
+    assert r[-1]["dpo"] == u25["payables"] * 365 / u25["cogs"] and r[-3]["dpo"] is None, r[-1]
+    pr = model.project(up["hist"], d, 5)
+    for c in pr:
+        assert abs(c["chk_bs"]) < 1e-6 and abs(c["chk_cash"]) < 1e-6 and c["lease"] == 30.0, c
+        assert abs(c["payables"] - c["cogs"] * d["dpo"] / 365) < 1e-9 and abs(c["inventory"] - c["cogs"] * d["dio"] / 365) < 1e-9
+    assert abs(pr[0]["interest"] - h25["borrowings"] * d["int_rate"]) < 1e-9, "interest runs on borrowings + leases"
+    v = model.valuation({"base": pr}, up["hist"], None, model.expand(d, 5), co["market"])
+    assert v["d"] == h25["borrowings"] == v["borrowings"] and v["lease"] == 30.0, (v["d"], v["lease"])
+    # revenue basis: no raw material cost line (or under 10% of revenue): days on revenue exactly as before
+    rev = dict(co, hist=[dict(h, cogs=None) for h in co["hist"]])
+    up_rev = model.upgrade(rev, [f24, f25])
+    assert not model.on_cogs(rev["hist"]) and up_rev["sources"]["basis"] == "revenue", up_rev["sources"]
+    assert model.default_assumptions(rev["hist"])["dio"] == PINS["synthetic"]["defaults"]["dio"]
+    assert model.on_cogs([dict(h, cogs=0.09 * h["revenue"]) for h in co["hist"]]) is False
+    if not excel:
+        return
+    rows = {key: 5 + i for i, (_, key, _) in enumerate(model.LAYOUT) if key}
+    for name, comp in (("cogs", up), ("rev", up_rev)):
+        base = {k: {"start": x, "end": None} for k, x in model.default_assumptions(comp["hist"]).items()}
+        base.update(dpo={"start": 40.0, "end": 70.0}, cogs_pct={"start": 0.5, "end": 0.45}, debt_change={"start": -60.0, "end": None})
+        sc = {"base": base, "bull": dict(base, growth={"start": 0.2, "end": None}),
+              "bear": dict(base, dio={"start": 90.0, "end": 20.0}, capex_pct={"start": 0.3, "end": None})}
+        ex = {s: model.expand(sc[s], 5) for s in model.SCENARIOS}
+        projs = {s: model.project(comp["hist"], ex[s], 5) for s in model.SCENARIOS}
+        v = model.valuation(projs, comp["hist"], None, ex["base"], comp["market"], ex)
+        rh = model.ratios(comp["hist"])
+        for i, s in enumerate(model.SCENARIOS):
+            out = tmp / f"up-{name}-{s}"
+            out.mkdir()
+            (out / "model.xlsx").write_bytes(model.to_excel(comp, sc, n=5, active=s))
+            ws = recalc(out / "model.xlsx", out / "calc")
+            assert ws["B3"].value == i + 1
+            for j, c in enumerate(projs[s]):
+                assert abs(c["chk_bs"]) < 1e-6 and abs(c["chk_cash"]) < 1e-6, (name, s, j)
+                _same(ws, rows, 2 + len(comp["hist"]) + j, {**c, **{k: x[j] for k, x in ex[s].items()}}, (name, s, j))
+            _same_valuation(ws.parent["Valuation"], v, s)
+        for j, h in enumerate(comp["hist"]):  # reported columns: values, ratio formulas, cash-flow capex as a value
+            _same(ws, rows, 2 + j, {**{k: h.get(k) for k in ("cogs", "payables", "lease", "other_liab", "borrowings",
+                                                            "capex", "fcf", "total_liab", *RETURNS)},
+                                    **{k: rh[j][k] for k in ("cogs_pct", "dio", "dpo", "int_rate", "capex_pct", "ol_pct",
+                                                             "debt_change")}}, (name, "hist", j))
+        assert ("XBRL filings" in ws["A2"].value) and (("on COGS" if name == "cogs" else "on revenue") in ws["A2"].value)
+
+
 def _flat_scenarios(co):
     return dict.fromkeys(model.SCENARIOS, {k: {"start": v, "end": None}
                                            for k, v in model.default_assumptions(co["hist"]).items()})
@@ -625,6 +789,15 @@ def library_check(root, co, scenarios):
     up = server.ModelDoc.model_validate(v4).model_dump(mode="json")
     assert up == {**v4, "version": 5, "company": {**v4["company"], "quarters": None}, "filings": [], "proposals": [],
                   "notes": {}}, up
+    # saved before 3.4: no COGS line in the company, no cogs_pct / dpo in the scenarios. They come back as 0 (days stay
+    # on revenue, payables stay in other liabilities) and the model projects exactly as it did
+    pre = {k: {"start": x, "end": None} for k, x in PINS["synthetic"]["defaults"].items()}
+    old34 = server.ModelDoc.model_validate(dict(v4, company=dict(v4["company"], hist=[
+        {k: x for k, x in h.items() if k != "cogs"} for h in company["hist"]]), scenarios=dict.fromkeys(model.SCENARIOS, pre)))
+    assert all(a["cogs_pct"].start == 0 and a["dpo"].start == 0 for a in old34.scenarios.values()), old34.scenarios
+    _, _, _, out = old34.projection()
+    assert [out["base"][0][k] for k in PIN_KEYS] == list(PINS["synthetic"]["first"]), "bit for bit as before 3.4"
+    assert [out["base"][-1][k] for k in PIN_KEYS] == list(PINS["synthetic"]["last"])
     # quarters must have one value per date
     try:
         server.Company.model_validate(dict(company, quarters={"dates": q["dates"][:2], "rows": q["rows"]}))
@@ -745,9 +918,26 @@ def xbrl_api_check(server, root, co, data):
             assert r.status_code == status and isinstance(r.json()["detail"], str), (status, r.text)
         r = client.post("/api/xbrl", files={"file": ("q4.xml", fake_xbrl(co))}, data={"company": "{}"})
         assert r.status_code == 422, r.text
+        # an attached annual filing feeds /api/project, /api/export and the refreshed dashboard payload
+        extra = _fact("TradePayablesCurrent", 0.06 * co["hist"][-1]["revenue"]) + _fact("LeaseLiabilitiesNoncurrent", 30.0)
+        g = client.post("/api/xbrl", files={"file": ("fy2025.xml", fake_xbrl(co, extra=extra))},
+                        data={"company": json.dumps(data["company"])}).json()
+        req = {k: data[k] for k in ("company", "scenarios", "n", "valuation")}
+        p = client.post("/api/company", json={"company": data["company"], "filings": [g]}).json()
+        assert p["hist"][-1]["lease"] == 30.0 and p["company"]["hist"] == data["company"]["hist"], "document keeps the parse"
+        assert p["sources"]["used"]["payables"] == ["FY2025"] and p["defaults"]["dpo"] > 0, p["sources"]
+        assert client.post("/api/defaults", json={"company": data["company"], "filings": [g]}).json() == p["defaults"]
+        with_f = client.post("/api/project", json={**req, "filings": [g]}).json()["scenarios"]["base"][0]
+        without = client.post("/api/project", json=req).json()["scenarios"]["base"][0]
+        assert with_f["lease"] == 30.0 and without["lease"] == 0.0 and abs(with_f["chk_bs"]) < 1e-6, (with_f, without)
+        x = client.post("/api/export", json={**req, "filings": [g]})
+        assert x.status_code == 200 and "XBRL filings" in openpyxl.load_workbook(io.BytesIO(x.content))["Model"]["A2"].value
     finally:
         server.MODELS = models
         (root / server.MAPPINGS).unlink()
+    mid, _ = server.save_model(server.ModelDoc.model_validate(dict(data, filings=[g])), root)
+    assert server.load_model(mid, root).upgraded()["hist"][-1]["lease"] == 30.0
+    server.delete_model(mid, root)
     mid, _ = server.save_model(server.ModelDoc.model_validate(dict(data, filings=[f])), root)
     back = server.load_model(mid, root).model_dump(mode="json")["filings"]
     assert back == [f], "a filing (checks with 'pass', facts, unmapped) round-trips through the library"
@@ -780,8 +970,8 @@ RETURNS = ("roe", "roce", "asset_turnover", "nd_ebitda", "int_cover")
 VAL_CELLS = {"Cost of debt, pre-tax": "kd", "Tax rate": "tax", "Share price (Rs)": "price", "Shares (crore)": "shares",
              "Minority share of profit": "nci",
              "Cost of equity = risk-free + beta x premium": "ke", "Cost of debt after tax": "kd_after_tax",
-             "Equity (market cap; book equity if no price)": "e", "Debt (borrowings)": "d", "Equity weight": "we",
-             "WACC": "wacc", "Less borrowings": "borrowings", "Plus cash & bank": "cash",
+             "Equity (market cap; book equity if no price)": "e", "Debt (borrowings and lease liabilities)": "d",
+             "Equity weight": "we", "WACC": "wacc", "Less borrowings and lease liabilities": "borrowings", "Plus cash & bank": "cash",
              "Plus investments": "investments"}
 VAL_SCEN = {"PV of explicit years": "pv_sum", "Terminal value (Gordon growth on final-year FCFF)": "tv",
             "PV of terminal value": "pv_tv", "Enterprise value": "ev", "Less minority interest (estimate)": "minority",
