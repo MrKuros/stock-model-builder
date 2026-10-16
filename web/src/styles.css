@@ -184,6 +184,8 @@ a { color: var(--pencil); }
 .strip-chart-wrap:has(.strip-hit:hover) .handle { fill: var(--pencil-soft); }
 .strip-foot { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ink-3); line-height: 1.35; }
 .strip-foot .base-note { white-space: nowrap; }
+.strip-source { display: block; margin-top: 2px; color: var(--ink-2); }
+.strip-source::before { content: "Source: "; color: var(--ink-3); }
 .reset { background: none; border: 0; padding: 0; color: var(--pencil); font-size: 12px; white-space: nowrap; text-decoration: underline; text-underline-offset: 2px; }
 .strip-tools { display: inline-flex; align-items: baseline; gap: 10px; flex-shrink: 0; position: relative; z-index: 1; } /* above the drag zone's overhang */
 .fade {
@@ -383,3 +385,9 @@ tbody tr:hover th, tbody tr:hover td { background: var(--pencil-soft); }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+/* 3.4: what the filings add to the model, and the one-click offer of the moved defaults */
+.src-used { margin-top: 4px; }
+.src-used .src-checks { margin-top: 6px; }
+.src-upgrade { margin: 10px 0 0; padding: 10px 12px; border-left: 3px solid var(--pencil); background: var(--pencil-soft); border-radius: 0 6px 6px 0; }
+.src-upgrade p { margin: 0 0 8px; }
+.src-upgrade button { border: 1px solid var(--pencil); background: var(--paper); color: var(--pencil); border-radius: 999px; padding: 4px 14px; font-size: 13px; min-height: 28px; }

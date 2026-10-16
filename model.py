@@ -24,8 +24,13 @@ BS = {"Equity Share Capital": "share_cap", "Reserves": "reserves", "Borrowings":
       "Total#2": "total_assets", "Receivables": "receivables", "Inventory": "inventory", "Cash & Bank": "cash"}
 CF = {"Cash from Operating Activity": "cfo", "Cash from Investing Activity": "cfi",
       "Cash from Financing Activity": "cff"}
+# COGS = raw material cost (materials + purchases of stock in trade) - change in inventory: Screener's own P&L sheet
+# subtracts "Change in Inventory" (stock built up), so this equals the filings' materials + purchases + changes in
+# inventories (JSW Steel FY2021: 32,856 - 348 = 32,508 both ways). None when the export has no Raw Material Cost.
+COGS = {"Raw Material Cost": "rm", "Change in Inventory": "inv_change"}
 OPTIONAL = {"Dividend Amount", "Cash from Operating Activity", "Cash from Investing Activity",
-            "Cash from Financing Activity"}
+            "Cash from Financing Activity", *COGS}
+COGS_MIN = 0.10  # working-capital days run on COGS only when it's at least this share of revenue (see on_cogs())
 # Screener "Quarters" block (last ten quarters) -> company["quarters"]["rows"] keys. All are flows, so TTM sums them.
 QUARTERS = {"Sales": "sales", "Expenses": "expenses", "Operating Profit": "op_profit", "Other Income": "other_income",
             "Depreciation": "depreciation", "Interest": "interest", "Profit before tax": "pbt", "Tax": "tax",
@@ -46,7 +51,9 @@ DRIVERS = [
     ("payout", "Dividend payout", "pct"),
     ("capex_pct", "Capex % revenue", "pct"),
     ("dso", "Receivable days", "days"),
-    ("dio", "Inventory days (on revenue)", "days"),
+    ("cogs_pct", "COGS % revenue", "pct"),
+    ("dio", "Inventory days", "days"),  # on COGS or on revenue, see on_cogs()
+    ("dpo", "Payable days", "days"),  # same base as inventory days
     ("oca_pct", "Other current assets % revenue", "pct"),
     ("ol_pct", "Other liabilities % revenue", "pct"),
     ("debt_change", "Planned borrowing change per year", "num"),
@@ -61,13 +68,14 @@ LAYOUT = [  # (label, key, kind); kind "head" = section title, None key = blank 
     *[(label, key, kind) for key, label, kind in DRIVERS],
     ("", None, None),
     ("PROFIT & LOSS", None, "head"),
-    ("Revenue", "revenue", "num"), ("EBITDA", "ebitda", "num"), ("Other income", "other_income", "num"),
+    ("Revenue", "revenue", "num"), ("Cost of goods sold (memo)", "cogs", "num"), ("EBITDA", "ebitda", "num"), ("Other income", "other_income", "num"),
     ("Depreciation", "dep", "num"), ("Interest", "interest", "num"), ("Profit before tax", "pbt", "num"),
     ("Tax", "tax", "num"), ("Net profit", "pat", "num"), ("Dividend", "dividend", "num"),
     ("", None, None),
     ("BALANCE SHEET", None, "head"),
     ("Equity share capital", "share_cap", "num"), ("Reserves", "reserves", "num"),
-    ("Borrowings", "borrowings", "num"), ("Other liabilities", "other_liab", "num"),
+    ("Borrowings", "borrowings", "num"), ("Lease liabilities", "lease", "num"), ("Trade payables", "payables", "num"),
+    ("Other liabilities", "other_liab", "num"),
     ("Total liabilities", "total_liab", "num"),
     ("Net block", "net_block", "num"), ("Capital WIP", "cwip", "num"), ("Investments", "investments", "num"),
     ("Receivables", "receivables", "num"), ("Inventory", "inventory", "num"),
@@ -158,6 +166,7 @@ def parse_screener(file):
     s = _sections(ws)
     pl, bs = _by_date(s.get("pl"), PL, "PROFIT & LOSS"), _by_date(s.get("bs"), BS, "BALANCE SHEET")
     cf = _by_date(s.get("cf"), CF, "CASH FLOW", blank=None) if s.get("cf") else {}
+    cg = _by_date(s["pl"], COGS, "PROFIT & LOSS", blank=None) if "raw material cost" in s["pl"] else {}
     if not any(v["revenue"] for v in pl.values()):
         raise ValueError("'Sales' row has no values. If the file was edited by a script, open it in Excel "
                          "and save it again so formula results are stored.")
@@ -169,6 +178,8 @@ def parse_screener(file):
     for d in dates:
         h = {**pl[d], **bs[d], **cf.get(d, dict.fromkeys(("cfo", "cfi", "cff")))}
         h["ebitda"] = h["pbt"] + h["interest"] + h["dep"] - h["other_income"]
+        c = cg.get(d) or {}
+        h["cogs"] = None if c.get("rm") is None else c["rm"] - (c["inv_change"] or 0.0)
         h["other_ca"] = h["other_assets"] - h["receivables"] - h["inventory"] - h["cash"]
         h["net_cf"] = None if None in (h["cfo"], h["cfi"], h["cff"]) else h["cfo"] + h["cfi"] + h["cff"]
         p = hist[-1] if hist else None
@@ -560,6 +571,99 @@ def _xbrl_ties(f, kind, end, co, consolidated):
     return out
 
 
+def on_cogs(hist):
+    """Inventory and payable days run on COGS when it is at least COGS_MIN of revenue in each of the last three
+    reported years (makers and traders); otherwise on revenue (TCS: Rs 14 cr of materials on Rs 1,64,177 cr; Coal
+    India; exports without the row). Only Screener's rows decide it, so a saved model never changes basis."""
+    return all((h.get("cogs") or 0.0) >= COGS_MIN * h["revenue"] > 0 for h in hist[-3:])
+
+
+def _debt(r):
+    """Borrowings plus lease liabilities: what the valuation bridge, interest and the debt ratios use."""
+    return r["borrowings"] + (r.get("lease") or 0.0)
+
+
+def upgrade(co, filings=()):
+    """The company with what attached annual XBRL filings add, by rules (no AI): a copy, co is untouched. A filing is
+    used for the reported year ending on its period end when its revenue is within 1% of Screener's (consolidated
+    first, one filing per year). Per year it can add
+      - trade payables, split out of Screener's Other Liabilities (which include them);
+      - lease liabilities, split out of Screener's Borrowings (which include them): the filing's lease elements, or
+        else Screener's borrowings less the filing's borrowings (results filings carry no lease element; JSW Steel
+        FY2024: 87,984 - 85,575 = 2,409 = Screener's own lease line);
+      - capex = purchase of PP&E + intangibles from its cash flow, instead of the net block change.
+    Totals never change, so the balance sheet still ties. Adds "sources": {basis, drivers {key: text}, notes}."""
+    hist, lab = [dict(h) for h in co["hist"]], labels(co["dates"])
+    at = {d.date(): i for i, d in enumerate(co["dates"])}
+    used, notes, done = {"payables": [], "lease": [], "capex": []}, [], set()
+    for f in sorted(filings, key=lambda f: f.get("consolidated") is not True):
+        end = _iso(f.get("period_end") or "")
+        i = at.get(end.date()) if end else None
+        if f.get("kind") == "annual" and i is None:
+            notes.append(f"{f.get('file') or 'filing'} isn't used: its year to {end:%d %b %Y} isn't one of the "
+                         "reported years in this Screener file." if end else "An annual filing without a period end isn't used.")
+        if f.get("kind") != "annual" or i is None or i in done:
+            continue
+        x, h, y, name = f["facts"], hist[i], lab[i], f.get("file") or "filing"
+        rev = x.get("revenue")
+        if rev is None or abs(rev - h["revenue"]) > 0.01 * abs(h["revenue"]):
+            notes.append(f"{name} isn't used: its {y} revenue ({'none' if rev is None else _cr(rev)}) is more than 1% "
+                         f"from Screener's {_cr(h['revenue'])}.")
+            continue
+        done.add(i)
+        if "payables" in x or "payables_noncurrent" in x:
+            pay = x.get("payables", 0.0) + x.get("payables_noncurrent", 0.0)
+            if 0 <= pay <= h["other_liab"] + TOL:
+                h["payables"], h["other_liab"] = pay, h["other_liab"] - pay
+                used["payables"].append(y)
+            else:
+                notes.append(f"{y} trade payables {_cr(pay)} exceed Screener's other liabilities "
+                             f"{_cr(h['other_liab'])}, so they stay in other liabilities.")
+        tagged = "lease_current" in x or "lease_noncurrent" in x
+        lease = (x.get("lease_current", 0.0) + x.get("lease_noncurrent", 0.0) if tagged
+                 else h["borrowings"] - x["borrowings"] if "borrowings" in x else None)
+        # ponytail: the difference also holds preference capital and other debt Screener files under borrowings
+        # (JSW FY2023: 2,281 vs 2,011 of leases); fine for a debt-like split, a tagged lease line wins when present
+        if lease is not None and lease > TOL:
+            if lease <= h["borrowings"] + TOL:
+                h["lease"], h["borrowings"] = lease, max(0.0, h["borrowings"] - lease)
+                used["lease"].append(y)
+            else:
+                notes.append(f"{y} lease liabilities {_cr(lease)} exceed Screener's borrowings, so they aren't split out.")
+        elif lease is not None and lease < -TOL:
+            notes.append(f"{y}: the filing's borrowings {_cr(x['borrowings'])} exceed Screener's "
+                         f"{_cr(h['borrowings'])}, so no lease liabilities are split out.")
+        if "purchase_ppe" in x:
+            h["capex_cf"] = h["capex"] = x["purchase_ppe"] + x.get("purchase_intangibles", 0.0)
+            h["fcf"] = None if h["cfo"] is None else h["cfo"] - h["capex"]
+            used["capex"].append(y)
+    for i, h in enumerate(hist):
+        h.update(returns(h, hist[i - 1] if i else None))
+    used = {k: sorted(v, key=lab.index) for k, v in used.items()}
+    return {**co, "hist": hist, "sources": _sources(co["hist"], used, notes)}
+
+
+def _sources(hist, used, notes):
+    """Where each upgraded driver's history comes from, as short sentences for the UI and the Excel note."""
+    cogs, ys = on_cogs(hist), lambda k: ", ".join(used[k])  # noqa: E731
+    base = "COGS" if cogs else "revenue"
+    why = ("on COGS (raw material cost less change in inventory), from Screener" if cogs else
+           "on revenue: COGS is under 10% of revenue" if any(h.get("cogs") is not None for h in hist) else
+           "on revenue: this file has no raw material cost")
+    d = {"dio": why[0].upper() + why[1:],
+         "dpo": (f"Trade payables from XBRL {ys('payables')}, on {base}" if used["payables"] else
+                 "No trade payables in the attached annual filings; they stay in other liabilities"),
+         "capex_pct": (f"Cash-flow capex from XBRL {ys('capex')}; other years from the net block change" if used["capex"]
+                       else "From the net block change, from Screener")}
+    if cogs:
+        d["cogs_pct"] = "From Screener (raw material cost less change in inventory)"
+    if used["payables"]:
+        d["ol_pct"] = f"Excludes trade payables in {ys('payables')} (XBRL)"
+    if used["lease"]:
+        d["lease"] = f"Lease liabilities from XBRL {ys('lease')}, split out of borrowings; held flat, counted as debt"
+    return {"basis": base.lower(), "drivers": d, "notes": notes, "used": used}
+
+
 def fy(d, projected=False):
     return f"FY{d.year}{'E' if projected else ''}"
 
@@ -580,7 +684,7 @@ def _div(a, b):
 def returns(c, p=None):
     """Return ratios for year c; p = previous year (None: averages fall back to closing balances).
     Blank (None) when the denominator is <= ~0: a ratio on negative equity or EBITDA means nothing.
-    EBIT = PBT + interest. Mirrored by _returns_formulas()."""
+    EBIT = PBT + interest; debt = borrowings + lease liabilities. Mirrored by _returns_formulas()."""
     avg = lambda f: (f(c) + f(p)) / 2 if p else f(c)  # noqa: E731
     eq = lambda r: r["share_cap"] + r["reserves"]  # noqa: E731
     # 1e-6 cr = Rs 10: debt faded to zero leaves float residue (1e-14) that would read as 1e18x cover
@@ -588,32 +692,35 @@ def returns(c, p=None):
     ebit = c["pbt"] + c["interest"]
     return {
         "roe": pos(c["pat"], avg(eq)),
-        "roce": pos(ebit, avg(lambda r: eq(r) + r["borrowings"])),
+        "roce": pos(ebit, avg(lambda r: eq(r) + _debt(r))),
         "asset_turnover": pos(c["revenue"], avg(lambda r: r["total_assets"])),
-        "nd_ebitda": pos(c["borrowings"] - c["cash"] - c["investments"], c["ebitda"]),
+        "nd_ebitda": pos(_debt(c) - c["cash"] - c["investments"], c["ebitda"]),
         "int_cover": pos(ebit, c["interest"]),
     }
 
 
 def ratios(hist):
-    out = []
+    out, cogs = [], on_cogs(hist)
     for i, h in enumerate(hist):
         p, rev = (hist[i - 1] if i else None), h["revenue"]
+        base = h.get("cogs") if cogs else rev  # inventory and payable days
         out.append({
             "growth": _div(rev, p["revenue"]) - 1 if p and p["revenue"] else None,
             "ebitda_margin": _div(h["ebitda"], rev),
             "oi_pct": _div(h["other_income"], rev),
             "dep_pct": _div(h["dep"], p["net_block"]) if p else None,
-            "int_rate": _div(h["interest"], p["borrowings"]) if p else None,
+            "int_rate": _div(h["interest"], _debt(p)) if p else None,
             "tax_rate": _div(h["tax"], h["pbt"]),
             "mi_pct": _div(h["pat"] - (h["pbt"] - h["tax"]), h["pbt"] - h["tax"]),
             "payout": _div(h["dividend"], h["pat"]),
             "capex_pct": _div(h["capex"], rev) if p else None,
             "dso": _div(h["receivables"] * 365, rev),
-            "dio": _div(h["inventory"] * 365, rev),
+            "cogs_pct": None if h.get("cogs") is None else _div(h["cogs"], rev),
+            "dio": _div(h["inventory"] * 365, base),
+            "dpo": None if h.get("payables") is None else _div(h["payables"] * 365, base),
             "oca_pct": _div(h["other_ca"], rev),
             "ol_pct": _div(h["other_liab"], rev),
-            "debt_change": h["borrowings"] - p["borrowings"] if p else None,
+            "debt_change": _debt(h) - _debt(p) if p else None,
         })
     return out
 
@@ -637,6 +744,10 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
     w = [hist[i] for i in keep[-years:]]
     pw = [(hist[i - 1], hist[i]) for i in keep if i][-years:]  # (prev, cur); prev may be excluded: its closing balances are fine
     per_rev = lambda f: _ros((f(h), h["revenue"]) for h in w)  # noqa: E731
+    base = (lambda h: h.get("cogs") or 0.0) if on_cogs(hist) else (lambda h: h["revenue"])  # noqa: E731
+    # payables split out of other liabilities in some years only: both use just those years, or the split one
+    # would count them twice (in payable days and again in another year's other liabilities)
+    pay = [h for h in w if h.get("payables") is not None]
     oi = [r[i]["oi_pct"] for i in keep[-years:] if r[i]["oi_pct"] is not None]
     gp = [(hist[i - 1], hist[i]) for i in range(1, len(hist))][-years:]  # every year: growth ignores exclusions
     pos = all(p["revenue"] > 0 and h["revenue"] > 0 for p, h in gp)
@@ -647,18 +758,21 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
         # ponytail: Screener folds exceptional items into Other Income; median drops a single one-off year
         "oi_pct": max(statistics.median(oi), 0.0) if oi else 0.0,
         "dep_pct": _ros((h["dep"], p["net_block"]) for p, h in pw),
-        "int_rate": _ros((h["interest"], p["borrowings"]) for p, h in pw),
+        "int_rate": _ros((h["interest"], _debt(p)) for p, h in pw),
         # ponytail: loss years make raw tax ratios meaningless
         "tax_rate": min(max(_ros(((h["tax"], h["pbt"]) for h in w), 0.25), 0.0), 0.5),
         "payout": min(max(_ros((h["dividend"], h["pat"]) for h in w), 0.0), 1.0),
         # ponytail: clamp, loss years make the ratio flip sign
         "mi_pct": min(max(_ros((h["pat"] - (h["pbt"] - h["tax"]), h["pbt"] - h["tax"]) for h in w), -0.5), 0.5),
-        # ponytail: capex comes from the net block change, so acquisitions show up as capex; median skips a merger year
+        # ponytail: capex is the cash-flow figure where a filing gives it, else the net block change (where
+        # acquisitions show up as capex); the median skips a merger year
         "capex_pct": statistics.median([h["capex"] / h["revenue"] for _, h in pw if h["revenue"]] or [0.0]),
         "dso": per_rev(lambda h: h["receivables"] * 365),
-        "dio": per_rev(lambda h: h["inventory"] * 365),
+        "cogs_pct": per_rev(lambda h: h.get("cogs") or 0.0),
+        "dio": _ros((h["inventory"] * 365, base(h)) for h in w),
+        "dpo": _ros((h["payables"] * 365, base(h)) for h in pay),
         "oca_pct": per_rev(lambda h: h["other_ca"]),
-        "ol_pct": per_rev(lambda h: h["other_liab"]),
+        "ol_pct": _ros((h["other_liab"], h["revenue"]) for h in pay or w),
         "debt_change": 0.0,
     }
 
@@ -709,15 +823,18 @@ def expand(assumptions, n):
 def project(hist, a, n=5):
     """Mirrors the Excel formulas in to_excel(); keep both in sync (test_model.py checks this).
     a[key] is a float (every year) or a list of n per-year values (see expand())."""
-    out, p = [], hist[-1]
+    out, p, cogs = [], hist[-1], on_cogs(hist)
     for t in range(n):
         y = {k: v[t] if isinstance(v, list) else v for k, v in a.items()}  # this year's inputs
         c = {}
         c["revenue"] = p["revenue"] * (1 + y["growth"])
+        # memo line: COGS only sets the base for inventory and payable days; EBITDA still comes from the margin
+        c["cogs"] = c["revenue"] * y["cogs_pct"]
+        wc = c["cogs"] if cogs else c["revenue"]
         c["ebitda"] = c["revenue"] * y["ebitda_margin"]
         c["other_income"] = c["revenue"] * y["oi_pct"]
         c["dep"] = p["net_block"] * y["dep_pct"]
-        c["interest"] = p["borrowings"] * y["int_rate"]
+        c["interest"] = _debt(p) * y["int_rate"]
         c["pbt"] = c["ebitda"] + c["other_income"] - c["dep"] - c["interest"]
         c["tax"] = max(0.0, c["pbt"] * y["tax_rate"])
         # ponytail: minority share / associates flow through cash and reserves; no separate minority-interest liability
@@ -727,23 +844,29 @@ def project(hist, a, n=5):
         c["reserves"] = p["reserves"] + c["pat"] - c["dividend"]
         planned = max(0.0, p["borrowings"] + y["debt_change"])
         c["other_liab"] = c["revenue"] * y["ol_pct"]
+        c["payables"] = wc * y["dpo"] / 365
+        # ponytail: lease liabilities held at the last reported level (new leases ~ repayments); debt_change moves
+        # borrowings only. Upgrade path: a lease driver once leases are a real share of debt in the models used
+        c["lease"] = p.get("lease") or 0.0
         c["capex"] = c["revenue"] * y["capex_pct"]
         c["net_block"] = p["net_block"] + c["capex"] - c["dep"]
         c["cwip"], c["investments"] = p["cwip"], p["investments"]
         c["receivables"] = c["revenue"] * y["dso"] / 365
-        c["inventory"] = c["revenue"] * y["dio"] / 365
+        c["inventory"] = wc * y["dio"] / 365
         c["other_ca"] = c["revenue"] * y["oca_pct"]
         non_cash = sum(c[k] for k in ("net_block", "cwip", "investments", "receivables", "inventory", "other_ca"))
         # revolver: borrow whatever keeps cash >= 0. Interest runs on opening debt, so no circularity.
         # ponytail: never repaid automatically; lower 'Borrowings change' to pay it down
-        c["revolver"] = max(0.0, non_cash - (c["share_cap"] + c["reserves"] + planned + c["other_liab"]))
+        liab = c["lease"] + c["payables"] + c["other_liab"]
+        c["revolver"] = max(0.0, non_cash - (c["share_cap"] + c["reserves"] + planned + liab))
         c["borrowings"] = planned + c["revolver"]
-        c["total_liab"] = c["share_cap"] + c["reserves"] + c["borrowings"] + c["other_liab"]
+        c["total_liab"] = c["share_cap"] + c["reserves"] + c["borrowings"] + liab
         c["cash"] = c["total_liab"] - non_cash  # balancing item
         c["total_assets"] = non_cash + c["cash"]
         c["cfo"] = (c["pat"] + c["dep"] - sum(c[k] - p[k] for k in ("receivables", "inventory", "other_ca"))
-                    + c["other_liab"] - p["other_liab"])
+                    + c["other_liab"] - p["other_liab"] + c["payables"] - (p.get("payables") or 0.0))
         c["cfi"] = -c["capex"] - (c["cwip"] - p["cwip"]) - (c["investments"] - p["investments"])
+        # lease liabilities are flat (c["lease"] == p["lease"]), so they add nothing to financing cash flow
         c["cff"] = c["borrowings"] - p["borrowings"] + c["share_cap"] - p["share_cap"] - c["dividend"]
         c["net_cf"] = c["cfo"] + c["cfi"] + c["cff"]
         c["fcf"] = c["cfo"] - c["capex"]
@@ -762,7 +885,7 @@ def project(hist, a, n=5):
 
 
 def _nwc(r):
-    return r["receivables"] + r["inventory"] + r["other_ca"] - r["other_liab"]
+    return r["receivables"] + r["inventory"] + r["other_ca"] - r["other_liab"] - (r.get("payables") or 0.0)
 
 
 # The model document's "valuation" inputs. kd None = the base scenario's first-year interest rate;
@@ -817,13 +940,15 @@ def valuation(projs, hist, val, base, market, inputs=None):
     kd_at = kd * (1 - tax)
     # ponytail: no share price -> book equity weights the WACC; a negative book counts as zero
     e = price * shares if price and shares else max(0.0, last["share_cap"] + last["reserves"])
-    d = last["borrowings"]
+    # lease liabilities are debt (Ind AS 116 moved lease rent out of EBITDA, so FCFF is before lease payments);
+    # Screener's borrowings already included them, so splitting them out leaves D and the bridge unchanged
+    d = _debt(last)
     we = e / (e + d) if e + d > 0 else 1.0
     wacc_build = we * ke + (1 - we) * kd_at
     wacc = v["wacc_override"] if v["wacc_override"] is not None else wacc_build
     g, n = v["g"], len(next(iter(projs.values())))
     period = [t + 1 - (0.5 if v["mid_year"] else 0) for t in range(n)]
-    bridge = -last["borrowings"] + last["cash"] + last["investments"]
+    bridge = -d + last["cash"] + last["investments"]
     # minority holders' claim on the consolidated EV, as their share of profit (the base scenario's first year;
     # mi_pct nets minorities against associates, so a net positive share deducts nothing).
     # ponytail: proportional to profit share; upgrade path: a typed NCI value from the annual report
@@ -863,7 +988,7 @@ def valuation(projs, hist, val, base, market, inputs=None):
     return {"inputs": v, "price": price, "shares": shares, "ke": ke, "kd": kd, "tax": tax, "kd_after_tax": kd_at,
             "e": e, "d": d, "we": we, "wacc": wacc, "wacc_build": wacc_build, "g": g, "period": period,
             "error": error, "nci": nci,
-            "borrowings": last["borrowings"], "cash": last["cash"], "investments": last["investments"],
+            "borrowings": d, "lease": last.get("lease") or 0.0, "cash": last["cash"], "investments": last["investments"],
             "multiples": _hist_multiples(hist, market, shares, nci),
             "steps": {"wacc": GRID_WACC, "g": GRID_G, "growth": GRID_GROWTH, "margin": GRID_MARGIN,
                       "implied": IMPLIED_RANGE}, "scenarios": out}
@@ -896,7 +1021,7 @@ def _hist_multiples(hist, market, shares, nci=0.0):
         p, s = (_pos(x[i]) if i < len(x) else None for x in (ph, sh))
         # ponytail: a year without Screener's adjusted share count uses today's count (typed or from the export)
         s = s or shares
-        years.append(_multiples(p * s if p and s else None, h["borrowings"] - h["cash"] - h["investments"], h, nci))
+        years.append(_multiples(p * s if p and s else None, _debt(h) - h["cash"] - h["investments"], h, nci))
     out = {"hist": {k: [y[k] for y in years] for k in MULTIPLES}}
     for name, f in (("median", statistics.median), ("min", min), ("max", max)):
         out[name] = {k: f(xs) if (xs := [x for x in out["hist"][k] if x is not None]) else None for k in MULTIPLES}
@@ -949,7 +1074,7 @@ def projected_dates(co, n):
 
 # ---------- Excel export (live formulas) ----------
 
-RAW = {"revenue", "other_income", "dep", "interest", "pbt", "tax", "pat", "dividend", "share_cap", "reserves",
+RAW = {"revenue", "cogs", "lease", "payables", "other_income", "dep", "interest", "pbt", "tax", "pat", "dividend", "share_cap", "reserves",
        "borrowings", "other_liab", "net_block", "cwip", "investments", "receivables", "inventory", "other_ca",
        "cash", "cfo", "cfi", "cff"}
 
@@ -958,21 +1083,25 @@ def _returns_formulas(x, has_prev):
     """Excel twin of returns(): blank ("") where the denominator is <= ~0 (1e-6)."""
     avg = lambda f: f"(({f(0)})+({f(1)}))/2" if has_prev else f"({f(0)})"  # noqa: E731
     eq = lambda p: f'{x("share_cap", p)}+{x("reserves", p)}'  # noqa: E731
+    debt = lambda p=0: f'{x("borrowings", p)}+{x("lease", p)}'  # noqa: E731  a blank lease cell counts as 0
     pos = lambda num, den: f'=IFERROR(IF(({den})>1E-6,({num})/({den}),""),"")'  # noqa: E731
     ebit = f'{x("pbt")}+{x("interest")}'
     return {
         "roe": pos(x("pat"), avg(eq)),
-        "roce": pos(ebit, avg(lambda p: f'{eq(p)}+{x("borrowings", p)}')),
+        "roce": pos(ebit, avg(lambda p: f'{eq(p)}+{debt(p)}')),
         "asset_turnover": pos(x("revenue"), avg(lambda p: x("total_assets", p))),
-        "nd_ebitda": pos(f'{x("borrowings")}-{x("cash")}-{x("investments")}', x("ebitda")),
+        "nd_ebitda": pos(f'{debt()}-{x("cash")}-{x("investments")}', x("ebitda")),
         "int_cover": pos(ebit, x("interest")),
     }
 
 
-def _hist_formula(key, x, has_prev):
-    """Formula for a historical column. x(key, prev=False) -> cell ref."""
+def _hist_formula(key, x, has_prev, cogs=False):
+    """Formula for a historical column. x(key, prev=False) -> cell ref. cogs: on_cogs() (days on COGS)."""
     def ratio(num, den):
         return f'=IFERROR({num}/{den},"")'
+    base = x("cogs") if cogs else x("revenue")
+    debt = lambda p=0: f'({x("borrowings", p)}+{x("lease", p)})'  # noqa: E731
+    known = lambda k, f: f'=IF(ISNUMBER({x(k)}),{f[1:]},"")'  # noqa: E731  blank where the line isn't reported
     needs_prev = {"growth", "dep_pct", "int_rate", "capex_pct", "debt_change", "capex", "fcf"}
     if key in needs_prev and not has_prev:
         return None
@@ -981,16 +1110,18 @@ def _hist_formula(key, x, has_prev):
         "ebitda_margin": ratio(x("ebitda"), x("revenue")),
         "oi_pct": ratio(x("other_income"), x("revenue")),
         "dep_pct": ratio(x("dep"), x("net_block", 1)),
-        "int_rate": ratio(x("interest"), x("borrowings", 1)),
+        "int_rate": ratio(x("interest"), debt(1)),
         "tax_rate": ratio(x("tax"), x("pbt")),
         "payout": ratio(x("dividend"), x("pat")),
         "mi_pct": f'=IFERROR({x("pat")}/({x("pbt")}-{x("tax")})-1,"")',
         "capex_pct": ratio(x("capex"), x("revenue")),
         "dso": ratio(f'{x("receivables")}*365', x("revenue")),
-        "dio": ratio(f'{x("inventory")}*365', x("revenue")),
+        "cogs_pct": known("cogs", ratio(x("cogs"), x("revenue"))),
+        "dio": ratio(f'{x("inventory")}*365', base),
+        "dpo": known("payables", ratio(f'{x("payables")}*365', base)),
         "oca_pct": ratio(x("other_ca"), x("revenue")),
         "ol_pct": ratio(x("other_liab"), x("revenue")),
-        "debt_change": f'={x("borrowings")}-{x("borrowings", 1)}',
+        "debt_change": f'={debt()}-{debt(1)}',
         "ebitda": f'={x("pbt")}+{x("interest")}+{x("dep")}-{x("other_income")}',
         "total_liab": f'=SUM({x("share_cap")}:{x("other_liab")})',
         "total_assets": f'=SUM({x("net_block")}:{x("cash")})',
@@ -1002,14 +1133,17 @@ def _hist_formula(key, x, has_prev):
     }.get(key)
 
 
-def _proj_formula(key, x):
+def _proj_formula(key, x, cogs=False):
     d = lambda k: f'({x(k)}-{x(k, 1)})'  # noqa: E731
+    base = x("cogs") if cogs else x("revenue")
+    liab = f'{x("lease")}+{x("payables")}+{x("other_liab")}'
     return {
         "revenue": f'={x("revenue", 1)}*(1+{x("growth")})',
+        "cogs": f'={x("revenue")}*{x("cogs_pct")}',
         "ebitda": f'={x("revenue")}*{x("ebitda_margin")}',
         "other_income": f'={x("revenue")}*{x("oi_pct")}',
         "dep": f'={x("net_block", 1)}*{x("dep_pct")}',
-        "interest": f'={x("borrowings", 1)}*{x("int_rate")}',
+        "interest": f'=({x("borrowings", 1)}+{x("lease", 1)})*{x("int_rate")}',
         "pbt": f'={x("ebitda")}+{x("other_income")}-{x("dep")}-{x("interest")}',
         "tax": f'=MAX(0,{x("pbt")}*{x("tax_rate")})',
         "pat": f'=({x("pbt")}-{x("tax")})*(1+{x("mi_pct")})',
@@ -1018,18 +1152,21 @@ def _proj_formula(key, x):
         "reserves": f'={x("reserves", 1)}+{x("pat")}-{x("dividend")}',
         "borrowings": f'=MAX(0,{x("borrowings", 1)}+{x("debt_change")})+{x("revolver")}',
         "revolver": (f'=MAX(0,SUM({x("net_block")}:{x("other_ca")})-({x("share_cap")}+{x("reserves")}'
-                     f'+MAX(0,{x("borrowings", 1)}+{x("debt_change")})+{x("other_liab")}))'),
+                     f'+MAX(0,{x("borrowings", 1)}+{x("debt_change")})+{liab}))'),
+        "lease": f'={x("lease", 1)}',
+        "payables": f'={base}*{x("dpo")}/365',
         "other_liab": f'={x("revenue")}*{x("ol_pct")}',
         "total_liab": f'=SUM({x("share_cap")}:{x("other_liab")})',
         "net_block": f'={x("net_block", 1)}+{x("capex")}-{x("dep")}',
         "cwip": f'={x("cwip", 1)}',
         "investments": f'={x("investments", 1)}',
         "receivables": f'={x("revenue")}*{x("dso")}/365',
-        "inventory": f'={x("revenue")}*{x("dio")}/365',
+        "inventory": f'={base}*{x("dio")}/365',
         "other_ca": f'={x("revenue")}*{x("oca_pct")}',
         "cash": f'={x("total_liab")}-SUM({x("net_block")}:{x("other_ca")})',
         "total_assets": f'=SUM({x("net_block")}:{x("cash")})',
-        "cfo": f'={x("pat")}+{x("dep")}-{d("receivables")}-{d("inventory")}-{d("other_ca")}+{d("other_liab")}',
+        "cfo": (f'={x("pat")}+{x("dep")}-{d("receivables")}-{d("inventory")}-{d("other_ca")}+{d("other_liab")}'
+                f'+{d("payables")}'),
         "cfi": f'=-{x("capex")}-{d("cwip")}-{d("investments")}',
         "cff": f'={d("borrowings")}+{d("share_cap")}-{x("dividend")}',
         "net_cf": f'={x("cfo")}+{x("cfi")}+{x("cff")}',
@@ -1037,9 +1174,9 @@ def _proj_formula(key, x):
         "fcf": f'={x("cfo")}-{x("capex")}',
         "ebit": f'={x("ebitda")}-{x("dep")}',
         "nopat": f'={x("ebit")}*(1-{x("tax_rate")})',
-        "nwc": f'={x("receivables")}+{x("inventory")}+{x("other_ca")}-{x("other_liab")}',
+        "nwc": f'={x("receivables")}+{x("inventory")}+{x("other_ca")}-{x("other_liab")}-{x("payables")}',
         "fcff": (f'={x("nopat")}+{x("dep")}-{x("capex")}-({x("nwc")}-({x("receivables", 1)}+{x("inventory", 1)}'
-                 f'+{x("other_ca", 1)}-{x("other_liab", 1)}))'),
+                 f'+{x("other_ca", 1)}-{x("other_liab", 1)}-{x("payables", 1)}))'),
         "chk_bs": f'=ROUND({x("total_assets")}-{x("total_liab")},2)',
         "chk_cash": f'=ROUND({x("cash", 1)}+{x("net_cf")}-{x("cash")},2)',
         **_returns_formulas(x, True),
@@ -1136,7 +1273,7 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill):
     put("e", "Equity (market cap; book equity if no price)",
         f"=IF(AND(ISNUMBER({ref['price']}),ISNUMBER({ref['shares']})),{ref['price']}*{ref['shares']},"
         f"MAX(0,{hist('share_cap')}+{hist('reserves')}))", num)
-    put("d", "Debt (borrowings)", f"={hist('borrowings')}", num)
+    put("d", "Debt (borrowings and lease liabilities)", f"={hist('borrowings')}+{hist('lease')}", num)
     put("we", "Equity weight", f"=IF({ref['e']}+{ref['d']}>0,{ref['e']}/({ref['e']}+{ref['d']}),1)", pct)
     put("wd", "Debt weight", f"=1-{ref['we']}", pct)
     put("wacc", "WACC", f"=IF(ISNUMBER({ref['override']}),{ref['override']},"
@@ -1173,7 +1310,7 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill):
         f'=IF({ok},{lastf}*(1+{ref["g"]})/({ref["wacc"]}-{ref["g"]}),"")', num)
     put("pv_tv", "PV of terminal value", f'=IF({ok},{ref["tv"]}*{lastdf},"")', num)
     put("ev", "Enterprise value", f'=IF({ok},{ref["pv_sum"]}+{ref["pv_tv"]},"")', num, Font(bold=True))
-    put("borrowings", "Less borrowings", f"={hist('borrowings')}", num)
+    put("borrowings", "Less borrowings and lease liabilities", f"={hist('borrowings')}+{hist('lease')}", num)
     put("cash", "Plus cash & bank", f"={hist('cash')}", num)
     put("investments", "Plus investments", f"={hist('investments')}", num)
     pre = f'{ref["ev"]}-{ref["borrowings"]}+{ref["cash"]}+{ref["investments"]}'
@@ -1247,7 +1384,7 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill):
          lambda j, c: (_pos(sh[j]) if j < len(sh) else None) or f'=IF(ISNUMBER({ref["shares"]}),{ref["shares"]},"")'),
         ("cap", "Market cap", num, lambda j, c: f'=IF(AND(ISNUMBER({c}{hr["price"]}),ISNUMBER({c}{hr["shares"]})),'
                                                 f'{c}{hr["price"]}*{c}{hr["shares"]},"")'),
-        *((k, label, xf, lambda j, c, k=k: mult(f"{c}{hr['cap']}", f"{model_at('borrowings', j)}-"
+        *((k, label, xf, lambda j, c, k=k: mult(f"{c}{hr['cap']}", f"{model_at('borrowings', j)}+{model_at('lease', j)}-"
                                                     f"{model_at('cash', j)}-{model_at('investments', j)}", k, j))
           for k, label in MULTIPLE_LABELS),
     ):
@@ -1332,15 +1469,19 @@ def to_excel(co, scenarios, n=5, active="base", val=None):
     """Workbook bytes: historicals as values, projections as live formulas, inputs in blue.
     scenarios: {"base"|"bull"|"bear": {key: {"start", "end"}}}. Each scenario's per-year inputs (from expand())
     sit on the Scenarios sheet; the Model sheet's driver cells pick one with CHOOSE on the selector in B3.
-    val: VALUATION-shaped inputs for the Valuation sheet (None = defaults)."""
+    val: VALUATION-shaped inputs for the Valuation sheet (None = defaults). co may carry upgrade()'s filings data."""
     wb = openpyxl.Workbook()
+    cogs, used = on_cogs(co["hist"]), (co.get("sources") or {}).get("used") or {}
     ws = wb.active
     ws.title = "Model"
     ws["A1"] = co["name"]
     ws["A1"].data_type = "s"  # a name starting with '=' must not become a live formula
     ws["A1"].font = Font(bold=True, size=14)
-    ws["A2"] = ("Rs crore. Source: Screener.in export. Blue = input (B3 and the Scenarios sheet), "
-                "green = picked from the Scenarios sheet, black = formula.")
+    got = "; ".join(f"{what} {', '.join(used[k])}" for k, what in (
+        ("payables", "trade payables"), ("lease", "lease liabilities"), ("capex", "cash-flow capex")) if used.get(k))
+    ws["A2"] = ("Rs crore. Source: Screener.in export" + (f", plus XBRL filings ({got})" if got else "")
+                + ". Blue = input (B3 and the Scenarios sheet), green = picked from the Scenarios sheet, black = formula. "
+                + f"Inventory and payable days are on {'COGS' if cogs else 'revenue'}.")
     ws["A2"].font = Font(italic=True, color="808080")
     ws["A3"] = "Scenario (1 = base, 2 = bull, 3 = bear)"
     ws["B3"] = SCENARIOS.index(active) + 1
@@ -1371,7 +1512,7 @@ def to_excel(co, scenarios, n=5, active="base", val=None):
 
     for i, (label, key, kind) in enumerate(LAYOUT):
         r = top + 1 + i
-        ws.cell(r, 1, label)
+        ws.cell(r, 1, f"{label} (on {'COGS' if cogs else 'revenue'})" if key in ("dio", "dpo") else label)
         if kind == "head":
             for j in range(len(headers) + 1):
                 ws.cell(r, 1 + j).fill = head_fill
@@ -1384,10 +1525,12 @@ def to_excel(co, scenarios, n=5, active="base", val=None):
             cell = ws.cell(r, 2 + j)
             if j < nh:
                 h = co["hist"][j]  # missing cash-flow lines stay blank instead of 0-based formulas
-                cell.value = h.get(key) if key in RAW or h.get(key, 0) is None else _hist_formula(key, x, j > 0)
+                # cash-flow capex from a filing is a reported number, not the net block formula
+                cell.value = (h.get(key) if key in RAW or h.get(key, 0) is None
+                              or (key == "capex" and h.get("capex_cf") is not None) else _hist_formula(key, x, j > 0, cogs))
             else:
                 cell.value = (f"=CHOOSE($B$3,{','.join(src(s, key, j - nh) for s in SCENARIOS)})"
-                              if key in drivers else _proj_formula(key, x))
+                              if key in drivers else _proj_formula(key, x, cogs))
             cell.number_format = formats[kind]
             cell.font = Font(bold=key in totals, color="008000" if j >= nh and key in drivers else None)
         ws.cell(r, 1).font = Font(bold=key in totals)

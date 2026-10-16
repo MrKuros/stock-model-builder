@@ -22,6 +22,7 @@ interface Props {
   baseLabel: string
   onChange: (p: Path) => void
   ghost?: number | null // a reference value drawn as a thin dashed ink line (revenue growth: what the price implies)
+  source?: string // where the history comes from, when it isn't plain Screener (model.upgrade's sources)
 }
 
 function domainOf(vals: number[], kind: Kind): [number, number] {
@@ -77,7 +78,7 @@ function ValueInput({ id, kind, value, ariaLabel, describedBy, onCommit }:
   )
 }
 
-export default function DriverStrip({ id, label, hint, kind, history, value, base, baseLabel, onChange, ghost }: Props) {
+export default function DriverStrip({ id, label, hint, kind, history, value, base, baseLabel, onChange, ghost, source }: Props) {
   const fade = value.end != null
   const end = value.end ?? value.start
   const known = history.filter((v): v is number => v != null && Number.isFinite(v))
@@ -189,7 +190,7 @@ export default function DriverStrip({ id, label, hint, kind, history, value, bas
       />
       </div>
       <div className="strip-foot">
-        <span id={hintId}>{hint}</span>
+        <span id={hintId}>{hint}{source && <span className="strip-source">{source}</span>}</span>
         <span className="strip-tools">
           <button type="button" className="fade" aria-pressed={fade} aria-label={`Fade ${label}`}
             title={fade ? 'Hold one value every year' : 'Slope from a first-year value to a last-year value'}
