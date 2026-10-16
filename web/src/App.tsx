@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Chart from './Chart'
 import DriverStrip from './DriverStrip'
 import Statements, { growth, month } from './Statements'
+import Sources from './Sources'
 import ValuationPanel from './Valuation'
 import {
   api, dec2, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS, when, clock,
@@ -89,7 +90,9 @@ export default function App() {
     window.clearTimeout(timer.current)
     const d = pending.current
     pending.current = null
-    if (d) send(d, true) // keepalive: still goes out if the tab is closing (docs are ~10-20 KB, under the 64 KB cap)
+    // keepalive: still goes out if the tab is closing; browsers refuse keepalive bodies over 64 KB (a doc is ~10-20 KB,
+    // each attached filing adds ~5-15 KB), so a bigger doc goes as a normal request
+    if (d) send(d, JSON.stringify(d).length < 60_000)
     return inflight.current
   }
   const flushRef = useRef(flush)
@@ -487,6 +490,9 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
         <ValuationPanel inputs={valuation} defaults={parsed.valuation} v={proj ? projection!.valuation : null}
           market={company.market} active={active} asOf={histYears[nHist - 1]} next={projYears[0]} growth={a.growth} n={n}
           onChange={f => setDoc(d => ({ ...d, valuation: f(d.valuation) }))} />
+        <Sources company={company} filings={doc.filings} proposals={doc.proposals}
+          onFilings={f => setDoc(d => ({ ...d, filings: f(d.filings) }))}
+          onProposals={f => setDoc(d => ({ ...d, proposals: f(d.proposals) }))} />
       </main>
       <div className="tables">
         <Statements layout={layout} years={years} rows={rows} nHist={nHist}

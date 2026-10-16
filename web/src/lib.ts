@@ -65,6 +65,20 @@ export interface Valuation {
   /** Missing on a server not yet restarted after an update; the panel then hides the grids. */
   steps?: { wacc: number[]; g: number[]; growth: number[]; margin: number[]; implied?: [number, number] }
 }
+/** A rule check on a filing or proposal; pass null = a note (nothing to compare with). */
+export interface Check { name: string; pass: boolean | null; detail: string }
+/** An attached XBRL results filing (model.parse_xbrl via POST /api/xbrl), facts in Rs crore (EPS in Rs). */
+export interface Filing {
+  id: string; file: string; kind: 'quarter' | 'half' | 'annual' | 'other'; company: string | null
+  period_start: string | null; period_end: string | null; consolidated: boolean | null
+  facts: Record<string, number>; unmapped: { tag: string; value: number; context: string }[]; checks: Check[]
+}
+/** Something read by AI that could change a number: shown with its source and checks, used only once approved. */
+export interface Proposal {
+  id: string; kind: 'mapping' | 'oneoff_note' | 'ar_note'; field: string; value: unknown; unit: string | null
+  period: string | null; source: { file: string; page?: number | null; quote?: string | null; tag?: string | null }
+  reasoning: string; checks: Check[]; status: 'proposed' | 'approved' | 'rejected'; ai: boolean
+}
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
 export interface ModelDoc {
   version: 5
@@ -76,8 +90,8 @@ export interface ModelDoc {
   saved_at: string | null
   valuation: ValInputs
   // Phase 3 blocks (sources, AI proposals, approved notes); shapes in server.ModelDoc
-  filings: unknown[]
-  proposals: unknown[]
+  filings: Filing[]
+  proposals: Proposal[]
   notes: Record<string, unknown>
 }
 /** A reported year whose metric sits far from the company's own median (model.detect_oneoffs). */

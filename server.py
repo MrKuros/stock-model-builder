@@ -12,17 +12,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, FiniteFloat, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, model_validator
 
 import model
 
 MAX_UPLOAD = 5 * 1024 * 1024  # Export exports are ~50 KB
 MAX_SAVE = 512 * 1024  # a saved model document is ~10-20 KB
 MODELS = Path(__file__).parent / "models"  # the local library, gitignored
+MAPPINGS = "mappings.json"  # approved XBRL tag -> std key, at the library root (list_models only reads */*.json)
 MODEL_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*/\d{4}-\d{2}-\d{2}")  # <company-slug>/<YYYY-MM-DD>
 app = FastAPI()
 
@@ -144,17 +145,38 @@ class ModelRequest(BaseModel):
         return v
 
 
+class Check(BaseModel):
+    name: str
+    pass_: bool | None = Field(alias="pass")  # None = nothing to compare with (a note)
+    detail: str
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+
+class Filing(BaseModel):
+    """An attached XBRL filing (model.parse_xbrl plus id and file name). Read by rules; feeds no number yet."""
+    id: str
+    file: str
+    kind: Literal["quarter", "half", "annual", "other"]
+    company: str | None = None
+    period_start: str | None = None
+    period_end: str | None
+    consolidated: bool | None = None
+    facts: dict[str, FiniteFloat]
+    unmapped: list[dict] = []
+    checks: list[Check] = []
+    model_config = ConfigDict(extra="allow")  # later Phase 3 features may add fields; keep them on save
+
+
 class ModelDoc(ModelRequest):
     """The full model document as saved in the library. Version 3 (before valuation) loads with default inputs;
     versions 3 and 4 load with empty Phase 3 blocks."""
     version: Literal[3, 4, 5]
     excluded_years: list[str] = []
     saved_at: str | None = None
-    # ponytail: untyped until the features that fill them land. filings: [{id, file, kind, period_end, facts, unmapped,
-    # checks}]; proposals: [{id, kind (mapping | oneoff_note | ar_note), field, value, unit, period, source: {file,
+    # ponytail: untyped until the features that fill them land. proposals: [{id, kind (mapping | oneoff_note | ar_note), field, value, unit, period, source: {file,
     # page, quote, tag}, reasoning, checks: [{name, pass, detail}], status (proposed | approved | rejected), ai}];
     # notes: approved oneoff_note / ar_note results keyed for display
-    filings: list[dict] = []
+    filings: list[Filing] = []
     proposals: list[dict] = []
     notes: dict = {}
 
@@ -195,6 +217,33 @@ async def parse(file: UploadFile):
         raise HTTPException(422, "Couldn't read that file as an Excel workbook. Upload the .xlsx from "
                                  "Export.in's 'Export to Excel' button.")
     return _company_payload(co) | {"restated": restatements(co)}
+
+
+def load_mappings(root=MODELS):
+    """The user's approved tag mappings ({tag: std key}); none when the file is missing or damaged."""
+    try:
+        m = json.loads((root / MAPPINGS).read_bytes())
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in m.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(m, dict) else {}
+
+
+@app.post("/api/xbrl")
+async def xbrl(file: UploadFile, company: str | None = Form(None)):
+    """Read an XBRL results filing by rules (tie checks against `company`, the open model's company as JSON). The
+    client adds the returned filing to its document's `filings`, and autosave stores it."""
+    data = await file.read(MAX_UPLOAD + 1)
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, "That file is over 5 MB. A results XBRL filing is usually under 100 KB.")
+    try:
+        co = Company.model_validate_json(company).model_dump() if company else None
+    except ValidationError:
+        raise HTTPException(422, "The open model's company data is damaged; reload the model and try again.")
+    try:
+        f = model.parse_xbrl(data, mappings=load_mappings(MODELS), company=co)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return {"id": hashlib.sha1(data).hexdigest()[:12], "file": (file.filename or "filing.xml")[:200], **f}
 
 
 @app.get("/api/sample")

@@ -2,8 +2,11 @@
 import calendar
 import io
 import math
+import re
 import statistics
+import xml.etree.ElementTree as ET
 from datetime import datetime
+from pathlib import Path
 
 import openpyxl
 from openpyxl.formatting.rule import CellIsRule
@@ -271,6 +274,290 @@ def data_checks(co):
         issues.append(f"{fy(d[-1])}: asset and liability lines differ by {gap:,.1f} cr; "
                       "first projected year's cash roll-forward check absorbs this (one-time)")
     return issues
+
+
+# ---------- XBRL filings (NSE/BSE financial results, Ind AS) ----------
+
+# Element local name -> std key, matched without the namespace (the exchanges' results taxonomy in-bse-fin and the Ind
+# AS taxonomies share these names). Money is converted to Rs crore by unit (_xbrl_scale); EPS and face value stay in Rs
+# per share. Keys shared with parse_export mean the same line: revenue, interest (finance cost), dep, pbt, tax, pat
+# (owners' share), receivables, inventory, cash, share_cap, cfo/cfi/cff.
+XBRL_PL = {
+    "RevenueFromOperations": "revenue", "OtherIncome": "other_income", "Income": "total_income",
+    "CostOfMaterialsConsumed": "materials", "PurchasesOfStockInTrade": "purchases",
+    "ChangesInInventoriesOfFinishedGoodsWorkInProgressAndStockInTrade": "inventory_change",
+    "EmployeeBenefitExpense": "employee", "FinanceCosts": "interest",
+    "DepreciationDepletionAndAmortisationExpense": "dep", "DepreciationAndAmortisationExpense": "dep",
+    "OtherExpenses": "other_exp", "Expenses": "total_exp",
+    "ProfitBeforeExceptionalItemsAndTax": "pbt_before_exceptional", "ExceptionalItemsBeforeTax": "exceptional",
+    "ProfitBeforeTax": "pbt", "CurrentTax": "current_tax", "DeferredTax": "deferred_tax", "TaxExpense": "tax",
+    "ProfitLossForPeriodFromContinuingOperations": "profit_continuing",
+    "ProfitLossFromDiscontinuedOperationsAfterTax": "profit_discontinued",
+    "ShareOfProfitLossOfAssociatesAndJointVenturesAccountedForUsingEquityMethod": "associates",
+    "ProfitLossForPeriod": "profit", "ProfitOrLossAttributableToOwnersOfParent": "pat",
+    "ProfitOrLossAttributableToNonControllingInterests": "minority",
+    "OtherComprehensiveIncomeNetOfTaxes": "oci", "ComprehensiveIncomeForThePeriod": "comprehensive_income",
+    "BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_basic",
+    "DilutedEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_diluted",
+    "PaidUpValueOfEquityShareCapital": "paid_up_capital", "FaceValueOfEquityShareCapital": "face_value",
+}
+XBRL_BS = {  # positions at the period end
+    "PropertyPlantAndEquipment": "ppe", "CapitalWorkInProgress": "cwip", "InvestmentProperty": "investment_property",
+    "Goodwill": "goodwill", "OtherIntangibleAssets": "intangibles", "IntangibleAssetsUnderDevelopment": "intangibles_wip",
+    "InvestmentsAccountedForUsingEquityMethod": "investments_equity_method",
+    "NoncurrentInvestments": "investments_noncurrent", "CurrentInvestments": "investments_current",
+    "TradeReceivablesCurrent": "receivables", "TradeReceivablesNoncurrent": "receivables_noncurrent",
+    "Inventories": "inventory", "CashAndCashEquivalents": "cash",
+    "BankBalanceOtherThanCashAndCashEquivalents": "bank_balances",
+    "LoansCurrent": "loans_current", "LoansNoncurrent": "loans_noncurrent",
+    "OtherCurrentFinancialAssets": "other_fin_assets_current", "OtherNoncurrentFinancialAssets": "other_fin_assets_noncurrent",
+    "DeferredTaxAssetsNet": "deferred_tax_assets", "CurrentTaxAssets": "current_tax_assets",
+    "OtherCurrentAssets": "other_current_assets", "OtherNoncurrentAssets": "other_noncurrent_assets",
+    "CurrentAssets": "current_assets", "NoncurrentAssets": "noncurrent_assets", "Assets": "total_assets",
+    "EquityShareCapital": "share_cap", "OtherEquity": "other_equity",
+    "EquityAttributableToOwnersOfParent": "equity_parent", "NonControllingInterest": "nci", "Equity": "equity",
+    "BorrowingsNoncurrent": "borrowings_noncurrent", "BorrowingsCurrent": "borrowings_current",
+    # ponytail: lease liabilities as named in the Ind AS / IFRS taxonomies; the 2020 results taxonomy has no such
+    # element (leases sit in other financial liabilities), so results filings won't fill these
+    "LeaseLiabilitiesNoncurrent": "lease_noncurrent", "LeaseLiabilitiesCurrent": "lease_current",
+    "NoncurrentLeaseLiabilities": "lease_noncurrent", "CurrentLeaseLiabilities": "lease_current",
+    "TradePayablesCurrent": "payables", "TradePayablesNoncurrent": "payables_noncurrent",
+    "OtherCurrentFinancialLiabilities": "other_fin_liabilities_current",
+    "OtherNoncurrentFinancialLiabilities": "other_fin_liabilities_noncurrent",
+    "ProvisionsCurrent": "provisions_current", "ProvisionsNoncurrent": "provisions_noncurrent",
+    "DeferredTaxLiabilitiesNet": "deferred_tax_liabilities", "CurrentTaxLiabilities": "current_tax_liabilities",
+    "OtherCurrentLiabilities": "other_current_liabilities", "OtherNoncurrentLiabilities": "other_noncurrent_liabilities",
+    "CurrentLiabilities": "current_liabilities", "NoncurrentLiabilities": "noncurrent_liabilities",
+    "Liabilities": "total_liabilities", "EquityAndLiabilities": "equity_and_liabilities",
+}
+XBRL_CF = {  # the financial year to date (results filings carry it for the half year and the year)
+    "CashFlowsFromUsedInOperatingActivities": "cfo", "CashFlowsFromUsedInInvestingActivities": "cfi",
+    "CashFlowsFromUsedInFinancingActivities": "cff",
+    "PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities": "purchase_ppe",
+    "ProceedsFromSalesOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities": "proceeds_ppe",
+    "PurchaseOfIntangibleAssetsClassifiedAsInvestingActivities": "purchase_intangibles",
+    "ProceedsFromSalesOfIntangibleAssetsClassifiedAsInvestingActivities": "proceeds_intangibles",
+    "IncomeTaxesPaidRefundClassifiedAsOperatingActivities": "taxes_paid",
+    "ProceedsFromBorrowingsClassifiedAsFinancingActivities": "borrowings_raised",
+    "RepaymentsOfBorrowingsClassifiedAsFinancingActivities": "borrowings_repaid",
+    "PaymentsOfLeaseLiabilitiesClassifiedAsFinancingActivities": "lease_payments",
+    "DividendsPaidClassifiedAsFinancingActivities": "dividends_paid",
+    "InterestPaidClassifiedAsFinancingActivities": "interest_paid",
+    "ProceedsFromIssuingSharesClassifiedAsFinancingActivities": "shares_issued",
+    "PaymentsToAcquireOrRedeemEntitysShares": "buyback",
+    "IncreaseDecreaseInCashAndCashEquivalents": "net_change_cash",
+}
+XBRL_TAGS = {**XBRL_PL, **XBRL_BS, **XBRL_CF}
+XBRL_STOCKS, XBRL_CASH = set(XBRL_BS.values()) | {"borrowings"}, set(XBRL_CF.values())
+XBRL_PER_SHARE = {"eps_basic", "eps_diluted", "face_value"}
+XBRL_MAX_UNMAPPED = 300  # a results filing has ~50 non-zero unknown facts; a full annual-report instance can have 1000s
+_XI = "{http://www.xbrl.org/2003/instance}"
+
+
+def _local(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def _iso(s):
+    try:
+        return datetime.strptime(s.strip()[:10], "%Y-%m-%d")
+    except (AttributeError, ValueError):
+        return None
+
+
+def _xbrl_scale(unit_id, measures):
+    """Rs crore per unit of a fact, or ("share", 1.0) for Rs per share; None when the unit isn't money."""
+    m = " ".join([unit_id, *measures]).lower()
+    if "inr" in m and "share" in m:
+        return "share", 1.0
+    for word, f in (("lakh", 0.01), ("crore", 1.0), ("inr", 1e-7)):  # XBRL money is in rupees unless the unit says
+        if word in m:
+            return "money", f
+    return None
+
+
+def _cr(v):
+    """Rs crore with Indian grouping, for check details: Rs 1,64,177 cr."""
+    r = round(v)
+    head, tail = str(abs(r))[:-3], str(abs(r))[-3:]
+    while len(head) > 2:
+        head, tail = head[:-2], f"{head[-2:]},{tail}"
+    return f"Rs {'-' if r < 0 else ''}{head + ',' if head else ''}{tail} cr"
+
+
+def parse_xbrl(file, mappings=None, company=None):
+    """An NSE/BSE financial-results XBRL instance -> {company, period_start, period_end, kind, consolidated, facts
+    {std key: Rs crore}, unmapped [{tag, value, context}], checks [{name, pass, detail}]}. Deterministic: XBRL_TAGS
+    plus the user's approved `mappings` {tag: std key}. With `company` (parse_export's shape) revenue and net profit
+    are compared with Export's figure for the same year or quarter; a mismatch is reported, never blocking.
+
+    The period is the annual one if the filing has it (a Q4 filing carries the quarter and the year), else the shortest
+    (the quarter, not the year to date). The exchanges' "_WEB" files reference contexts (OneD, FourD, OneI) they never
+    define, and some define FourD with the quarter's dates; so each context's DateOfStart/EndOfReportingPeriod facts
+    win over its <period>. Balance-sheet facts are taken at the period end, cash flow only for an annual filing."""
+    data = file if isinstance(file, bytes) else file.read() if hasattr(file, "read") else Path(file).read_bytes()
+    # no DTDs at all: entity expansion (XML bombs) and external entities need one; NUL = UTF-16/32, which could hide it
+    if re.search(rb"<!(DOCTYPE|ENTITY)", data, re.I) or b"\0" in data:
+        raise ValueError("This XML file declares a DTD or entities, which XBRL filings never need, so it wasn't read.")
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as e:
+        raise ValueError(f"Not a well-formed XML file ({e}).") from None
+    if _local(root.tag) != "xbrl":
+        raise ValueError("Not an XBRL instance (the file's root isn't <xbrl>). Download the XBRL link of a financial "
+                         "results filing from NSE or BSE.")
+    tags = {**XBRL_TAGS, **(mappings or {})}
+    blank = lambda: {"start": None, "end": None, "instant": False, "basis": None, "dims": False}  # noqa: E731
+    ctx, units = {}, {}
+    for c in root.iter(_XI + "context"):
+        p, x = blank(), c.find(_XI + "period")
+        if x is not None:
+            inst = _iso(x.findtext(_XI + "instant"))
+            p["start"], p["end"], p["instant"] = _iso(x.findtext(_XI + "startDate")), inst or _iso(x.findtext(_XI + "endDate")), bool(inst)
+        for m in c.iter():
+            if _local(m.tag) in ("explicitMember", "typedMember"):
+                member = (m.text or "").strip().split(":")[-1]
+                if member in ("ConsolidatedMember", "StandaloneMember", "SeparateMember"):
+                    p["basis"] = member == "ConsolidatedMember"
+                else:
+                    p["dims"] = True  # a breakdown (segment, expense detail): not a statement line
+        ctx[c.get("id")] = p
+    for u in root.iter(_XI + "unit"):
+        units[u.get("id")] = [(m.text or "").strip() for m in u.iter(_XI + "measure")]
+
+    name = symbol = nature = None
+    nums, checks = [], []
+    check = lambda n, ok, d: checks.append({"name": n, "pass": ok, "detail": d})  # noqa: E731
+    for e in root:
+        cid = e.get("contextRef")
+        if cid is None:
+            continue
+        c = ctx.setdefault(cid, blank())  # referenced but never defined (the _WEB files)
+        tag, text = _local(e.tag), (e.text or "").strip()
+        if tag == "DateOfStartOfReportingPeriod":
+            c["start"] = _iso(text) or c["start"]
+        elif tag == "DateOfEndOfReportingPeriod":
+            c["end"], c["instant"] = _iso(text) or c["end"], False
+        elif tag in ("NameOfTheCompany", "NameOfCompany"):
+            name = name or text
+        elif tag == "Symbol":
+            symbol = symbol or text
+        elif tag == "NatureOfReportStandaloneConsolidated":
+            nature = nature or text.lower()
+        elif e.get("unitRef") and e.get("{http://www.w3.org/2001/XMLSchema-instance}nil") != "true":
+            try:
+                v = float(text)
+                if not math.isfinite(v):
+                    raise ValueError
+            except ValueError:
+                check(f"{tag} is a number", False, f"{text[:40]!r} in context {cid} isn't a number; skipped")
+                continue
+            nums.append((tag, cid, v, e.get("unitRef")))
+
+    consolidated = (not nature.startswith(("standalone", "non"))) if nature else None
+    if consolidated is None and any(c["basis"] is not None for c in ctx.values()):
+        consolidated = any(c["basis"] for c in ctx.values())
+    days = lambda s: (s[1] - s[0]).days + 1  # noqa: E731
+    spans = {(ctx[cid]["start"], ctx[cid]["end"]) for tag, cid, _, _ in nums
+             if tags.get(tag) in ("revenue", "pbt", "profit") and not ctx[cid]["dims"] and ctx[cid]["start"]
+             and ctx[cid]["end"] and ctx[cid]["end"] > ctx[cid]["start"]}
+    if spans:  # the year if there is one, else the shortest period; the latest when comparatives are included
+        start, end = max(spans, key=lambda s: (days(s) >= 350, s[1], -days(s)))
+        n = days((start, end))
+        kind = "quarter" if 80 <= n <= 100 else "half" if 170 <= n <= 190 else "annual" if 350 <= n <= 380 else "other"
+    else:
+        start, kind = None, "other"
+        end = max((c["end"] for c in ctx.values() if c["end"]), default=None)
+
+    facts, seen, unmapped, skipped_cash = {}, {}, {}, False
+    for tag, cid, v, uid in nums:
+        c, key = ctx[cid], tags.get(tag)
+        if c["dims"] or (consolidated is not None and c["basis"] not in (None, consolidated)):
+            continue
+        if key in XBRL_CASH:
+            if kind != "annual":
+                skipped_cash = True
+                continue
+            ok = c["end"] in (None, end)  # the _WEB files tag the year's cash flow with the quarter's context
+        elif key in XBRL_STOCKS or (key is None and c["instant"]):
+            ok = c["end"] in (None, end)  # undefined instant contexts (OneI) are the filing's balance sheet date
+        else:
+            ok = (c["start"], c["end"]) == (start, end)
+        if not ok:
+            continue
+        scale = _xbrl_scale(uid, units.get(uid, []))
+        if key and scale and (scale[0] == "share") == (key in XBRL_PER_SHARE):
+            val = round(v * scale[1], 6)
+            if key not in facts:
+                facts[key], seen[key] = val, tag
+            elif abs(facts[key] - val) > 1e-6:  # the same line twice with different numbers: keep the first, say so
+                check(f"One value for {key}", False, f"{seen[key]} = {facts[key]:,.2f} and {tag} = {val:,.2f} "
+                      f"(context {cid}); kept the first")
+        elif v and len(unmapped) < XBRL_MAX_UNMAPPED:  # ponytail: zeros (most of a results filing) aren't listed
+            val = round(v * scale[1], 6) if scale else v
+            unmapped.setdefault((tag, val), {"tag": tag, "value": val, "context": cid if scale else f"{cid} ({uid})"})
+
+    if facts.get("profit") and not facts.get("pat") and not facts.get("minority"):
+        if "pat" in facts:  # Hindalco Dec 2021 files 0 for both owners and minority
+            check("Owners' share of profit", None, "The filing leaves the owners / minority split at 0, so net "
+                  "profit is taken as the whole period's profit.")
+        facts["pat"] = facts["profit"]  # standalone results have no owners / minority split
+    if "borrowings_noncurrent" in facts or "borrowings_current" in facts:
+        facts["borrowings"] = facts.get("borrowings_noncurrent", 0.0) + facts.get("borrowings_current", 0.0)
+
+    f = facts
+    if "pbt" in f and "tax" in f and ("profit_continuing" in f or "profit" in f):
+        want = f["pbt"] - f["tax"]
+        got = f["profit_continuing"] if "profit_continuing" in f else (
+            f["profit"] - f.get("associates", 0.0) - f.get("profit_discontinued", 0.0))
+        check("PBT less tax = profit", abs(want - got) <= max(1.0, 0.001 * abs(want)),
+              f"PBT {_cr(f['pbt'])} less tax {_cr(f['tax'])} is {_cr(want)}; the filing's profit is {_cr(got)}")
+    if "total_assets" in f and "equity_and_liabilities" in f:
+        gap = f["total_assets"] - f["equity_and_liabilities"]
+        check("Assets = equity and liabilities", abs(gap) <= 1.0,
+              f"Assets {_cr(f['total_assets'])}, equity and liabilities {_cr(f['equity_and_liabilities'])}")
+    if skipped_cash:
+        check("Cash flow", None, "The cash flow in this filing is for the year to date, not this period, so it isn't kept.")
+    if company and end:
+        checks += _xbrl_ties(f, kind, end, company, consolidated)
+    if not f:
+        check("Statement lines found", False, "No profit and loss or balance sheet lines this app knows were found.")
+    return {"company": name or symbol or next((x.text.strip() for x in root.iter(_XI + "identifier") if x.text), None),
+            "period_start": start and start.date().isoformat(), "period_end": end and end.date().isoformat(),
+            "kind": kind, "consolidated": consolidated, "facts": facts, "unmapped": list(unmapped.values()),
+            "checks": checks}
+
+
+def _xbrl_ties(f, kind, end, co, consolidated):
+    """Revenue and net profit against Export's reported year (or quarter) ending on the same day, within 1%."""
+    q = co.get("quarters")
+    if kind == "annual":
+        dates, rows, label = co["dates"], co["hist"], fy(end)
+        pairs = (("revenue", "revenue", "Revenue"), ("pat", "pat", "Net profit"))
+    elif kind == "quarter" and q:
+        dates, label = q["dates"], f"the {end:%b %Y} quarter"
+        rows = [{k: v[i] for k, v in q["rows"].items()} for i in range(len(dates))]
+        pairs = (("revenue", "sales", "Revenue"), ("pat", "net_profit", "Net profit"))
+    else:
+        dates = []
+    i = next((i for i, d in enumerate(dates) if d.date() == end.date()), None)
+    if i is None:
+        what = {"annual": "year", "quarter": "quarter"}.get(kind, "period")
+        return [{"name": "Ties to Export", "pass": None,
+                 "detail": f"The Export file has no {what} ending {end:%d %b %Y} to compare with."}]
+    out = []
+    for fk, sk, line in pairs:
+        a, b = f.get(fk), rows[i].get(sk)
+        if a is None or b is None:
+            continue
+        ok = abs(a - b) <= 0.01 * abs(b)
+        detail = f"Filing {_cr(a)}, Export {_cr(b)}"
+        if not ok:
+            detail += f": {abs(a / b - 1) * 100:.1f}% apart" if b else ": Export has 0"
+            if consolidated is False:
+                detail += ". This filing is standalone; Export's export is usually consolidated."
+        out.append({"name": f"{line} for {label} matches Export", "pass": ok, "detail": detail})
+    return out
 
 
 def fy(d, projected=False):
