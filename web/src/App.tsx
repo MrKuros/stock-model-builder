@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Chart from './Chart'
 import DriverStrip from './DriverStrip'
-import Statements from './Statements'
+import Statements, { growth, month } from './Statements'
 import ValuationPanel from './Valuation'
 import {
   api, dec2, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS, when, clock,
   type ModelDoc, type ModelSummary, type OneOff, type Market, type Opened, type Parsed, type Paths, type Projection, type Row,
-  type Scenario,
+  type Scenario, type Ttm,
 } from './lib'
 
 const GROUPS: [string, string[]][] = [
@@ -55,8 +55,8 @@ function remember(id: string | null) {
 }
 
 const newDoc = (p: Parsed): ModelDoc => ({
-  version: 4, company: p.company, n: 5, active: 'base', scenarios: seed(flatAll(p.defaults)),
-  excluded_years: [], saved_at: null, valuation: p.valuation,
+  version: 5, company: p.company, n: 5, active: 'base', scenarios: seed(flatAll(p.defaults)),
+  excluded_years: [], saved_at: null, valuation: p.valuation, filings: [], proposals: [], notes: {},
 })
 
 export interface SaveState { at: string | null; error: string | null }
@@ -264,6 +264,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
   const [metric, setMetric] = useState(METRICS[0][0])
   const [showChecks, setShowChecks] = useState(false)
   const [showOneoffs, setShowOneoffs] = useState(false)
+  const [showRestated, setShowRestated] = useState(false)
   const [pending, setPending] = useState<string | null>(null) // year whose exclusion is being applied
   const [defaultsNote, setDefaultsNote] = useState('')
   const [exporting, setExporting] = useState(false)
@@ -320,6 +321,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
     setDoc(d => ({ ...d, scenarios: next }))
   }
 
+  const restated = parsed.restated?.changes.length ? parsed.restated : null
   const excluded = doc.excluded_years
   const oneoffYears = Object.entries(parsed.oneoffs.reduce<Record<string, OneOff[]>>(
     (g, o) => ({ ...g, [o.year]: [...(g[o.year] ?? []), o] }), {}))
@@ -387,6 +389,13 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
             {excluded.length > 0 && <> · {excluded.length} left out of defaults</>}
           </button>
         )}
+        {restated && (
+          <button type="button" className="warn" onClick={() => setShowRestated(s => !s)} aria-expanded={showRestated}
+            aria-controls="restated">
+            {restated.changes.length} reported figure{restated.changes.length > 1 ? 's' : ''} changed since your
+            model of {restated.saved_at ? when(restated.saved_at) : 'earlier'}
+          </button>
+        )}
         {retried != null && retried === save.at && !save.error && <span className="ok">Saved</span>}
         {error && <span className="bad" role="alert">{error}</span>}
         {save.error && (
@@ -397,6 +406,22 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
         )}
       </div>
       {showChecks && <ul className="check-list">{checks.map(c => <li key={c}>{c}</li>)}</ul>}
+      {showRestated && restated && (
+        <section id="restated" aria-label="Restated figures">
+          <ul className="check-list">
+            {restated.changes.map(c => (
+              <li key={`${c.year}-${c.line}`}>
+                {c.year} {c.line.toLowerCase()}: Rs {money(c.old)} cr → Rs {money(c.new)} cr ({fmt(c.new / c.old - 1, 'pct')})
+              </li>
+            ))}
+          </ul>
+          <p className="muted small">
+            This file’s reported years differ by more than 0.5% from the model you saved{restated.saved_at
+              ? ` on ${when(restated.saved_at)}` : ''}; the company may have restated them. This model uses the new
+            figures; versions saved on earlier days keep the old ones.
+          </p>
+        </section>
+      )}
       {showOneoffs && (
         <OneOffs id="oneoffs" years={oneoffYears} histYears={histYears} excluded={excluded} pending={pending}
           note={defaultsNote} onToggle={toggleYear} />
@@ -438,7 +463,8 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
       </aside>
 
       <main className="main">
-        {proj && <Readout hist={hist} proj={proj} histYear={histYears[nHist - 1]} projYear={projYears[n - 1]} n={n} />}
+        {proj && <Readout hist={hist} proj={proj} histYear={histYears[nHist - 1]} projYear={projYears[n - 1]} n={n}
+          ttm={parsed.ttm && Date.parse(parsed.ttm.end) > Date.parse(company.dates[nHist - 1]) ? parsed.ttm : null} />}
         {proj && <Compare all={projection!.scenarios} active={active} projYear={projYears[n - 1]} />}
         {borrowed >= 0.5 && (
           <p className="banner">
@@ -463,7 +489,11 @@ function Workspace({ parsed, doc, setDoc, setDefaults, onClose, save, onRetry }:
           onChange={f => setDoc(d => ({ ...d, valuation: f(d.valuation) }))} />
       </main>
       <div className="tables">
-        <Statements layout={layout} years={years} rows={rows} nHist={nHist} />
+        <Statements layout={layout} years={years} rows={rows} nHist={nHist}
+          quarterly={company.quarters?.dates.length ? {
+            quarters: company.quarters, ttm: parsed.ttm ?? null, ttmPrev: parsed.ttm_prev ?? null,
+            fy: histYears[nHist - 1], last: hist[nHist - 1], prev: nHist > 1 ? hist[nHist - 2] : null,
+          } : null} />
       </div>
     </div>
   )
@@ -517,7 +547,10 @@ function MarketLine({ m }: { m?: Market }) {
   )
 }
 
-function Readout({ hist, proj, histYear, projYear, n }: { hist: Row[]; proj: Row[]; histYear: string; projYear: string; n: number }) {
+function Readout({ hist, proj, histYear, projYear, n, ttm }: {
+  hist: Row[]; proj: Row[]; histYear: string; projYear: string; n: number
+  ttm: Ttm | null // only when its quarters run past the last reported year
+}) {
   const last = hist[hist.length - 1], end = proj[proj.length - 1]
   const r0 = last.revenue ?? 0, r1 = end.revenue ?? 0
   const cagr = r0 > 0 && r1 > 0 ? (r1 / r0) ** (1 / n) - 1 : null
@@ -525,6 +558,7 @@ function Readout({ hist, proj, histYear, projYear, n }: { hist: Row[]; proj: Row
   const fcf = proj.reduce((s, r) => s + (r.fcf ?? 0), 0)
   const netCash = (end.cash ?? 0) + (end.investments ?? 0) - (end.borrowings ?? 0)
   const P = ({ children }: { children: React.ReactNode }) => <span className="pencil-num">{children}</span>
+  const ttmGrowth = growth(ttm?.values.sales, r0)
 
   return (
     <p className="readout">
@@ -533,6 +567,8 @@ function Readout({ hist, proj, histYear, projYear, n }: { hist: Row[]; proj: Row
       <P>{fmt(margin(end), 'pct')}</P>. Over {n} years the business {fcf >= 0 ? 'generates' : 'burns'}{' '}
       <P>Rs {money(Math.abs(fcf))} cr</P> of free cash and ends with{' '}
       <P>Rs {money(Math.abs(netCash))} cr</P> net {netCash >= 0 ? 'cash' : 'debt'}.
+      {ttmGrowth != null && <> In the twelve months to {month(ttm!.end)}, revenue was Rs {money(ttm!.values.sales)} cr,{' '}
+        {fmt(Math.abs(ttmGrowth), 'pct')} {ttmGrowth >= 0 ? 'above' : 'below'} {histYear}.</>}
     </p>
   )
 }

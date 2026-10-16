@@ -1,4 +1,5 @@
 """Run: uv run python test_model.py  (Excel formula check needs LibreOffice `soffice` on PATH)."""
+import calendar
 import io
 import json
 import re
@@ -16,8 +17,10 @@ from pydantic import ValidationError
 import model
 
 
-def fake_export(path, years=10):
-    """Synthetic file in Export.in 'Data Sheet' layout with internally consistent numbers."""
+def fake_export(path, years=10, quarters=True):
+    """Synthetic file in Export.in 'Data Sheet' layout with internally consistent numbers. The Quarters block is
+    laid out like the real export: ten quarter ends, the last three after the final year; quarters=False leaves only
+    its heading, as in an export without quarterly data (Milky Mist)."""
     dates = [datetime(2016 + i, 3, 31) for i in range(years)]
     pl = {k: [] for k in ("Sales", "Raw Material Cost", "Other Income", "Depreciation", "Interest",
                           "Profit before tax", "Tax", "Net profit", "Dividend Amount")}
@@ -53,8 +56,9 @@ def fake_export(path, years=10):
     for k, v in pl.items():
         ws.append([k, *v])
     ws.append(["Quarters"])
-    ws.append(["Report Date", *dates[:4]])
-    ws.append(["Sales", 1, 2, 3, 4])  # must not clobber annual Sales
+    if quarters:
+        for row in _quarter_rows(dates[-1]):
+            ws.append(row)
     ws.append(["BALANCE SHEET"])
     ws.append(["Report Date", *dates])
     for k, v in bs.items():
@@ -66,6 +70,22 @@ def fake_export(path, years=10):
     ws.append(["DERIVED:"])
     ws.append(["Adjusted Equity Shares in Cr", *[5.0] * years])
     wb.save(path)
+
+
+def _quarter_rows(last_fy):
+    """Ten quarters ending three after last_fy, growing ~12% a year; the first quarter has no Other Income and the
+    last no Tax (Export leaves gaps), so TTM tax must come out blank in Python and Excel alike."""
+    ends = [divmod(last_fy.year * 12 + last_fy.month - 1 + 3 * (k - 6), 12) for k in range(10)]
+    ends = [datetime(y, m + 1, calendar.monthrange(y, m + 1)[1]) for y, m in ends]  # Sep 2023 .. Dec 2025
+    sales = [round(612 * 1.12 ** (k / 4), 2) for k in range(10)]  # the four to the year end sum to about its Sales
+    exp = [round(0.8 * x, 2) for x in sales]
+    oi = [None, *[round(0.02 * x, 2) for x in sales[1:]]]
+    pbt = [round(x - e + (o or 0) - 12 - 5, 2) for x, e, o in zip(sales, exp, oi)]
+    tax = [*[round(0.25 * x, 2) for x in pbt[:-1]], None]
+    net = [round(0.75 * x, 2) for x in pbt]
+    return [["Report Date", *ends], ["Sales", *sales], ["Expenses", *exp], ["Other Income", *oi],
+            ["Depreciation", *[12] * 10], ["Interest", *[5] * 10], ["Profit before tax", *pbt], ["Tax", *tax],
+            ["Net profit", *net], ["Operating Profit", *[round(x - e, 2) for x, e in zip(sales, exp)]]]
 
 
 def recalc(xlsx, outdir):
@@ -86,6 +106,7 @@ def main():
     assert co["hist"][0]["revenue"] == 1000.0, "quarterly Sales leaked into annual data"
     assert model.data_checks(co) == [], model.data_checks(co)
     assert co["hist"][1]["cfi"] is None and co["hist"][1]["net_cf"] is None, "missing CF rows must not be 0"
+    quarters_check(tmp, co)
     m = co["market"]
     assert m["price"] == 1600 and m["shares"] == 5.0 and m["shares_hist"] == [5.0] * 10, m
     assert m["price_hist"][0] == 500 and m["price_hist"][-1] is None and len(m["price_hist"]) == 10, m
@@ -235,6 +256,7 @@ def main():
         for j, c in enumerate(projs[s]):  # incl. the per-year driver cells picked by CHOOSE
             _same(ws, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ex[s].items()}}, (s, j))
         _same_valuation(ws.parent["Valuation"], model.valuation(projs, co["hist"], None, ex["base"], co["market"], ex), s)
+        _same_quarters(ws.parent["Quarters"], co["quarters"])
     edge = {s: dict(p) for s, p in seeded.items()}
     edge["base"].update(int_rate={"start": 0.3, "end": None}, mi_pct={"start": -0.1, "end": None})
     edge["bear"]["capex_pct"] = {"start": 0.4, "end": None}
@@ -295,6 +317,58 @@ def main():
     msg = vs10.cell(next(c.row for c in vs10["A"] if c.value == "WACC") + 1, 2).value  # the line under WACC
     assert msg.startswith("WACC must"), msg
     print("OK: parse, checks, projection, Excel formulas match Python")
+
+
+def quarters_check(tmp, co):
+    """Quarters block: real layout, gaps stay blank, TTM = last four consecutive quarters, none = no quarters."""
+    q = co["quarters"]
+    assert len(q["dates"]) == 10 and q["dates"][-1] == datetime(2025, 12, 31) and q["dates"][0] == datetime(2023, 9, 30)
+    r = q["rows"]
+    assert r["sales"][0] == 612.0 and r["other_income"][0] is None and r["tax"][-1] is None, r
+    # operating profit: PBT + interest + depreciation - other income; Export's row only when a line is missing
+    assert abs(r["op_profit"][5] - (r["pbt"][5] + 5 + 12 - r["other_income"][5])) < 1e-9, r["op_profit"]
+    assert r["op_profit"][0] == 122.4, r["op_profit"][0]  # Export's Operating Profit row, other income missing
+    t, prev = model.ttm(q), model.ttm(q, 4)
+    assert t["end"] == datetime(2025, 12, 31) and prev["end"] == datetime(2024, 12, 31), (t, prev)
+    assert t["values"]["sales"] == sum(r["sales"][-4:]) and t["values"]["tax"] is None, t
+    assert prev["values"]["tax"] == sum(r["tax"][2:6]), prev
+    assert model.ttm(q, 7) is None, "fewer than four quarters left: no TTM"
+    gap = {"dates": q["dates"][:6] + q["dates"][7:], "rows": {k: v[:6] + v[7:] for k, v in r.items()}}
+    assert model.ttm(gap) is None and model.ttm(gap, 3) is not None, "a missing quarter breaks the run of four"
+    # the four quarters up to the last year end add up to about its annual Sales (the synthetic file is built so)
+    assert abs(sum(r["sales"][3:7]) / co["hist"][-1]["revenue"] - 1) < 0.01
+    p = tmp / "no_quarters.xlsx"
+    fake_export(p, quarters=False)
+    bare = model.parse_export(p)
+    assert bare["quarters"] is None and bare["hist"] == co["hist"], "no quarters: annual data unchanged"
+    assert "Quarters" not in openpyxl.load_workbook(io.BytesIO(model.to_excel(bare, _flat_scenarios(bare)))).sheetnames
+    p = tmp / "quarter_text.xlsx"  # a text cell in a quarter blanks that quarter only
+    fake_export(p)
+    _edit_rows(p, lambda label, row: label == "Expenses" and setattr(row[2], "value", "n/a"))
+    assert model.parse_export(p)["quarters"]["rows"]["expenses"][1] is None
+
+
+def _flat_scenarios(co):
+    return dict.fromkeys(model.SCENARIOS, {k: {"start": v, "end": None}
+                                           for k, v in model.default_assumptions(co["hist"]).items()})
+
+
+def _same_quarters(qs, q):
+    """The recalculated Quarters sheet: values as parsed, TTM column (live SUMs) and margins equal Python."""
+    at = {c.value: c.row for c in qs["A"] if isinstance(c.value, str)}
+    nq, t = len(q["dates"]), model.ttm(q)["values"]
+    assert qs.cell(3, 2 + nq).value == f"TTM {q['dates'][-1]:%b %Y}", qs.cell(3, 2 + nq).value
+    margin = lambda op, s: op / s if op is not None and s else None  # noqa: E731
+    for label, key in model.Q_LAYOUT:
+        vals = ([margin(o, s) for o, s in zip(q["rows"]["op_profit"], q["rows"]["sales"])]
+                if key == "opm" else q["rows"][key])
+        want = [*vals, margin(t["op_profit"], t["sales"]) if key == "opm" else t[key]]
+        for j, v in enumerate(want):
+            got = qs.cell(at[label], 2 + j).value
+            if v is None:
+                assert got in (None, ""), (key, j, got)
+            else:
+                assert isinstance(got, (int, float)) and abs(got - v) < 1e-6 * max(1, abs(v)), (key, j, got, v)
 
 
 def valuation_check(co, projs, ex):
@@ -421,12 +495,27 @@ def library_check(root, co, scenarios):
         else:
             raise AssertionError(f"{fn.__name__}{args}: expected {status}")
 
+    q = co["quarters"]
     company = {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
-               "market": co["market"]}
+               "market": co["market"], "quarters": {"dates": [d.isoformat() for d in q["dates"]], "rows": q["rows"]}}
     old = server.ModelDoc.model_validate({"version": 3, "company": {k: company[k] for k in ("name", "dates", "hist")},
                                           "scenarios": scenarios})  # saved before market data and valuation existed
     assert old.company.market.price is None and old.company.market.price_hist == [], old.company.market
-    assert old.version == 4 and old.valuation.model_dump() == model.VALUATION, old
+    assert old.version == 5 and old.valuation.model_dump() == model.VALUATION, old
+    assert old.company.quarters is None and (old.filings, old.proposals, old.notes) == ([], [], {}), old
+    # version 4 (Phases 1-2): opens as 5 with empty filings / proposals / notes and no quarters
+    v4 = {"version": 4, "company": {k: company[k] for k in ("name", "dates", "hist", "market")}, "n": 5,
+          "active": "bull", "scenarios": scenarios, "excluded_years": ["FY2020"], "saved_at": "2026-10-15T09:00:00",
+          "valuation": model.VALUATION}
+    up = server.ModelDoc.model_validate(v4).model_dump(mode="json")
+    assert up == {**v4, "version": 5, "company": {**v4["company"], "quarters": None}, "filings": [], "proposals": [],
+                  "notes": {}}, up
+    # quarters must have one value per date
+    try:
+        server.Company.model_validate(dict(company, quarters={"dates": q["dates"][:2], "rows": q["rows"]}))
+        raise AssertionError("expected rejection: ragged quarters")
+    except ValidationError:
+        pass
     # a version-3 file on disk opens as version 4 with default valuation inputs, and lists
     (root / "old-co").mkdir(parents=True)
     (root / "old-co" / "2026-10-14.json").write_text(json.dumps(
@@ -440,14 +529,17 @@ def library_check(root, co, scenarios):
     fails(lambda _root: tiny.dcf(*tiny.projection()), 422)
     server.delete_model("old-co/2026-10-14", root)
     val = dict(model.VALUATION, beta=1.2, kd=0.085, mid_year=False, wacc_override=0.12, price=99.5, shares=3.25)
-    data = {"version": 4, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
-            "excluded_years": ["FY2020"], "saved_at": None, "valuation": val}
+    data = {"version": 5, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
+            "excluded_years": ["FY2020"], "saved_at": None, "valuation": val, "filings": [], "proposals": [],
+            "notes": {}}
+    assert server.restatements(co, root) is None, "nothing saved yet: no comparison"
     doc = server.ModelDoc.model_validate(data)
     mid, at = server.save_model(doc, root, now=datetime(2026, 10, 15, 12, 41, 5))
     assert (mid, at) == ("test-industries-ltd/2026-10-15", "2026-10-15T12:41:05"), (mid, at)
     back = server.load_model(mid, root).model_dump(mode="json")
     assert back == {**data, "saved_at": at}, "round trip must restore scenarios, fades, horizon, exclusions"
     assert back["scenarios"]["bear"]["growth"]["end"] is not None and back["scenarios"]["base"]["tax_rate"]["end"] is None
+    restatement_check(server, root, co)
     # same day overwrites; a new day is a new version; the listing is newest first with final-year revenue
     server.save_model(doc.model_copy(update={"active": "bull"}), root, now=datetime(2026, 10, 15, 18, 0))
     server.save_model(doc, root, now=datetime(2026, 10, 16, 9, 0))
@@ -471,7 +563,7 @@ def library_check(root, co, scenarios):
     assert server.slug("Tata Motors Ltd.") == "tata-motors-ltd" and server.slug("दूध").startswith("company-")
     assert server.slug("../..").startswith("company-")
     # malformed documents are refused
-    for bad in ({**data, "version": 2}, {**data, "version": 5}, {**data, "active": "worst"},
+    for bad in ({**data, "version": 2}, {**data, "version": 6}, {**data, "active": "worst"},
                 {**data, "valuation": dict(val, shares=0)}, {**data, "valuation": dict(val, g=float("nan"))},
                 {**data, "scenarios": {k: v for k, v in scenarios.items() if k != "bull"}}):
         try:
@@ -513,6 +605,22 @@ def library_check(root, co, scenarios):
     (root / "test-industries-ltd" / "2026-10-14.json").unlink()
     fails(server.delete_model, 404, "test-industries-ltd/2026-10-15")
     assert server.list_models(root) == []
+
+
+def restatement_check(server, root, co):
+    """A re-imported file vs the latest saved model: years that moved > 0.5% are listed, smaller moves aren't."""
+    same = server.restatements(co, root)
+    assert same["id"] == "test-industries-ltd/2026-10-15" and same["changes"] == [], same
+    new = dict(co, hist=[dict(h) for h in co["hist"]])
+    new["hist"][-2]["revenue"] *= 1.012  # FY2024 restated up 1.2%
+    new["hist"][-2]["borrowings"] *= 1.004  # 0.4%: under the threshold
+    new["hist"][-1]["pat"] *= 0.99  # FY2025 down 1%
+    # one more year than saved and one fewer at the start: only overlapping years are compared
+    new["dates"], new["hist"] = [*co["dates"][1:], datetime(2026, 3, 31)], [*new["hist"][1:], dict(co["hist"][-1])]
+    got = server.restatements(new, root)["changes"]
+    assert [(c["year"], c["line"]) for c in got] == [("FY2024", "Revenue"), ("FY2025", "Net profit")], got
+    assert got[0]["old"] == co["hist"][-2]["revenue"] and got[0]["new"] == new["hist"][-3]["revenue"], got
+    assert server.restatements(dict(co, name="Someone Else Ltd"), root) is None
 
 
 RETURNS = ("roe", "roce", "asset_turnover", "nd_ebitda", "int_cover")

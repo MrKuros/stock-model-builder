@@ -52,11 +52,24 @@ class Market(BaseModel):
     shares_hist: list[FiniteFloat | None] = []
 
 
+class Quarters(BaseModel):
+    """The export's Quarters block (model.QUARTERS keys), one value or null per quarter."""
+    dates: list[datetime]
+    rows: dict[str, list[FiniteFloat | None]]
+
+    @model_validator(mode="after")
+    def _lengths(self):
+        if any(len(v) != len(self.dates) for v in self.rows.values()):
+            raise ValueError("quarters need one value per quarter date in every row")
+        return self
+
+
 class Company(BaseModel):
     name: str
     dates: list[datetime]
     hist: list[dict[str, float | None]]
     market: Market = Market()  # version-3 documents saved before 2.1 have none
+    quarters: Quarters | None = None  # none in the export (Milky Mist), or saved before 3.5
 
     @model_validator(mode="after")
     def _years(self):
@@ -132,22 +145,32 @@ class ModelRequest(BaseModel):
 
 
 class ModelDoc(ModelRequest):
-    """The full model document as saved in the library. Version 3 (before valuation) loads with default inputs."""
-    version: Literal[3, 4]
+    """The full model document as saved in the library. Version 3 (before valuation) loads with default inputs;
+    versions 3 and 4 load with empty Phase 3 blocks."""
+    version: Literal[3, 4, 5]
     excluded_years: list[str] = []
     saved_at: str | None = None
+    # ponytail: untyped until the features that fill them land. filings: [{id, file, kind, period_end, facts, unmapped,
+    # checks}]; proposals: [{id, kind (mapping | oneoff_note | ar_note), field, value, unit, period, source: {file,
+    # page, quote, tag}, reasoning, checks: [{name, pass, detail}], status (proposed | approved | rejected), ai}];
+    # notes: approved oneoff_note / ar_note results keyed for display
+    filings: list[dict] = []
+    proposals: list[dict] = []
+    notes: dict = {}
 
     @model_validator(mode="after")
     def _migrate(self):
-        self.version = 4  # v3 -> v4 only added "valuation", which already defaulted
+        self.version = 5  # v3 -> v4 added "valuation", v4 -> v5 the blocks above; all already defaulted
         return self
 
 
 def _company_payload(co, excluded=()):
-    labels = model.labels(co["dates"])
+    labels, q = model.labels(co["dates"]), co.get("quarters")
     return {
         "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
-                    "market": co.get("market") or Market().model_dump()},
+                    "market": co.get("market") or Market().model_dump(),
+                    "quarters": q and {"dates": [d.isoformat() for d in q["dates"]], "rows": q["rows"]}},
+        "ttm": model.ttm(q), "ttm_prev": model.ttm(q, 4),  # last four quarters, and the four before them
         "years": labels,
         "ratios": model.ratios(co["hist"]),
         "defaults": model.default_assumptions(co["hist"], exclude=set(excluded), labels=labels),
@@ -171,7 +194,7 @@ async def parse(file: UploadFile):
     except Exception:  # corrupt / not an xlsx
         raise HTTPException(422, "Couldn't read that file as an Excel workbook. Upload the .xlsx from "
                                  "Export.in's 'Export to Excel' button.")
-    return _company_payload(co)
+    return _company_payload(co) | {"restated": restatements(co)}
 
 
 @app.get("/api/sample")
@@ -291,6 +314,30 @@ def list_models(root=MODELS):
                     "revenue": last if last is not None and math.isfinite(last) else None})
     # ponytail: parses and projects every file per listing; fine for hundreds, add an index file past that
     return sorted(out, key=lambda m: m["saved_at"] or "", reverse=True)
+
+
+RESTATED = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "Net profit"), ("total_assets", "Total assets"),
+            ("borrowings", "Borrowings"))
+RESTATE_TOL = 0.005  # 0.5%: Export rounds lines to whole crores or 2 decimals, so less is noise
+
+
+def restatements(co, root=MODELS):
+    """Reported years in a freshly imported file that moved by more than 0.5% against the latest saved model of the
+    same company: {id, saved_at, changes: [{year, line, old, new}]}, or None when nothing of it is saved."""
+    saved = [p for p in root.glob(f"{slug(co['name'])}*/*.json") if _saved_name(p) == co["name"]]
+    for p in sorted(saved, key=lambda p: p.stem, reverse=True):  # newest day first; a damaged file falls back
+        model_id = f"{p.parent.name}/{p.stem}"
+        try:
+            doc = load_model(model_id, root)
+        except HTTPException:
+            continue
+        old = {d.date(): h for d, h in zip(doc.company.dates, doc.company.hist)}
+        changes = [{"year": y, "line": line, "old": o[k], "new": h[k]}
+                   for y, d, h in zip(model.labels(co["dates"]), co["dates"], co["hist"]) if (o := old.get(d.date()))
+                   for k, line in RESTATED
+                   if o.get(k) is not None and abs(h[k] - o[k]) > max(RESTATE_TOL * abs(o[k]), 0.01)]
+        return {"id": model_id, "saved_at": doc.saved_at, "changes": changes}
+    return None
 
 
 def delete_model(model_id, root=MODELS):

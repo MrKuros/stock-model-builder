@@ -325,6 +325,10 @@ tbody th { text-align: left; font: 14px var(--body); position: sticky; left: 0; 
 td.proj { color: var(--pencil); background: color-mix(in srgb, var(--pencil-soft) 45%, transparent); }
 tr.total th, tr.total td { font-weight: 600; border-top: 1px solid var(--rule); }
 tbody tr:hover th, tbody tr:hover td { background: var(--pencil-soft); }
+.q-table .q-sum { border-left: 1px solid var(--rule); font-weight: 600; } /* last year and TTM, still ink */
+.q-table thead .q-sum { color: var(--ink); }
+.q-table abbr { text-decoration: none; }
+@media (max-width: 440px) { .q-table tbody th { white-space: normal; min-width: 12ch; } } /* room for numbers at 390px */
 
 @media (max-width: 980px) {
   .workspace { grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "main" "drivers" "tables"; grid-template-rows: none; padding: 16px; }
