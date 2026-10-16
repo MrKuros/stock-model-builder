@@ -27,6 +27,8 @@ MODELS = Path(__file__).parent / "models"  # the local library, gitignored
 MAPPINGS = "mappings.json"  # approved XBRL tag -> std key, at the library root (list_models only reads */*.json)
 FILINGS = "_filings"  # the XBRL files as uploaded, <id>.xml, re-read when a mapping is approved ("_": never a slug)
 FILING_ID = re.compile(r"[0-9a-f]{12}")
+REPORTS = "_reports"  # annual-report PDFs as page text, <id>.json (ai.pdf_pages); the PDF itself isn't kept
+MAX_PDF = 60 * 1024 * 1024  # annual reports run 5-30 MB
 MAX_ASK = 80  # unmapped tags sent to the LLM per proposal round; a results filing has ~10-50
 MODEL_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*/\d{4}-\d{2}-\d{2}")  # <company-slug>/<YYYY-MM-DD>
 app = FastAPI()
@@ -133,6 +135,16 @@ class Filing(BaseModel):
     model_config = ConfigDict(extra="allow")  # later Phase 3 features may add fields; keep them on save
 
 
+class Report(BaseModel):
+    """An attached annual-report PDF: its page text is in models/_reports/<id>.json; `year` is the label it was
+    attached for (FY2020)."""
+    id: str = Field(pattern=r"^[0-9a-f]{12}$")
+    file: str
+    year: str
+    pages: int
+    model_config = ConfigDict(extra="allow")  # 3.3 may add fields
+
+
 NEW_DRIVERS = ("cogs_pct", "dpo")  # added in 3.4; scenarios saved before lack them
 
 
@@ -203,7 +215,8 @@ class ModelDoc(ModelRequest):
     # page, quote, tag}, reasoning, checks: [{name, pass, detail}], status (proposed | approved | rejected), ai}];
     # notes: approved oneoff_note / ar_note results keyed for display
     proposals: list[dict] = []
-    notes: dict = {}
+    notes: dict = {}  # "oneoff:FY2020": {proposal, summary, file, page, quote, from_numbers, ai} (3.2b)
+    reports: list[Report] = []  # attached annual reports (3.2b); added within version 5, so it defaults to none
 
     @model_validator(mode="after")
     def _migrate(self):
@@ -280,7 +293,8 @@ async def xbrl(file: UploadFile, company: str | None = Form(None)):
 
 @app.get("/api/ai")
 def ai_status():
-    return {"available": ai.available(), "message": None if ai.available() else ai.NOT_SET}
+    return {"available": ai.available(), "message": None if ai.available() else ai.NOT_SET,
+            "pdf": ai.pdf_available(), "pdf_message": None if ai.pdf_available() else ai.PDF_MISSING}
 
 
 class ProposeRequest(BaseModel):
@@ -366,6 +380,82 @@ def approve(req: Decision):
 def reject(req: Decision):
     """Mark it rejected (kept for audit); if it was approved, its mapping leaves mappings.json and the filings are re-read."""
     return _decided(req, "rejected")
+
+
+# ---------- one-off years explained in words (3.2b): rules pick the pages, the LLM explains, rules check the quote ----------
+
+@app.post("/api/report")
+async def report(file: UploadFile, year: str = Form(...)):
+    """Read an annual-report PDF into page text by rules (pdftotext) and keep the text for explanations. The client
+    adds {id, file, year, pages} to its document's `reports`."""
+    data = await file.read(MAX_PDF + 1)
+    if len(data) > MAX_PDF:
+        raise HTTPException(413, "That file is over 60 MB. Annual reports are usually 5-30 MB.")
+    try:
+        pages = ai.pdf_pages(data)
+    except ValueError as e:
+        raise HTTPException(503 if str(e) == ai.PDF_MISSING else 422, str(e))
+    rid = hashlib.sha1(data).hexdigest()[:12]
+    _write(MODELS / REPORTS / f"{rid}.json", json.dumps({"file": file.filename or "", "pages": pages}).encode())
+    return {"id": rid, "file": (file.filename or "report.pdf")[:200], "year": year[:20], "pages": len(pages)}
+
+
+class ExplainRequest(BaseModel):
+    company: Company
+    filings: list[Filing] = []
+    year: str
+    report: Report | None = None  # None: explain from the numbers only
+
+
+NOTE_LINES = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("other_income", "Other income"), ("pbt", "PBT"),
+              ("tax", "Tax"), ("pat", "Net profit"), ("capex", "Capex"), ("net_block", "Net block"),
+              ("borrowings", "Borrowings"))
+
+
+@app.post("/api/oneoffs/explain")
+def explain(req: ExplainRequest):
+    """A words-only proposal (kind oneoff_note) for a year detect_oneoffs flags. With a report, rules pick the pages
+    and check that the quote is on the cited page (a quote that isn't comes back rejected); without, it is marked
+    as read from the numbers only. Approving it only pins the words: no number uses it."""
+    if not ai.available():
+        raise HTTPException(503, ai.NOT_SET)
+    co = req.company.model_dump()
+    labels, up = model.labels(co["dates"]), model.upgrade(co, [f.model_dump() for f in req.filings])
+    flags = [o for o in model.detect_oneoffs(up["hist"], labels) if o["year"] == req.year]
+    if not flags:
+        raise HTTPException(422, f"{req.year} isn't flagged as an unusual year.")
+    i = labels.index(req.year)
+    end = co["dates"][i].date()
+    rows = [(labels[j], up["hist"][j]) for j in range(max(0, i - 2), min(len(labels), i + 2))]
+    numbers = "\n".join(f"{name}: " + ", ".join(f"{y} {h[k]:,.0f}" if h.get(k) is not None else f"{y} n/a" for y, h in rows)
+                        for k, name in NOTE_LINES)
+    r = req.report
+    try:
+        if r is None:
+            reply = ai.explain_oneoff(req.year, flags, numbers)
+            checks = [{"name": "Source", "pass": None, "detail": "From the numbers only, no filing read."}]
+            source = {"file": None, "page": None, "quote": None, "tag": None}
+        else:
+            raw = MODELS / REPORTS / f"{r.id}.json"
+            if not raw.is_file():
+                raise HTTPException(422, f"The text of {r.file} isn't on this machine any more; attach it again.")
+            pages = [tuple(p) for p in json.loads(raw.read_bytes())["pages"]]
+            sent = ai.pick_pages(pages, {o["metric"] for o in flags}, end)
+            if not sent:
+                raise HTTPException(422, f"No page of {r.file} mentions exceptional items or the flagged lines. "
+                                         "Explain from the numbers only instead.")
+            reply = ai.explain_oneoff(req.year, flags, numbers, [(n, pages[n - 1][0]) for n in sent])
+            checks = ai.quote_checks(reply, pages, sent, end)
+            source = {"file": r.file, "page": reply["page"], "quote": reply["quote"].strip()[:600], "tag": None}
+    except ai.LLMError as e:
+        raise HTTPException(502, str(e))
+    summary = reply["summary"].strip()
+    ok = all(c["pass"] is not False for c in checks)
+    return {"id": hashlib.sha1(f"oneoff:{req.year}:{r and r.id}:{summary}".encode()).hexdigest()[:12],
+            "kind": "oneoff_note", "field": "oneoff", "value": summary, "unit": None, "period": req.year,
+            "source": source, "report": r and r.id, "from_numbers": r is None,
+            "reasoning": "; ".join(f["note"] for f in flags), "checks": checks,
+            "status": "proposed" if ok else "rejected", "ai": True}
 
 
 @app.get("/api/sample")

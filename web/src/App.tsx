@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Chart from './Chart'
 import DriverStrip from './DriverStrip'
 import Statements, { growth, month } from './Statements'
-import Sources from './Sources'
+import Sources, { Explain, useAi, withNotes } from './Sources'
 import ValuationPanel from './Valuation'
 import {
   api, dec2, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS, when, clock,
   type ModelDoc, type ModelSummary, type OneOff, type Market, type Opened, type Parsed, type Paths, type Projection, type Row,
-  type Kind, type Scenario, type Ttm,
+  type Kind, type OneOffNote, type Proposal, type Scenario, type Ttm,
 } from './lib'
 
 const GROUPS: [string, string[]][] = [
@@ -63,7 +63,7 @@ function remember(id: string | null) {
 
 const newDoc = (p: Parsed): ModelDoc => ({
   version: 5, company: p.company, n: 5, active: 'base', scenarios: seed(flatAll(p.defaults)),
-  excluded_years: [], saved_at: null, valuation: p.valuation, filings: [], proposals: [], notes: {},
+  excluded_years: [], saved_at: null, valuation: p.valuation, filings: [], proposals: [], notes: {}, reports: [],
 })
 
 export interface SaveState { at: string | null; error: string | null }
@@ -368,6 +368,10 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
     setDoc(d => ({ ...d, scenarios: next }))
   }
 
+  const ai = useAi()
+  // approving a one-off explanation pins it in notes; recomputed from the proposals so the two never disagree
+  const onProposals = (f: (ps: Proposal[]) => Proposal[]) =>
+    setDoc(d => { const proposals = f(d.proposals); return { ...d, proposals, notes: withNotes(d.notes, proposals) } })
   const restated = parsed.restated?.changes.length ? parsed.restated : null
   const excluded = doc.excluded_years
   const oneoffYears = Object.entries(parsed.oneoffs.reduce<Record<string, OneOff[]>>(
@@ -471,7 +475,11 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
       )}
       {showOneoffs && (
         <OneOffs id="oneoffs" years={oneoffYears} histYears={histYears} excluded={excluded} pending={pending}
-          note={defaultsNote} onToggle={toggleYear} />
+          note={defaultsNote} onToggle={toggleYear} explain={year => (
+            <Explain year={year} company={company} filings={filings} ai={ai} proposals={doc.proposals}
+              report={doc.reports.find(r => r.year === year)} note={doc.notes[`oneoff:${year}`] as OneOffNote | undefined}
+              onProposals={onProposals} onReports={f => setDoc(d => ({ ...d, reports: f(d.reports) }))} />
+          )} />
       )}
 
       </div>
@@ -536,9 +544,8 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
           market={company.market} active={active} asOf={histYears[nHist - 1]} next={projYears[0]} growth={a.growth} n={n}
           onChange={f => setDoc(d => ({ ...d, valuation: f(d.valuation) }))} />
         <Sources company={company} filings={doc.filings} proposals={doc.proposals} sources={sources}
-          upgrades={upgrades} onApply={applyUpgrades}
-          onFilings={f => setDoc(d => ({ ...d, filings: f(d.filings) }))}
-          onProposals={f => setDoc(d => ({ ...d, proposals: f(d.proposals) }))} />
+          upgrades={upgrades} onApply={applyUpgrades} reports={doc.reports}
+          onFilings={f => setDoc(d => ({ ...d, filings: f(d.filings) }))} onProposals={onProposals} />
       </main>
       <div className="tables">
         <Statements layout={layout} years={years} rows={rows} nHist={nHist}
@@ -553,9 +560,9 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
 }
 
 /** Flagged years as sentences, each with a switch to leave that year out of the defaults. */
-function OneOffs({ id, years, histYears, excluded, pending, note, onToggle }: {
+function OneOffs({ id, years, histYears, excluded, pending, note, onToggle, explain }: {
   id: string; years: [string, OneOff[]][]; histYears: string[]; excluded: string[]; pending: string | null
-  note: string; onToggle: (year: string) => void
+  note: string; onToggle: (year: string) => void; explain: (year: string) => ReactNode
 }) {
   const used = histYears.filter(y => !excluded.includes(y)).slice(-3) // mirrors default_assumptions(years=3)
   return (
@@ -576,6 +583,7 @@ function OneOffs({ id, years, histYears, excluded, pending, note, onToggle }: {
             {!used.includes(year) && !excluded.includes(year) && (
               <span className="muted small"> Older than the years the defaults use, so excluding it changes nothing.</span>
             )}
+            {explain(year)}
           </li>
         ))}
       </ul>

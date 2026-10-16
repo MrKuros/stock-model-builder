@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Upgrade } from './App'
-import { api, dec2, fmt, money, postJson, type Check, type Company, type Decided, type Filing, type Proposal, type Sources as Used } from './lib'
+import {
+  api, dec2, fmt, money, postJson, type Check, type Company, type Decided, type Filing, type OneOffNote, type Proposal,
+  type Report, type Sources as Used,
+} from './lib'
 
 const KIND: Record<Filing['kind'], string> = { quarter: 'Quarter', half: 'Half year', annual: 'Year', other: 'Period' }
 const PER_SHARE = new Set(['eps_basic', 'eps_diluted', 'face_value'])
@@ -24,6 +27,32 @@ const title = (f: Filing) =>
 const show = (p: Proposal) => (typeof p.value !== 'number' ? (p.value == null ? '–' : String(p.value))
   : p.unit === 'Rs crore' ? `Rs ${Math.abs(p.value) >= 100 ? money(p.value) : dec2(p.value)} cr` : `${dec2(p.value)}${p.unit ? ` ${p.unit}` : ''}`)
 const amount = (k: string, v: number) => (PER_SHARE.has(k) ? `Rs ${dec2(v)}` : money(v))
+
+export interface AiStatus { available: boolean; message: string | null; pdf?: boolean; pdf_message?: string | null }
+/** LLM_CMD set on the server (and pdftotext there)? Only the AI buttons need it; everything else works without. */
+export function useAi() {
+  const [ai, setAi] = useState<AiStatus | null>(null)
+  useEffect(() => { api<AiStatus>('/api/ai').then(setAi).catch(() => setAi(null)) }, [])
+  return ai
+}
+
+/** notes with the one-off entries rebuilt from the approved oneoff_note proposals (the last approved per year wins). */
+export function withNotes(notes: Record<string, unknown>, ps: Proposal[]): Record<string, unknown> {
+  const out = Object.fromEntries(Object.entries(notes).filter(([k]) => !k.startsWith('oneoff:')))
+  for (const p of ps) {
+    if (p.kind !== 'oneoff_note' || p.status !== 'approved') continue
+    out[`oneoff:${p.period}`] = {
+      proposal: p.id, summary: String(p.value), file: p.source.file, page: p.source.page ?? null,
+      quote: p.source.quote ?? null, from_numbers: !!p.from_numbers, ai: true,
+    } satisfies OneOffNote
+  }
+  return out
+}
+
+/** A one-off note decided locally (words only: approving just pins it). One approved note per year. */
+export const decideNote = (ps: Proposal[], p: Proposal, status: Proposal['status']) => ps.map(x => (x.id === p.id
+  ? { ...x, status } : status === 'approved' && x.kind === p.kind && x.period === p.period && x.status === 'approved'
+    ? { ...x, status: 'proposed' as const } : x))
 
 function Checks({ checks }: { checks: Check[] }) {
   if (!checks.length) return null
@@ -52,19 +81,18 @@ interface Props {
   sources?: Used // what the filings add to the model (missing on an old server)
   upgrades: Upgrade[] // defaults the last filing change moved
   onApply: () => void // use them in all three scenarios
+  reports: Report[] // annual reports attached from the unusual-years panel
 }
 
 /** Exchange filings attached to the model, read by fixed rules, and AI proposals waiting for a decision. */
-export default function Sources({ company, filings, proposals, onFilings, onProposals, sources, upgrades, onApply }: Props) {
+export default function Sources({ company, filings, proposals, onFilings, onProposals, sources, upgrades, onApply, reports }: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState('')
   const [over, setOver] = useState(false)
   const [asking, setAsking] = useState<string | null>(null) // the filing whose tags are with the model
   const head = useRef<HTMLHeadingElement>(null)
-  // LLM_CMD set on the server? Only the "Propose mappings" buttons need it; everything else works without.
-  const [ai, setAi] = useState<{ available: boolean; message: string | null } | null>(null)
-  useEffect(() => { api<typeof ai>('/api/ai').then(setAi).catch(() => setAi(null)) }, [])
+  const ai = useAi()
 
   const attach = async (file: File | undefined) => {
     if (!file || busy) return
@@ -107,7 +135,10 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
     } catch (e) { setError((e as Error).message) } finally { setBusy(null); setAsking(null) }
   }
   const decide = async (p: Proposal, status: Proposal['status']) => {
-    if (p.kind !== 'mapping') return onProposals(ps => ps.map(x => (x.id === p.id ? { ...x, status } : x)))
+    if (p.kind !== 'mapping') {
+      onProposals(ps => decideNote(ps, p, status))
+      return setNote(status === 'approved' ? `Pinned the explanation of ${p.period}.` : 'Rejected; kept here for the record.')
+    }
     if (busy) return
     setBusy(status === 'approved' ? 'Saving the mapping and reading the filings again…' : 'Saving…')
     setError(null)
@@ -233,36 +264,150 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
         </ul>
       )}
 
-      {proposals.length > 0 && (
+      {reports.length > 0 && (
         <>
-          <h3 className="src-sub">Proposals</h3>
-          <ul className="src-list" aria-label="Proposals">
-            {proposals.map(p => (
-              <li key={p.id} className={`src-item prop is-${p.status}`}>
-                <div className="src-head">
-                  <h4>{label(p.field)}{p.period && <> · {/^\d{4}-\d\d-\d\d$/.test(p.period) ? day(p.period) : p.period}</>}: <span className="prop-value">
-                    {show(p)}</span></h4>
-                  <span className="prop-status">{p.status === 'proposed' ? 'Waiting for you' : p.status === 'approved' ? 'Approved' : 'Rejected'}</span>
-                </div>
-                <p className="muted small src-meta">
-                  {p.ai && <span className="prop-ai">{p.kind === 'mapping' ? 'AI-proposed' : 'AI-read'} · </span>}
-                  {p.source.file}{p.source.page != null && <>, page {p.source.page}</>}{p.source.tag && <>, tag {p.source.tag}</>}
-                </p>
-                {p.source.quote && <blockquote className="prop-quote">“{p.source.quote}”</blockquote>}
-                {p.reasoning && <p className="small">{p.ai && <span className="muted">AI’s reasoning: </span>}{p.reasoning}</p>}
-                <Checks checks={p.checks} />
-                <div className="prop-actions">
-                  <button type="button" aria-pressed={p.status === 'approved'} onClick={() => decide(p, 'approved')}
-                    disabled={p.checks.some(c => c.pass === false)} aria-disabled={!!busy}
-                    aria-label={`Approve ${p.source.tag ?? label(p.field)} as ${label(p.field)}`}>Approve</button>
-                  <button type="button" aria-pressed={p.status === 'rejected'} onClick={() => decide(p, 'rejected')}
-                    aria-disabled={!!busy} aria-label={`Reject ${p.source.tag ?? label(p.field)} as ${label(p.field)}`}>Reject</button>
-                </div>
+          <h3 className="src-sub">Annual reports</h3>
+          <ul className="src-list" aria-label="Annual reports">
+            {reports.map(r => (
+              <li key={r.id} className="src-item">
+                <p className="small src-meta">{r.file} · {r.year} · {r.pages} pages · read by pdftotext; only the pages rules pick go to the model</p>
               </li>
             ))}
           </ul>
         </>
       )}
+
+      {proposals.length > 0 && (
+        <>
+          <h3 className="src-sub">Proposals</h3>
+          <ul className="src-list" aria-label="Proposals">
+            {proposals.map(p => <ProposalItem key={p.id} p={p} busy={!!busy} onDecide={decide} />)}
+          </ul>
+        </>
+      )}
     </section>
+  )
+}
+
+const PROP_STATUS: Record<Proposal['status'], string> = { proposed: 'Waiting for you', approved: 'Approved', rejected: 'Rejected' }
+
+/** One proposal: what was read, where from, the rule checks, and the decision. */
+export function ProposalItem({ p, busy, onDecide, as: H = 'h4' }: {
+  p: Proposal; busy: boolean; onDecide: (p: Proposal, s: Proposal['status']) => void; as?: 'h4' | 'h5'
+}) {
+  const note = p.kind === 'oneoff_note'
+  const what = note ? `the explanation of ${p.period}` : `${p.source.tag ?? label(p.field)} as ${label(p.field)}`
+  return (
+    <li className={`src-item prop is-${p.status}`}>
+      <div className="src-head">
+        <H>{note ? <>Why {p.period} was unusual</> : <>{label(p.field)}{p.period && <> · {/^\d{4}-\d\d-\d\d$/.test(p.period)
+          ? day(p.period) : p.period}</>}: <span className="prop-value">{show(p)}</span></>}</H>
+        <span className="prop-status">{PROP_STATUS[p.status]}</span>
+      </div>
+      <p className="muted small src-meta">
+        {p.ai && <span className="prop-ai">{p.kind === 'mapping' ? 'AI-proposed' : note ? 'AI-written' : 'AI-read'} · </span>}
+        {p.from_numbers ? 'From the numbers only, no filing read' : p.source.file}
+        {p.source.page != null && <>, PDF page {p.source.page}</>}{p.source.tag && <>, tag {p.source.tag}</>}
+      </p>
+      {note && <p className="prop-summary">{String(p.value)}</p>}
+      {p.source.quote && <blockquote className="prop-quote">“{p.source.quote}”</blockquote>}
+      {p.reasoning && <p className="small">{note ? <span className="muted">Flagged: </span>
+        : p.ai && <span className="muted">AI’s reasoning: </span>}{p.reasoning}</p>}
+      <Checks checks={p.checks} />
+      <div className="prop-actions">
+        <button type="button" aria-pressed={p.status === 'approved'} onClick={() => onDecide(p, 'approved')}
+          disabled={p.checks.some(c => c.pass === false)} aria-disabled={busy}
+          aria-label={`${note ? 'Pin' : 'Approve'} ${what}`}>{note ? 'Approve and pin' : 'Approve'}</button>
+        <button type="button" aria-pressed={p.status === 'rejected'} onClick={() => onDecide(p, 'rejected')}
+          aria-disabled={busy} aria-label={`Reject ${what}`}>Reject</button>
+      </div>
+    </li>
+  )
+}
+
+/** Next to a flagged year: explain it in words, from that year's annual report (rules pick the pages and check the
+ * quote) or from the numbers only. The result is a proposal; approving it pins the words, no number uses them. */
+export function Explain({ year, company, filings, report, proposals, note, ai, onProposals, onReports }: {
+  year: string; company: Company; filings: Filing[]; report?: Report; proposals: Proposal[]; note?: OneOffNote
+  ai: AiStatus | null; onProposals: (f: (ps: Proposal[]) => Proposal[]) => void; onReports: (f: (rs: Report[]) => Report[]) => void
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null)
+  const id = `explain-${year.replace(/\W+/g, '-')}`
+  const noteRef = useRef<HTMLParagraphElement>(null)
+  const askRef = useRef<HTMLDivElement>(null)
+  // the waiting proposal disappears once decided: keep keyboard focus nearby (the pinned note, or the Explain button)
+  const decided = (p: Proposal, s: Proposal['status']) => {
+    onProposals(ps => decideNote(ps, p, s))
+    setMsg({ text: s === 'approved' ? `Pinned the explanation of ${year}.` : 'Rejected; kept under Sources & proposals for the record.' })
+    setTimeout(() => (s === 'approved' ? noteRef.current : askRef.current?.querySelector('button'))?.focus())
+  }
+  const live = proposals.filter(p => p.kind === 'oneoff_note' && p.period === year && p.status === 'proposed').slice(-1)[0]
+
+  const attach = async (file: File | undefined) => {
+    if (!file || busy) return
+    setBusy(`Reading ${file.name}…`)
+    setMsg(null)
+    const body = new FormData()
+    body.append('file', file)
+    body.append('year', year)
+    try {
+      const r = await api<Report>('/api/report', { method: 'POST', body })
+      onReports(rs => [...rs.filter(x => x.year !== year), r])
+      setMsg({ text: `Attached ${r.file} (${r.pages} pages) as the ${year} annual report.` })
+    } catch (e) { setMsg({ text: (e as Error).message, bad: true }) } finally { setBusy(null) }
+  }
+  const explain = async (from: Report | null) => {
+    if (busy) return
+    setBusy(from ? `Finding the pages about ${year} in ${from.file} and asking the model…` : 'Asking the model…')
+    setMsg(null)
+    try {
+      const p = await api<Proposal>('/api/oneoffs/explain', postJson({ company, filings, year, report: from }))
+      onProposals(ps => [...ps.filter(x => x.id !== p.id), p])
+      const failed = p.checks.filter(c => c.pass === false)
+      setMsg(p.status === 'rejected'
+        ? { text: `The rules rejected the explanation: ${failed.map(c => c.detail).join(' ')} It’s kept under Sources & proposals.`, bad: true }
+        : { text: from ? `Explained from ${from.file}, PDF page ${p.source.page}; the quote is on that page. Approve it to pin it.`
+          : 'Explained from the numbers only. Approve it to pin it.' })
+    } catch (e) { setMsg({ text: (e as Error).message, bad: true }) } finally { setBusy(null) }
+  }
+  const remove = () => {
+    if (report && window.confirm(`Remove ${report.file} from this model?`)) onReports(rs => rs.filter(x => x.id !== report.id))
+  }
+  const off = !ai?.available
+  return (
+    <div className="explain">
+      {note && (
+        <p className="explain-note" ref={noteRef} tabIndex={-1}>
+          <span className="prop-ai">AI-written</span>{' '}{note.summary}{' '}
+          <span className="muted">{note.from_numbers ? '(From the numbers only, no filing read.)'
+            : <>({note.file}, PDF page {note.page}{note.quote && <>: “{note.quote}”</>})</>}</span>
+        </p>
+      )}
+      {live && <ul className="src-list explain-live" aria-label={`Explanation of ${year} waiting for you`}>
+        <ProposalItem p={live} busy={!!busy} as="h5" onDecide={decided} />
+      </ul>}
+      <div className="prop-ask" ref={askRef}>
+        {report ? <>
+          <button type="button" onClick={() => explain(report)} disabled={off} aria-disabled={!!busy}
+            aria-describedby={`${id}-why`}>{note ? 'Explain again' : 'Explain'} from the report</button>
+          <span className="muted small">{report.file}, {report.pages} pages ·{' '}
+            <button type="button" className="link" onClick={remove} aria-label={`Remove ${report.file}`}>Remove</button></span>
+        </> : <>
+          <label className={`file-btn ${busy || ai?.pdf === false ? 'is-off' : ''}`}>
+            <input type="file" accept=".pdf,application/pdf" className="visually-hidden" disabled={!!busy || ai?.pdf === false}
+              onChange={e => { attach(e.target.files?.[0]); e.target.value = '' }} />
+            Attach the {year} annual report
+          </label>
+          <button type="button" onClick={() => explain(null)} disabled={off} aria-disabled={!!busy}
+            aria-describedby={`${id}-why`}>Explain from the numbers only</button>
+        </>}
+        <span className="muted small" id={`${id}-why`} aria-busy={!!busy}>
+          {busy ?? (off ? ai?.message ?? 'The AI status is unknown; is the server running?'
+            : ai?.pdf === false && !report ? ai.pdf_message : '')}
+        </span>
+      </div>
+      <p className={`src-note ${msg?.bad ? 'is-bad' : ''}`} role="status">{msg?.text}</p>
+    </div>
   )
 }

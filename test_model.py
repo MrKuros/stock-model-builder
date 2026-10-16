@@ -789,7 +789,7 @@ def library_check(root, co, scenarios):
           "valuation": model.VALUATION}
     up = server.ModelDoc.model_validate(v4).model_dump(mode="json")
     assert up == {**v4, "version": 5, "company": {**v4["company"], "quarters": None}, "filings": [], "proposals": [],
-                  "notes": {}}, up
+                  "notes": {}, "reports": []}, up
     # saved before 3.4: no COGS line in the company, no cogs_pct / dpo in the scenarios. They come back as 0 (days stay
     # on revenue, payables stay in other liabilities) and the model projects exactly as it did
     pre = {k: {"start": x, "end": None} for k, x in PINS["synthetic"]["defaults"].items()}
@@ -820,7 +820,7 @@ def library_check(root, co, scenarios):
     val = dict(model.VALUATION, beta=1.2, kd=0.085, mid_year=False, wacc_override=0.12, price=99.5, shares=3.25)
     data = {"version": 5, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
             "excluded_years": ["FY2020"], "saved_at": None, "valuation": val, "filings": [], "proposals": [],
-            "notes": {}}
+            "notes": {}, "reports": []}
     assert server.restatements(co, root) is None, "nothing saved yet: no comparison"
     doc = server.ModelDoc.model_validate(data)
     mid, at = server.save_model(doc, root, now=datetime(2026, 10, 15, 12, 41, 5))
@@ -896,6 +896,7 @@ def library_check(root, co, scenarios):
     assert server.list_models(root) == []
     xbrl_api_check(server, root, co, data)
     ai_check(server, root, co, data)
+    oneoff_check(server, root, data)
 
 
 FAKE_LLM = """import pathlib, sys
@@ -945,7 +946,8 @@ def ai_check(server, root, co, data):
     server.MODELS = root  # never the real library
     try:
         # no LLM_CMD: a calm message, and the rest of the app works
-        assert client.get("/api/ai").json() == {"available": False, "message": ai.NOT_SET}
+        st = client.get("/api/ai").json()
+        assert (st["available"], st["message"]) == (False, ai.NOT_SET), st
         try:
             ai.llm("hi")
             raise AssertionError("expected LLMError")
@@ -1053,6 +1055,127 @@ def ai_check(server, root, co, data):
         shutil.rmtree(root / server.FILINGS, ignore_errors=True)
         with contextlib.suppress(FileNotFoundError):
             (root / server.MAPPINGS).unlink()
+
+
+def tiny_pdf(pages):
+    """A minimal text PDF (one Helvetica line per string, each page a list of strings), stdlib only."""
+    esc = lambda t: t.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")  # noqa: E731
+    n = len(pages)
+    objs = ["<< /Type /Catalog /Pages 2 0 R >>",
+            f"<< /Type /Pages /Kids [{' '.join(f'{4 + 2 * i} 0 R' for i in range(n))}] /Count {n} >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    for i, lines in enumerate(pages):
+        body = "BT /F1 11 Tf 14 TL 50 750 Td " + " ".join(f"({esc(t)}) Tj T*" for t in lines) + " ET"
+        objs += [f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> "
+                 f"/Contents {5 + 2 * i} 0 R >>", f"<< /Length {len(body)} >>\nstream\n{body}\nendstream"]
+    out, offs = "%PDF-1.4\n", []
+    for i, o in enumerate(objs):
+        offs.append(len(out))
+        out += f"{i + 1} 0 obj\n{o}\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n" + "".join(f"{o:010d} 00000 n \n" for o in offs)
+    return (out + f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").encode("latin-1")
+
+
+def oneoff_check(server, root, data):
+    """3.2b: a flagged year explained in words. With a report, rules pick the pages and a quote that isn't on the cited
+    page is rejected; without, it is marked as from the numbers only. Never used by /api/project or /api/export."""
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    client, models, env = TestClient(server.app), server.MODELS, os.environ.pop("LLM_CMD", None)
+    server.MODELS = root  # never the real library
+    company = json.loads(json.dumps(data["company"]))
+    labels = model.labels([datetime.fromisoformat(d) for d in company["dates"]])
+    i = len(labels) - 3
+    company["hist"][i]["other_income"] *= 25  # one exceptional gain: other income far above its usual share
+    year, end = labels[i], datetime.fromisoformat(company["dates"][i]).date()
+    fy = f"{end.year - 1}-{end.year % 100:02d}"
+    body = {"company": company, "year": year}
+    try:
+        assert client.post("/api/oneoffs/explain", json=body).status_code == 503, "no LLM_CMD: a calm 503"
+        calls = fake_llm(root / "llm", {"summary": "Other income jumped. It looks like a one-time gain."})
+        assert client.post("/api/oneoffs/explain", json=dict(body, year=labels[-1])).status_code == 422, "not flagged"
+        # from the numbers only: no citation, labelled
+        r = client.post("/api/oneoffs/explain", json=body)
+        assert r.status_code == 200 and calls() == 1, r.text
+        p = r.json()
+        assert (p["kind"], p["status"], p["from_numbers"], p["period"], p["ai"]) == ("oneoff_note", "proposed", True, year, True), p
+        assert p["source"] == {"file": None, "page": None, "quote": None, "tag": None} and p["value"].startswith("Other income")
+        assert p["checks"] == [{"name": "Source", "pass": None, "detail": "From the numbers only, no filing read."}]
+        prompt = (root / "llm" / "prompt-0.txt").read_text()
+        assert "No filing was read" in prompt and "other income was" in prompt and "Other income:" in prompt, prompt
+        # a summary over two sentences is retried once, then a clear error
+        calls = fake_llm(root / "llm", {"summary": "One. Two. Three."})
+        r = client.post("/api/oneoffs/explain", json=body)
+        assert r.status_code == 502 and "twice" in r.json()["detail"] and calls() == 2, r.text
+
+        if not ai.pdf_available():
+            print("pdftotext missing: skipped the annual-report part of the one-off check")
+            return
+        try:
+            ai.pdf_pages(b"<html>")
+            raise AssertionError("expected ValueError")
+        except ValueError as e:
+            assert "isn't a PDF" in str(e)
+        pdf = tiny_pdf([[f"Annual Report {fy}", "Chairman's letter. We thank our shareholders."],
+                        [f"Notes to the accounts for the year ended {end:%B} {end.day}, {end.year}",
+                         "Other income includes an exceptional gain of Rs 900 crore",
+                         "on the sale of our stake in a joint venture.", f"Financial year {fy}."],
+                        [f"Board report {fy}", "Revenue grew steadily over the year."]])
+        assert client.post("/api/report", files={"file": ("ar.pdf", b"not a pdf")}, data={"year": year}).status_code == 422
+        r = client.post("/api/report", files={"file": ("ar.pdf", pdf)}, data={"year": year})
+        assert r.status_code == 200, r.text
+        rep = r.json()
+        assert (rep["file"], rep["year"], rep["pages"], len(rep["id"])) == ("ar.pdf", year, 3, 12), rep
+        assert (root / server.REPORTS / f"{rep['id']}.json").is_file() and server.list_models(root) == []
+        pages = ai.pdf_pages(pdf)
+        assert ai.pick_pages(pages, {"oi_pct"}, end) == [2], "only the page with exceptional items / other income"
+        assert ai.mentions_year(pages, end) == 3
+        # a quote copied from the cited page passes (case, spacing and curly quotes don't matter)
+        good = {"summary": "An exceptional Rs 900 crore gain on selling a joint-venture stake lifted other income.",
+                "page": 2, "quote": "OTHER income includes an  exceptional gain of Rs 900 crore on the sale of our stake"}
+        calls = fake_llm(root / "llm", good)
+        r = client.post("/api/oneoffs/explain", json=dict(body, report=rep))
+        assert r.status_code == 200 and calls() == 1, r.text
+        p = r.json()
+        assert p["status"] == "proposed" and all(c["pass"] for c in p["checks"]), p["checks"]
+        assert p["source"] == {"file": "ar.pdf", "page": 2, "quote": good["quote"], "tag": None} and not p["from_numbers"]
+        prompt = (root / "llm" / "prompt-0.txt").read_text()
+        assert "=== PAGE 2 ===" in prompt and "PAGE 1" not in prompt and "Chairman" not in prompt, prompt
+        # a fabricated quote, or a page that wasn't sent, is rejected by the rules
+        for bad, failed in (({**good, "quote": "Other income includes a one-time insurance claim of Rs 900 crore"},
+                             {"Quote is on the page"}),
+                            ({**good, "page": 3, "quote": "Revenue grew steadily over the year."}, {"Page was read"})):
+            fake_llm(root / "llm", bad)
+            p = client.post("/api/oneoffs/explain", json=dict(body, report=rep)).json()
+            assert p["status"] == "rejected" and {c["name"] for c in p["checks"] if c["pass"] is False} == failed, p
+            assert "Page was read" in failed or "so the explanation is rejected" in next(c["detail"] for c in p["checks"] if c["name"] == "Quote is on the page")
+        # an approved note saves with the document and never feeds a number
+        doc = dict(data, company=company, reports=[rep], proposals=[dict(p, status="approved")],
+                   notes={f"oneoff:{year}": {"proposal": p["id"], "summary": p["value"], "file": "ar.pdf", "page": 2,
+                                             "quote": good["quote"], "from_numbers": False, "ai": True}})
+        mid, _ = server.save_model(server.ModelDoc.model_validate(doc), root, now=datetime(2026, 10, 16, 9, 0))
+        back = server.load_model(mid, root).model_dump(mode="json")
+        assert back["reports"] == [rep] and back["notes"] == doc["notes"], back["notes"]
+        server.delete_model(mid, root)
+        n, llm, ai.llm = calls(), ai.llm, None
+        try:
+            req = {k: doc[k] for k in ("company", "scenarios", "n", "valuation")}
+            assert client.post("/api/project", json=req).status_code == 200
+            assert client.post("/api/export", json=req).status_code == 200
+        finally:
+            ai.llm = llm
+        assert calls() == n
+        (root / server.REPORTS / f"{rep['id']}.json").unlink()
+        r = client.post("/api/oneoffs/explain", json=dict(body, report=rep))
+        assert r.status_code == 422 and "attach it again" in r.json()["detail"], r.text
+    finally:
+        server.MODELS = models
+        os.environ.pop("LLM_CMD", None)
+        if env is not None:
+            os.environ["LLM_CMD"] = env
+        shutil.rmtree(root / server.REPORTS, ignore_errors=True)
 
 
 def xbrl_api_check(server, root, co, data):
