@@ -93,4 +93,5 @@ web/src/          App, DriverStrip (assumption strips), Chart, Statements, Valua
 1. ~~Daily driver: scenarios, fades, ratios, one-offs, model library~~ ✓
 2. ~~Valuation: DCF (FCFF), sensitivity tables, reverse DCF, multiples~~ ✓
 3. ~~Richer data: BSE/NSE XBRL, AI-proposed mappings, annual-report notes, quarterly/TTM~~ ✓
-4. Analyst toolkit: forecast-vs-actual tracking, anomaly radar, peer comparison, watchlist
+4. The analyst: research note first, assumptions proposed from filings and concalls, forensic red-flag radar
+5. Hands-off coverage: fetch by ticker, automatic peers, tracking results against the forecast
