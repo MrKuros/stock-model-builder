@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Upgrade } from './App'
 import {
-  api, dec2, fmt, money, postJson, type Check, type Company, type Decided, type Filing, type OneOffNote, type Proposal,
-  type Report, type Sources as Used,
+  api, dec2, fmt, money, postJson, type ArNote, type ArValue, type Check, type Company, type Decided, type Filing,
+  type NotesPlan, type OneOffNote, type Proposal, type Report, type Sources as Used,
 } from './lib'
 
 const KIND: Record<Filing['kind'], string> = { quarter: 'Quarter', half: 'Half year', annual: 'Year', other: 'Period' }
@@ -36,23 +36,36 @@ export function useAi() {
   return ai
 }
 
-/** notes with the one-off entries rebuilt from the approved oneoff_note proposals (the last approved per year wins). */
+/** Annual-report note topics (ai.TOPICS), in reading order. */
+export const TOPICS: Record<string, string> = {
+  segments: 'Segment revenue', maturity: 'Debt maturity', capex: 'Capex', contingent: 'Contingent liabilities',
+  related: 'Related-party transactions',
+}
+
+/** notes with the one-off and annual-report entries rebuilt from the approved proposals (one per year, or per topic
+ * and year). The server reads "ar:capex:<year>" for the capex history, so the two must never disagree. */
 export function withNotes(notes: Record<string, unknown>, ps: Proposal[]): Record<string, unknown> {
-  const out = Object.fromEntries(Object.entries(notes).filter(([k]) => !k.startsWith('oneoff:')))
+  const out = Object.fromEntries(Object.entries(notes).filter(([k]) => !k.startsWith('oneoff:') && !k.startsWith('ar:')))
   for (const p of ps) {
-    if (p.kind !== 'oneoff_note' || p.status !== 'approved') continue
-    out[`oneoff:${p.period}`] = {
-      proposal: p.id, summary: String(p.value), file: p.source.file, page: p.source.page ?? null,
-      quote: p.source.quote ?? null, from_numbers: !!p.from_numbers, ai: true,
-    } satisfies OneOffNote
+    if (p.status !== 'approved') continue
+    if (p.kind === 'oneoff_note') {
+      out[`oneoff:${p.period}`] = {
+        proposal: p.id, summary: String(p.value), file: p.source.file, page: p.source.page ?? null,
+        quote: p.source.quote ?? null, from_numbers: !!p.from_numbers, ai: true,
+      } satisfies OneOffNote
+    } else if (p.kind === 'ar_note') {
+      out[`ar:${p.field}:${p.period}`] = {
+        ...(p.value as ArValue), proposal: p.id, topic: p.field, year: p.period ?? '', file: p.source.file, ai: true,
+      } satisfies ArNote
+    }
   }
   return out
 }
 
-/** A one-off note decided locally (words only: approving just pins it). One approved note per year. */
+/** A note decided (approving a one-off note just pins it). One approved note per year (and topic). */
 export const decideNote = (ps: Proposal[], p: Proposal, status: Proposal['status']) => ps.map(x => (x.id === p.id
-  ? { ...x, status } : status === 'approved' && x.kind === p.kind && x.period === p.period && x.status === 'approved'
-    ? { ...x, status: 'proposed' as const } : x))
+  ? { ...x, status } : status === 'approved' && x.kind === p.kind && x.field === p.field && x.period === p.period
+    && x.status === 'approved' ? { ...x, status: 'proposed' as const } : x))
 
 function Checks({ checks }: { checks: Check[] }) {
   if (!checks.length) return null
@@ -81,11 +94,16 @@ interface Props {
   sources?: Used // what the filings add to the model (missing on an old server)
   upgrades: Upgrade[] // defaults the last filing change moved
   onApply: () => void // use them in all three scenarios
-  reports: Report[] // annual reports attached from the unusual-years panel
+  reports: Report[] // annual reports (attached here, or from the unusual-years panel)
+  onReports: (f: (rs: Report[]) => Report[]) => void
+  years: string[] // reported years, for the report's year
+  notes: Record<string, unknown> // approved notes ("ar:segments:FY2021"...)
 }
 
 /** Exchange filings attached to the model, read by fixed rules, and AI proposals waiting for a decision. */
-export default function Sources({ company, filings, proposals, onFilings, onProposals, sources, upgrades, onApply, reports }: Props) {
+export default function Sources({
+  company, filings, proposals, onFilings, onProposals, sources, upgrades, onApply, reports, onReports, years, notes,
+}: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState('')
@@ -135,9 +153,26 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
     } catch (e) { setError((e as Error).message) } finally { setBusy(null); setAsking(null) }
   }
   const decide = async (p: Proposal, status: Proposal['status']) => {
+    if (p.kind === 'ar_note' && status === 'approved') {
+      if (busy) return
+      setBusy('Checking the note against the report again…')
+      setError(null)
+      setNote('')
+      try {
+        const report = reports.find(r => r.id === p.report)
+        const r = await api<Proposal>('/api/notes/approve', postJson({ company, filings, report, proposal: p }))
+        onProposals(ps => decideNote(ps.map(x => (x.id === p.id ? r : x)), r, 'approved'))
+        setNote(`Approved: ${TOPICS[p.field] ?? p.field} ${p.period}, from ${p.source.file}.` +
+          (p.field !== 'capex' ? '' : sources?.used.capex.includes(p.period ?? '')
+            ? ' The XBRL cash flow already gives that year’s capex, and the two agree.'
+            : ' It is now that year’s capex in the model’s history.'))
+      } catch (e) { setError((e as Error).message) } finally { setBusy(null) }
+      return
+    }
     if (p.kind !== 'mapping') {
       onProposals(ps => decideNote(ps, p, status))
-      return setNote(status === 'approved' ? `Pinned the explanation of ${p.period}.` : 'Rejected; kept here for the record.')
+      return setNote(status === 'approved' ? `Pinned the explanation of ${p.period}.` : 'Rejected; kept here for the record.'
+        + (p.kind === 'ar_note' && p.field === 'capex' && p.status === 'approved' ? ' The capex history is back to before.' : ''))
     }
     if (busy) return
     setBusy(status === 'approved' ? 'Saving the mapping and reading the filings again…' : 'Saving…')
@@ -163,7 +198,9 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
   }
   const d = sources?.drivers ?? {}
   const used = sources ? [sources.used.payables.length > 0 && d.dpo, d.ol_pct, d.lease,
-    sources.used.capex.length > 0 && d.capex_pct].filter((x): x is string => !!x) : []
+    (sources.used.capex.length > 0 || (sources.used.capex_ar?.length ?? 0) > 0) && d.capex_pct].filter((x): x is string => !!x) : []
+  const arNotes = Object.entries(notes).filter(([k]) => k.startsWith('ar:')).map(([, v]) => v as ArNote)
+    .sort((a, b) => b.year.localeCompare(a.year) || Object.keys(TOPICS).indexOf(a.topic) - Object.keys(TOPICS).indexOf(b.topic))
 
   return (
     <section className="sources" aria-labelledby="src-head">
@@ -187,7 +224,7 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
         {upgrades.length > 0 && (
           <div className="src-upgrade">
             <p className="small">
-              The filings moved these defaults:{' '}
+              The filings and approved notes moved these defaults:{' '}
               {upgrades.map((u, i) => <span key={u.key}>{i > 0 && '; '}{u.label.toLowerCase()} now{' '}
                 <span className="pencil-num">{fmt(u.to, u.kind)}</span> (base uses {fmt(u.from, u.kind)})</span>)}.
               Your assumptions haven’t changed.
@@ -264,17 +301,42 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
         </ul>
       )}
 
-      {reports.length > 0 && (
-        <>
-          <h3 className="src-sub">Annual reports</h3>
+      <section className="src-reports" aria-labelledby="src-ar-head">
+        <h3 id="src-ar-head" className="src-sub">Annual reports</h3>
+        <p className="muted small">
+          A report’s notes: segment revenue, debt maturity, capex, contingent liabilities and related-party
+          transactions. Rules pick a few pages per topic, AI reads them and quotes each figure, rules check the quotes
+          and tie the sums to the statements, and you approve. An approved capex figure becomes that year’s capex.
+        </p>
+        <AttachReport years={years} ai={ai} onReports={onReports} />
+        {reports.length > 0 && (
           <ul className="src-list" aria-label="Annual reports">
-            {reports.map(r => (
+            {[...reports].sort((a, b) => b.year.localeCompare(a.year)).map(r => (
               <li key={r.id} className="src-item">
-                <p className="small src-meta">{r.file} · {r.year} · {r.pages} pages · read by pdftotext; only the pages rules pick go to the model</p>
+                <div className="src-head">
+                  <h4>{r.year} annual report</h4>
+                  <button type="button" className="link lib-del" aria-label={`Remove ${r.file}, ${r.year} annual report`}
+                    onClick={() => {
+                      if (!window.confirm(`Remove ${r.file} from this model? Its proposals and approved notes stay.`)) return
+                      onReports(rs => rs.filter(x => x.id !== r.id))
+                      head.current?.focus()
+                    }}>Remove</button>
+                </div>
+                <p className="muted small src-meta">{r.file} · {r.pages} pages · read by pdftotext; only the pages rules pick go to the model</p>
+                {years.includes(r.year) && <ReadNotes report={r} company={company} filings={filings} ai={ai}
+                  onProposals={onProposals} />}
               </li>
             ))}
           </ul>
-        </>
+        )}
+      </section>
+
+      {arNotes.length > 0 && (
+        <section className="src-notes" aria-labelledby="src-notes-head">
+          <h3 id="src-notes-head" className="src-sub">From the annual reports</h3>
+          <p className="muted small"><span className="prop-ai">AI-read</span>, checked by rules and approved by you. Rs crore.</p>
+          {arNotes.map(n => <ArNoteView key={`${n.topic}:${n.year}`} n={n} sources={sources} />)}
+        </section>
       )}
 
       {proposals.length > 0 && (
@@ -296,23 +358,28 @@ export function ProposalItem({ p, busy, onDecide, as: H = 'h4' }: {
   p: Proposal; busy: boolean; onDecide: (p: Proposal, s: Proposal['status']) => void; as?: 'h4' | 'h5'
 }) {
   const note = p.kind === 'oneoff_note'
-  const what = note ? `the explanation of ${p.period}` : `${p.source.tag ?? label(p.field)} as ${label(p.field)}`
+  const ar = p.kind === 'ar_note' ? p.value as ArValue : null
+  const what = note ? `the explanation of ${p.period}` : ar ? `${TOPICS[p.field] ?? p.field} ${p.period}`
+    : `${p.source.tag ?? label(p.field)} as ${label(p.field)}`
   return (
     <li className={`src-item prop is-${p.status}`}>
       <div className="src-head">
-        <H>{note ? <>Why {p.period} was unusual</> : <>{label(p.field)}{p.period && <> · {/^\d{4}-\d\d-\d\d$/.test(p.period)
+        <H>{note ? <>Why {p.period} was unusual</> : ar ? <>{TOPICS[p.field] ?? p.field} · {p.period}:{' '}
+          <span className="prop-value">Rs {money(ar.total)} cr</span></> : <>{label(p.field)}{p.period && <> · {/^\d{4}-\d\d-\d\d$/.test(p.period)
           ? day(p.period) : p.period}</>}: <span className="prop-value">{show(p)}</span></>}</H>
         <span className="prop-status">{PROP_STATUS[p.status]}</span>
       </div>
       <p className="muted small src-meta">
         {p.ai && <span className="prop-ai">{p.kind === 'mapping' ? 'AI-proposed' : note ? 'AI-written' : 'AI-read'} · </span>}
         {p.from_numbers ? 'From the numbers only, no filing read' : p.source.file}
-        {p.source.page != null && <>, PDF page {p.source.page}</>}{p.source.tag && <>, tag {p.source.tag}</>}
+        {ar ? p.pages && <>, PDF pages sent {p.pages.join(', ')}</> : p.source.page != null && <>, PDF page {p.source.page}</>}
+        {p.source.tag && <>, tag {p.source.tag}</>}
       </p>
       {note && <p className="prop-summary">{String(p.value)}</p>}
-      {p.source.quote && <blockquote className="prop-quote">“{p.source.quote}”</blockquote>}
+      {ar ? <ArRows v={ar} caption={`${TOPICS[p.field] ?? p.field}, ${p.period}, as read`} />
+        : p.source.quote && <blockquote className="prop-quote">“{p.source.quote}”</blockquote>}
       {p.reasoning && <p className="small">{note ? <span className="muted">Flagged: </span>
-        : p.ai && <span className="muted">AI’s reasoning: </span>}{p.reasoning}</p>}
+        : p.ai && !ar && <span className="muted">AI’s reasoning: </span>}{p.reasoning}</p>}
       <Checks checks={p.checks} />
       <div className="prop-actions">
         <button type="button" aria-pressed={p.status === 'approved'} onClick={() => onDecide(p, 'approved')}
@@ -322,6 +389,183 @@ export function ProposalItem({ p, busy, onDecide, as: H = 'h4' }: {
           aria-disabled={busy} aria-label={`Reject ${what}`}>Reject</button>
       </div>
     </li>
+  )
+}
+
+/** The values of an annual-report note as read: label, Rs crore, PDF page and the quote it was checked against. */
+function ArRows({ v, caption }: { v: ArValue; caption: string }) {
+  return (
+    <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={caption}>
+      <table className="src-table ar-table">
+        <caption className="visually-hidden">{caption}</caption>
+        <thead><tr><th scope="col">Item</th><th scope="col">Rs crore</th><th scope="col">Page</th><th scope="col">Quote</th></tr></thead>
+        <tbody>{v.rows.map((r, i) => (
+          <tr key={i}><th scope="row">{r.label}</th><td>{money(r.amount)}</td><td>{r.page}</td>
+            <td className="ar-quote">“{r.quote}”</td></tr>
+        ))}</tbody>
+      </table>
+    </div>
+  )
+}
+
+const pct = (a: number, b: number | undefined) => (b ? `${(100 * a / b).toFixed(1)}%` : '–')
+
+/** An approved annual-report note, drawn for its topic: segment mix, maturity ladder, claims vs net worth... */
+function ArNoteView({ n, sources }: { n: ArNote; sources?: Used }) {
+  const title = TOPICS[n.topic] ?? n.topic
+  const rows = n.rows.filter(r => r.amount != null) as (ArNote['rows'][number] & { amount: number })[]
+  const max = Math.max(...rows.map(r => Math.abs(r.amount)), 1)
+  const cite = (r: { page: number; quote: string }) => <span className="muted">p. {r.page}<span className="visually-hidden">: {r.quote}</span></span>
+  const id = `arn-${n.topic}-${n.year}`
+  return (
+    <article className="ar-note" aria-labelledby={id}>
+      <h4 id={id}>{title} · {n.year} <span className="muted small">{n.file}</span></h4>
+      {n.topic === 'segments' && <>
+        <div className="seg-bar" role="img" aria-label={`Segment mix ${n.year}: ${rows.map(r => `${r.label} ${pct(r.amount, n.total)}`).join(', ')}`}>
+          {rows.map((r, i) => <span key={i} style={{ flexGrow: Math.max(r.amount, 0), opacity: 1 - (i % 4) * 0.2 }} title={`${r.label} ${pct(r.amount, n.total)}`} />)}
+        </div>
+        <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={`Segment revenue, ${n.year}`}><table className="src-table ar-table">
+          <thead><tr><th scope="col">Segment</th><th scope="col">Rs crore</th><th scope="col">Share</th><th scope="col">Source</th></tr></thead>
+          <tbody>{rows.map((r, i) => <tr key={i}><th scope="row">{r.label}</th><td>{money(r.amount)}</td><td>{pct(r.amount, n.total)}</td><td>{cite(r)}</td></tr>)}</tbody>
+        </table></div>
+      </>}
+      {n.topic === 'maturity' && (
+        <ul className="ladder" aria-label={`Debt due by period, ${n.year}`}>
+          {rows.map((r, i) => (
+            <li key={i}><span className="ladder-label">{r.label}</span>
+              <span className="ladder-bar" aria-hidden="true"><span style={{ width: `${(100 * r.amount) / max}%` }} /></span>
+              <span className="ladder-num">{money(r.amount)}</span> {cite(r)}</li>
+          ))}
+        </ul>
+      )}
+      {(n.topic === 'contingent' || n.topic === 'related') && (
+        <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={`${title}, ${n.year}`}><table className="src-table ar-table">
+          <thead><tr><th scope="col">{n.topic === 'related' ? 'Party and nature' : 'Claim'}</th><th scope="col">Rs crore</th>
+            <th scope="col">Share of {n.against?.label.toLowerCase() ?? '–'}</th><th scope="col">Source</th></tr></thead>
+          <tbody>{rows.map((r, i) => <tr key={i}><th scope="row">{r.label}</th><td>{money(r.amount)}</td>
+            <td>{pct(r.amount, n.against?.value)}</td><td>{cite(r)}</td></tr>)}</tbody>
+        </table></div>
+      )}
+      <p className="small ar-sum">
+        Total Rs {money(n.total)} cr
+        {n.against && <>{n.topic === 'contingent' ? ', ' : ' vs '}{n.topic === 'contingent'
+          ? <><b>{pct(n.total, n.against.value)}</b> of net worth (Rs {money(n.against.value)} cr)</>
+          : n.topic === 'related' ? <>{pct(n.total, n.against.value)} of revenue</>
+          : <>{n.against.label} Rs {money(n.against.value)} cr</>}</>}.
+        {n.topic === 'capex' && (sources?.used.capex.includes(n.year)
+          ? ' The XBRL cash flow for this year is used in the model (they agree).'
+          : sources?.used.capex_ar?.includes(n.year) ? ` Used as ${n.year} capex in the model’s history.` : '')}
+      </p>
+    </article>
+  )
+}
+
+/** Attach an annual-report PDF for one of the reported years (its page text stays on the server). */
+function AttachReport({ years, ai, onReports }: {
+  years: string[]; ai: AiStatus | null; onReports: (f: (rs: Report[]) => Report[]) => void
+}) {
+  const [year, setYear] = useState(years[years.length - 1])
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null)
+  const attach = async (file: File | undefined) => {
+    if (!file || busy) return
+    setBusy(`Reading ${file.name}…`)
+    setMsg(null)
+    const body = new FormData()
+    body.append('file', file)
+    body.append('year', year)
+    try {
+      const r = await api<Report>('/api/report', { method: 'POST', body })
+      onReports(rs => [...rs.filter(x => x.year !== year && x.id !== r.id), r])
+      setMsg({ text: `Attached ${r.file} (${r.pages} pages) as the ${year} annual report.` })
+    } catch (e) { setMsg({ text: (e as Error).message, bad: true }) } finally { setBusy(null) }
+  }
+  const off = !!busy || ai?.pdf === false
+  return (
+    <>
+      <div className="prop-ask">
+        <label className="ar-year">Year{' '}
+          <select value={year} onChange={e => setYear(e.target.value)} disabled={!!busy}>
+            {[...years].reverse().map(y => <option key={y}>{y}</option>)}
+          </select>
+        </label>
+        <label className={`file-btn ${off ? 'is-off' : ''}`}>
+          <input type="file" accept=".pdf,application/pdf" className="visually-hidden" disabled={off}
+            onChange={e => { attach(e.target.files?.[0]); e.target.value = '' }} />
+          Attach the {year} annual report (PDF)
+        </label>
+        <span className="muted small" aria-busy={!!busy}>{busy ?? (ai?.pdf === false ? ai.pdf_message : '')}</span>
+      </div>
+      <p className={`src-note ${msg?.bad ? 'is-bad' : ''}`} role="status">{msg?.text}</p>
+    </>
+  )
+}
+
+const tokens = (chars: number) => Math.round(chars / 4 / 100) * 100 // ponytail: ~4 characters a token for English text
+
+/** Per report: the pages rules would send per topic and the prompt size, shown before anything is sent; then one
+ * call per chosen topic. Each answer comes back as a proposal already checked by rules. */
+function ReadNotes({ report, company, filings, ai, onProposals }: {
+  report: Report; company: Company; filings: Filing[]; ai: AiStatus | null
+  onProposals: (f: (ps: Proposal[]) => Proposal[]) => void
+}) {
+  const [plan, setPlan] = useState<NotesPlan | null>(null)
+  const [pick, setPick] = useState<string[]>(Object.keys(TOPICS))
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null)
+  useEffect(() => {
+    api<NotesPlan>('/api/notes/plan', postJson({ company, report }))
+      .then(setPlan).catch(e => setMsg({ text: (e as Error).message, bad: true }))
+  }, [report.id, report.year]) // eslint-disable-line react-hooks/exhaustive-deps
+  const chosen = plan ? pick.filter(t => plan.topics[t]?.pages.length) : []
+  const pages = chosen.reduce((s, t) => s + plan!.topics[t].pages.length, 0)
+  const chars = chosen.reduce((s, t) => s + plan!.topics[t].chars, 0)
+  const read = async () => {
+    if (busy || !chosen.length) return
+    setMsg(null)
+    const done: string[] = [], bad: string[] = []
+    for (const [i, t] of chosen.entries()) {
+      setBusy(`Reading ${TOPICS[t].toLowerCase()} (${i + 1} of ${chosen.length})…`)
+      try {
+        const p = await api<Proposal>('/api/notes/extract', postJson({ company, filings, report, topic: t }))
+        onProposals(ps => [...ps.filter(x => x.id !== p.id), p])
+        done.push(`${TOPICS[t]}${p.status === 'rejected' ? ' (rejected by the rules)' : ''}`)
+      } catch (e) { bad.push(`${TOPICS[t]}: ${(e as Error).message}`) }
+    }
+    setBusy(null)
+    setMsg({ text: [done.length ? `Read ${done.join(', ')}. Check them under Proposals; nothing is used until you approve it.` : '',
+      ...bad].filter(Boolean).join(' '), bad: !done.length })
+  }
+  const id = `notes-${report.id}`
+  return (
+    <div className="read-notes">
+      {plan && (
+        <fieldset className="ar-topics" disabled={!!busy}>
+          <legend className="small">Topics to read</legend>
+          {Object.entries(TOPICS).map(([t, title]) => {
+            const x = plan.topics[t]
+            return (
+              <label key={t} className="small">
+                <input type="checkbox" checked={pick.includes(t)} disabled={!x?.pages.length}
+                  onChange={e => setPick(p => (e.target.checked ? [...p, t] : p.filter(y => y !== t)))} />{' '}
+                {title} <span className="muted">{x?.pages.length ? `PDF p. ${x.pages.join(', ')} · ${x.chars.toLocaleString('en-IN')} characters`
+                  : 'no page found'}</span>
+              </label>
+            )
+          })}
+        </fieldset>
+      )}
+      <div className="prop-ask">
+        <button type="button" onClick={read} disabled={!ai?.available || !chosen.length} aria-disabled={!!busy}
+          aria-describedby={id}>Read the notes with AI</button>
+        <span className="muted small" id={id} aria-busy={!!busy}>
+          {busy ?? (!ai?.available ? ai?.message ?? 'The AI status is unknown; is the server running?'
+            : plan ? `Sends ${pages} page${pages === 1 ? '' : 's'}, ${chars.toLocaleString('en-IN')} characters (roughly ` +
+              `${tokens(chars).toLocaleString('en-IN')} tokens) in ${chosen.length} call${chosen.length === 1 ? '' : 's'}.` : 'Finding the pages…')}
+        </span>
+      </div>
+      <p className={`src-note ${msg?.bad ? 'is-bad' : ''}`} role="status">{msg?.text}</p>
+    </div>
   )
 }
 

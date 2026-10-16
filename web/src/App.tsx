@@ -263,7 +263,7 @@ interface WorkspaceProps {
 
 function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save, onRetry }: WorkspaceProps) {
   const { company, years: histYears, ratios, defaults, checks, drivers, layout } = parsed
-  const { n, active, scenarios, valuation, filings } = doc
+  const { n, active, scenarios, valuation, filings, notes } = doc
   const a = scenarios[active]
   const setN = (n: number) => setDoc(d => ({ ...d, n }))
   const setActive = (active: Scenario) => setDoc(d => ({ ...d, active }))
@@ -291,22 +291,24 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
 
   useEffect(() => {
     const ctl = new AbortController()
-    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation, filings }, ctl.signal))
+    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation, filings, notes }, ctl.signal))
       .then(p => { setProjection(p); setError(null) })
       .catch(e => { if (e.name !== 'AbortError') { setProjection(null); setError(e.message) } })
     return () => ctl.abort()
-  }, [company, scenarios, n, valuation, filings])
+  }, [company, scenarios, n, valuation, filings, notes])
 
   // A filing attached or removed changes the history (payables, leases, cash-flow capex) and so the defaults; like
   // excluding a year, it never changes the assumptions by itself. The upgraded defaults are offered in one click.
-  const filingIds = JSON.stringify(filings.map(f => [f.id, f.facts])) // an approved mapping re-reads a filing in place
+  // an approved mapping re-reads a filing in place; an approved capex note changes that year's capex
+  const filingIds = JSON.stringify([filings.map(f => [f.id, f.facts]),
+    Object.entries(notes).filter(([k]) => k.startsWith('ar:capex:'))])
   const seenIds = useRef(filingIds)
   const [upgrades, setUpgrades] = useState<Upgrade[]>([])
   useEffect(() => {
     if (filingIds === seenIds.current) return
     seenIds.current = filingIds
     const before = parsed.defaults
-    api<Parsed>('/api/company', postJson({ company, excluded_years: doc.excluded_years, filings }))
+    api<Parsed>('/api/company', postJson({ company, excluded_years: doc.excluded_years, filings, notes }))
       .then(p => {
         setParsed(p)
         // moved now, or offered before and not taken; and only where base still differs from the new default
@@ -332,7 +334,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
   const exportXlsx = async () => {
     setExporting(true)
     try {
-      const res = await fetch('/api/export', postJson({ company, scenarios, active, n, valuation, filings }))
+      const res = await fetch('/api/export', postJson({ company, scenarios, active, n, valuation, filings, notes }))
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? 'Export failed. Try again.')
       const url = URL.createObjectURL(await res.blob())
       const link = Object.assign(document.createElement('a'), { href: url, download: `${company.name} model.xlsx` })
@@ -382,7 +384,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
     const next = excluded.includes(year) ? excluded.filter(y => y !== year) : [...excluded, year]
     setPending(year)
     try {
-      const d = await api<Record<string, number>>('/api/defaults', postJson({ company, excluded_years: next, filings }))
+      const d = await api<Record<string, number>>('/api/defaults', postJson({ company, excluded_years: next, filings, notes }))
       setDefaults(d)
       setDoc(doc => ({ ...doc, excluded_years: next }))
       setDefaultsNote(`Defaults ${next.length ? `now leave out ${histYears.filter(y => next.includes(y)).join(', ')}` : 'use every year again'}. ` +
@@ -544,7 +546,8 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
           market={company.market} active={active} asOf={histYears[nHist - 1]} next={projYears[0]} growth={a.growth} n={n}
           onChange={f => setDoc(d => ({ ...d, valuation: f(d.valuation) }))} />
         <Sources company={company} filings={doc.filings} proposals={doc.proposals} sources={sources}
-          upgrades={upgrades} onApply={applyUpgrades} reports={doc.reports}
+          upgrades={upgrades} onApply={applyUpgrades} reports={doc.reports} years={histYears} notes={notes}
+          onReports={f => setDoc(d => ({ ...d, reports: f(d.reports) }))}
           onFilings={f => setDoc(d => ({ ...d, filings: f(d.filings) }))} onProposals={onProposals} />
       </main>
       <div className="tables">

@@ -652,7 +652,7 @@ def _debt(r):
     return r["borrowings"] + (r.get("lease") or 0.0)
 
 
-def upgrade(co, filings=()):
+def upgrade(co, filings=(), capex=None):
     """The company with what attached annual XBRL filings add, by rules (no AI): a copy, co is untouched. A filing is
     used for the reported year ending on its period end when its revenue is within 1% of Export's (consolidated
     first, one filing per year). Per year it can add
@@ -661,10 +661,12 @@ def upgrade(co, filings=()):
         else Export's borrowings less the filing's borrowings (results filings carry no lease element; JSW Steel
         FY2024: 87,984 - 85,575 = 2,409 = Export's own lease line);
       - capex = purchase of PP&E + intangibles from its cash flow, instead of the net block change.
-    Totals never change, so the balance sheet still ties. Adds "sources": {basis, drivers {key: text}, notes}."""
+    `capex` {year label: Rs crore} is cash-flow capex read from annual reports and approved by the user (3.3); it
+    fills years no filing gives. Totals never change, so the balance sheet still ties. Adds "sources": {basis,
+    drivers {key: text}, notes}."""
     hist, lab = [dict(h) for h in co["hist"]], labels(co["dates"])
     at = {d.date(): i for i, d in enumerate(co["dates"])}
-    used, notes, done = {"payables": [], "lease": [], "capex": []}, [], set()
+    used, notes, done = {"payables": [], "lease": [], "capex": [], "capex_ar": []}, [], set()
     for f in sorted(filings, key=lambda f: f.get("consolidated") is not True):
         end = _iso(f.get("period_end") or "")
         i = at.get(end.date()) if end else None
@@ -706,6 +708,12 @@ def upgrade(co, filings=()):
             h["capex_cf"] = h["capex"] = x["purchase_ppe"] + x.get("purchase_intangibles", 0.0)
             h["fcf"] = None if h["cfo"] is None else h["cfo"] - h["capex"]
             used["capex"].append(y)
+    for y, v in (capex or {}).items():
+        if y in lab and y not in used["capex"]:  # an XBRL cash flow for the year wins (the approval checked they agree)
+            h = hist[lab.index(y)]
+            h["capex_cf"] = h["capex"] = v
+            h["fcf"] = None if h["cfo"] is None else h["cfo"] - v
+            used["capex_ar"].append(y)
     for i, h in enumerate(hist):
         h.update(returns(h, hist[i - 1] if i else None))
     used = {k: sorted(v, key=lab.index) for k, v in used.items()}
@@ -722,8 +730,10 @@ def _sources(hist, used, notes):
     d = {"dio": why[0].upper() + why[1:],
          "dpo": (f"Trade payables from XBRL {ys('payables')}, on {base}" if used["payables"] else
                  "No trade payables in the attached annual filings; they stay in other liabilities"),
-         "capex_pct": (f"Cash-flow capex from XBRL {ys('capex')}; other years from the net block change" if used["capex"]
-                       else "From the net block change, from Export")}
+         "capex_pct": ("Cash-flow capex from " + " and ".join(x for x in (
+             used["capex"] and f"XBRL {ys('capex')}", used["capex_ar"] and f"the annual report {ys('capex_ar')} (approved)") if x)
+             + "; other years from the net block change" if used["capex"] or used["capex_ar"]
+             else "From the net block change, from Export")}
     if cogs:
         d["cogs_pct"] = "From Export (raw material cost less change in inventory)"
     if used["payables"]:
@@ -1548,7 +1558,9 @@ def to_excel(co, scenarios, n=5, active="base", val=None):
     ws["A1"].font = Font(bold=True, size=14)
     got = "; ".join(f"{what} {', '.join(used[k])}" for k, what in (
         ("payables", "trade payables"), ("lease", "lease liabilities"), ("capex", "cash-flow capex")) if used.get(k))
+    ar = ", ".join(used.get("capex_ar") or [])
     ws["A2"] = ("Rs crore. Source: Export.in export" + (f", plus XBRL filings ({got})" if got else "")
+                + (f", plus cash-flow capex read from the annual report and approved ({ar})" if ar else "")
                 + ". Blue = input (B3 and the Scenarios sheet), green = picked from the Scenarios sheet, black = formula. "
                 + f"Inventory and payable days are on {'COGS' if cogs else 'revenue'}.")
     ws["A2"].font = Font(italic=True, color="808080")
