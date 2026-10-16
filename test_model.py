@@ -564,7 +564,8 @@ def upgrade_check(tmp, co, excel):
         assert abs(liab + u["other_liab"] - h["total_liab"]) < 1e-9 and model._debt(u) == h["borrowings"], u
         assert all(u[k] == h[k] for k in RETURNS), u
     src = up["sources"]
-    assert src["used"] == {"payables": ["FY2024", "FY2025"], "lease": ["FY2025"], "capex": ["FY2024", "FY2025"]}, src
+    assert src["used"] == {"payables": ["FY2024", "FY2025"], "lease": ["FY2025"], "capex": ["FY2024", "FY2025"],
+                           "capex_ar": []}, src
     assert src["basis"] == "cogs" and src["drivers"]["dpo"] == "Trade payables from XBRL FY2024, FY2025, on COGS", src
     assert src["notes"] == [], "the consolidated filing already covers FY2025; the second one is simply not needed"
     later = dict(co, dates=co["dates"][:-1], hist=co["hist"][:-1])  # FY2025 isn't in this file
@@ -598,10 +599,18 @@ def upgrade_check(tmp, co, excel):
     assert not model.on_cogs(rev["hist"]) and up_rev["sources"]["basis"] == "revenue", up_rev["sources"]
     assert model.default_assumptions(rev["hist"])["dio"] == PINS["synthetic"]["defaults"]["dio"]
     assert model.on_cogs([dict(h, cogs=0.09 * h["revenue"]) for h in co["hist"]]) is False
+    # approved annual-report capex (3.3) fills a year no filing covers; an XBRL cash flow for the year wins
+    up_ar = model.upgrade(co, [f25], {"FY2023": 70.0, "FY2025": 1.0, "FY1999": 5.0})
+    u23 = up_ar["hist"][-3]
+    assert u23["capex"] == u23["capex_cf"] == 70.0 and u23["fcf"] == u23["cfo"] - 70.0, u23
+    assert up_ar["hist"][-1]["capex"] == 88.25 and up_ar["sources"]["used"]["capex_ar"] == ["FY2023"], up_ar["sources"]
+    assert up_ar["sources"]["drivers"]["capex_pct"] == ("Cash-flow capex from XBRL FY2025 and the annual report FY2023 "
+                                                       "(approved); other years from the net block change")
+    assert model.upgrade(co, [], None)["hist"] == model.upgrade(co)["hist"] == co["hist"], "no notes: unchanged"
     if not excel:
         return
     rows = {key: 5 + i for i, (_, key, _) in enumerate(model.LAYOUT) if key}
-    for name, comp in (("cogs", up), ("rev", up_rev)):
+    for name, comp in (("cogs", up), ("rev", up_rev), ("ar", model.upgrade(co, [], {"FY2023": 70.0}))):
         base = {k: {"start": x, "end": None} for k, x in model.default_assumptions(comp["hist"]).items()}
         base.update(dpo={"start": 40.0, "end": 70.0}, cogs_pct={"start": 0.5, "end": 0.45}, debt_change={"start": -60.0, "end": None})
         sc = {"base": base, "bull": dict(base, growth={"start": 0.2, "end": None}),
@@ -625,7 +634,8 @@ def upgrade_check(tmp, co, excel):
                                                             "capex", "fcf", "total_liab", *RETURNS)},
                                     **{k: rh[j][k] for k in ("cogs_pct", "dio", "dpo", "int_rate", "capex_pct", "ol_pct",
                                                              "debt_change")}}, (name, "hist", j))
-        assert ("XBRL filings" in ws["A2"].value) and (("on COGS" if name == "cogs" else "on revenue") in ws["A2"].value)
+        assert ("annual report and approved (FY2023)" if name == "ar" else "XBRL filings") in ws["A2"].value, ws["A2"].value
+        assert ("on revenue" if name == "rev" else "on COGS") in ws["A2"].value
 
 
 def _flat_scenarios(co):
@@ -897,6 +907,7 @@ def library_check(root, co, scenarios):
     xbrl_api_check(server, root, co, data)
     ai_check(server, root, co, data)
     oneoff_check(server, root, data)
+    ar_notes_check(server, root, co, data)
 
 
 FAKE_LLM = """import pathlib, sys
@@ -1170,6 +1181,154 @@ def oneoff_check(server, root, data):
         (root / server.REPORTS / f"{rep['id']}.json").unlink()
         r = client.post("/api/oneoffs/explain", json=dict(body, report=rep))
         assert r.status_code == 422 and "attach it again" in r.json()["detail"], r.text
+    finally:
+        server.MODELS = models
+        os.environ.pop("LLM_CMD", None)
+        if env is not None:
+            os.environ["LLM_CMD"] = env
+        shutil.rmtree(root / server.REPORTS, ignore_errors=True)
+
+
+def ar_notes_check(server, root, co, data):
+    """3.3: annual-report notes. Rules pick the pages per topic and show the prompt size first; the LLM (a fake
+    LLM_CMD) extracts values with page and quote; rules convert units, check quotes and numbers and tie the sums to
+    the statements; approving re-checks with no LLM call; an approved capex note feeds the capex history."""
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    client, models, env = TestClient(server.app), server.MODELS, os.environ.pop("LLM_CMD", None)
+    server.MODELS = root  # never the real library
+    h = co["hist"][-1]
+    rev, seg = h["revenue"], round(0.6 * h["revenue"], 2)
+    pdf = tiny_pdf([
+        ["Annual Report 2024-25", "Chairman's letter. We thank our shareholders."],
+        ["Notes to the consolidated financial statements for the year ended March 31, 2025",
+         "Segment information (Rs in crore)", f"Steel revenue from operations {seg:,.2f}",
+         f"Power revenue from operations {rev - seg:,.2f}"],
+        ["Liquidity risk: contractual maturities of borrowings as at March 31, 2025 (Rs in crore)",
+         "Due within 1 year 50.00", "Due in 1 to 5 years 120.00", "Due after 5 years 30.00"],
+        ["Consolidated statement of cash flows for the year ended March 31, 2025 (Rs in crore)",
+         "Cash flows from investing activities", "Purchase of property, plant and equipment (88.25)"],
+        ["Contingent liabilities as at March 31, 2025 (Rs in crore)",
+         "Claims against the Company not acknowledged as debts 12.50", "Income tax demands under appeal 7.25"],
+        ["Related party transactions 2024-25 (Rs in lakh)", "Holding company royalty paid 1,250.00"],
+    ])
+    item = lambda label, amount, page, quote: {"label": label, "amount": amount, "page": page, "quote": quote}  # noqa: E731
+    segs = {"found": True, "unit": "crore", "items": [
+        item("Steel", seg, 2, f"steel revenue from  operations {seg:,.2f}"),
+        item("Power", f"{rev - seg:,.2f}", 2, f"Power revenue from operations {rev - seg:,.2f}")]}
+    try:
+        if not ai.pdf_available():
+            print("pdftotext missing: skipped the annual-report notes check")
+            return
+        rep = client.post("/api/report", files={"file": ("ar.pdf", pdf)}, data={"year": "FY2025"}).json()
+        body = {"company": data["company"], "report": rep}
+        # before anything is sent: the pages per topic and the exact prompt size, no LLM needed
+        plan = client.post("/api/notes/plan", json=body).json()
+        assert {t: x["pages"] for t, x in plan["topics"].items()} == {
+            "segments": [2], "maturity": [3], "capex": [4], "contingent": [5], "related": [6]}, plan
+        pages = ai.pdf_pages(pdf)
+        end = datetime(2025, 3, 31).date()
+        want = len(ai.note_prompt("segments", "FY2025", end, [(2, ai.page_text(pages[1]))]))
+        assert plan["topics"]["segments"]["chars"] == want and plan["chars"] == sum(
+            x["chars"] for x in plan["topics"].values()), plan
+        ext = lambda topic, **kw: client.post("/api/notes/extract", json={**body, "topic": topic, **kw})  # noqa: E731
+        assert ext("segments").status_code == 503, "no LLM_CMD: a calm 503"
+        assert client.post("/api/notes/plan", json=dict(body, report=dict(rep, year="FY2031"))).status_code == 422
+        # segments: values with page and quote, in crore, summing to Screener's revenue
+        calls = fake_llm(root / "llm", "Here:\n" + json.dumps(segs))
+        r = ext("segments")
+        assert r.status_code == 200 and calls() == 1, r.text
+        p = r.json()
+        prompt = (root / "llm" / "prompt-0.txt").read_text()
+        assert "=== PAGE 2 ===" in prompt and "PAGE 1 " not in prompt and "Chairman" not in prompt, prompt
+        assert (p["kind"], p["field"], p["status"], p["unit"], p["period"], p["ai"]) == (
+            "ar_note", "segments", "proposed", "Rs crore", "FY2025", True), p
+        assert all(c["pass"] for c in p["checks"]), p["checks"]
+        assert abs(p["value"]["total"] - rev) < 0.01 and p["value"]["rows"][1]["amount"] == round(rev - seg, 2), p["value"]
+        assert p["source"] == {"file": "ar.pdf", "page": 2, "quote": segs["items"][0]["quote"], "tag": None}
+        tie = next(c for c in p["checks"] if c["name"] == "Ties to the statements")
+        assert "Screener's FY2025 revenue" in tie["detail"] and "within 2%" in tie["detail"], tie
+        # a failing tie-out: one segment left out, the sum is 40% short, so rules reject it and approval refuses it
+        short = dict(segs, items=segs["items"][:1])
+        fake_llm(root / "llm", short)
+        p_short = ext("segments").json()
+        failed = lambda p: {c["name"] for c in p["checks"] if c["pass"] is False}  # noqa: E731
+        assert p_short["status"] == "rejected" and failed(p_short) == {"Ties to the statements"}, p_short["checks"]
+        r = client.post("/api/notes/approve", json={**body, "proposal": p_short})
+        assert r.status_code == 422 and "40.0%" in r.json()["detail"], r.text
+        # a fabricated quote, an amount that isn't in its quote, a page that wasn't sent, a unit the page doesn't use
+        for bad, names in ((dict(segs, items=[dict(segs["items"][0], quote="Steel revenue rose to a record high"),
+                                              segs["items"][1]]), {"Quotes are on their pages", "Numbers are in their quotes"}),
+                           (dict(segs, items=[dict(segs["items"][0], amount=seg + 100), segs["items"][1]]),
+                            {"Numbers are in their quotes", "Ties to the statements"}),
+                           (dict(segs, items=[dict(segs["items"][0], page=3), segs["items"][1]]),
+                            {"Pages were read", "Quotes are on their pages"}),
+                           (dict(segs, unit="million"), {"Unit", "Ties to the statements"})):
+            fake_llm(root / "llm", bad)
+            q = ext("segments").json()
+            assert q["status"] == "rejected" and failed(q) == names, (names, q["checks"])
+        # units are converted by rules: lakh to crore (1,250 lakh = Rs 12.50 crore)
+        fake_llm(root / "llm", {"found": True, "unit": "lakh", "items": [
+            item("Holding company: royalty paid", "1,250.00", 6, "Holding company royalty paid 1,250.00")]})
+        q = ext("related").json()
+        assert q["status"] == "proposed" and q["value"]["rows"][0]["amount"] == 12.5, q
+        assert q["value"]["against"] == {"label": "Revenue", "value": rev}, q["value"]
+        # maturity buckets tie to borrowings (200) within 5%; capex ties to the XBRL cash flow when there is one
+        fake_llm(root / "llm", {"found": True, "unit": "crore", "items": [
+            item("Within 1 year", 50, 3, "Due within 1 year 50.00"), item("1-5 years", 120, 3, "Due in 1 to 5 years 120.00"),
+            item("After 5 years", 30, 3, "Due after 5 years 30.00")]})
+        q = ext("maturity").json()
+        assert q["status"] == "proposed" and q["value"]["total"] == 200.0 == h["borrowings"], q["checks"]
+        capex = {"found": True, "unit": "crore", "items": [
+            item("Purchase of property, plant and equipment", "(88.25)", 4, "Purchase of property, plant and equipment (88.25)")]}
+        fake_llm(root / "llm", capex)
+        f25 = _filing(co, -1)
+        assert f25["facts"]["purchase_ppe"] == 88.25
+        q = ext("capex", filings=[f25]).json()
+        assert q["status"] == "proposed" and "XBRL cash-flow capex" in q["checks"][-1]["detail"], q["checks"]
+        off = dict(f25, facts=dict(f25["facts"], purchase_ppe=120.0))
+        assert failed(ext("capex", filings=[off]).json()) == {"Ties to the statements"}
+        # no filing: nothing to compare with (a note); approving re-checks by rules with no LLM call
+        n = calls() + 1
+        p_cap = ext("capex").json()
+        assert p_cap["status"] == "proposed" and p_cap["checks"][-1]["pass"] is None and calls() == n, p_cap["checks"]
+        assert p_cap["value"]["total"] == p_cap["value"]["rows"][0]["amount"] == 88.25, "an outflow in brackets is a size"
+        fake_llm(root / "llm", {"found": False})
+        r = ext("contingent")
+        assert r.status_code == 422 and "found no contingent liabilities" in r.json()["detail"], r.text
+        calls = fake_llm(root / "llm", "not json", "still not json")
+        r = ext("contingent")
+        assert r.status_code == 502 and "twice" in r.json()["detail"] and calls() == 2, r.text
+        llm, ai.llm = ai.llm, None  # from here on, any LLM call fails loudly
+        try:
+            r = client.post("/api/notes/approve", json={**body, "proposal": p})
+            assert r.status_code == 200 and r.json()["status"] == "approved" and r.json()["id"] == p["id"], r.text
+            tampered = dict(p, reply=dict(segs, items=[dict(segs["items"][0], quote="made up text here"), segs["items"][1]]))
+            assert client.post("/api/notes/approve", json={**body, "proposal": tampered}).status_code == 422
+            assert client.post("/api/notes/approve", json={**body, "proposal": {"kind": "mapping"}}).status_code == 422
+            # an approved capex note feeds the capex history (sources say so); /api/project and /api/export use it
+            notes = {"ar:capex:FY2025": {"proposal": p_cap["id"], "topic": "capex", "year": "FY2025",
+                                         "total": 150.0, "rows": p_cap["value"]["rows"], "ai": True}}
+            got = client.post("/api/company", json={"company": data["company"], "notes": notes}).json()
+            assert got["sources"]["used"]["capex_ar"] == ["FY2025"] and got["hist"][-1]["capex"] == 150.0, got["sources"]
+            plain = client.post("/api/company", json={"company": data["company"]}).json()
+            assert plain["hist"][-1]["capex"] == 97.0 and got["defaults"]["capex_pct"] != plain["defaults"]["capex_pct"]
+            req = {k: data[k] for k in ("company", "scenarios", "n", "valuation")}
+            with_note = client.post("/api/project", json={**req, "notes": notes}).json()
+            without = client.post("/api/project", json=req).json()
+            assert with_note["scenarios"] == without["scenarios"], "history capex alone doesn't move projections"
+            assert client.post("/api/export", json={**req, "notes": notes}).status_code == 200
+            # the document keeps the proposals and notes (version 5)
+            doc = dict(data, reports=[rep], proposals=[dict(p, status="approved"), p_short], notes=notes)
+            mid, _ = server.save_model(server.ModelDoc.model_validate(doc), root, now=datetime(2026, 10, 16, 9, 0))
+            back = server.load_model(mid, root).model_dump(mode="json")
+            assert back["notes"] == notes and [x["status"] for x in back["proposals"]] == ["approved", "rejected"]
+            server.delete_model(mid, root)
+        finally:
+            ai.llm = llm
+        assert ai.amount("1,64,177") == 164177.0 and ai.amount("(34)") == -34.0 and ai.amount("n/a") is None
+        assert ai.in_quote(164177.0, "Total 1,64,177") and not ai.in_quote(16417.0, "Total 1,64,177")
     finally:
         server.MODELS = models
         os.environ.pop("LLM_CMD", None)

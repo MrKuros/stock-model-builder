@@ -80,9 +80,19 @@ export interface Proposal {
   period: string | null; source: { file: string | null; page?: number | null; quote?: string | null; tag?: string | null }
   reasoning: string; checks: Check[]; status: 'proposed' | 'approved' | 'rejected'; ai: boolean
   filing?: string // a mapping: the id of the filing whose unmapped tag it maps
-  report?: string | null // a one-off note: the report it was read from (null: from the numbers only)
+  report?: string | null // a one-off or annual-report note: the report it was read from (null: from the numbers only)
   from_numbers?: boolean
+  pages?: number[] // an annual-report note: the PDF pages rules picked and sent
+  reply?: unknown // an annual-report note: the model's reply as given, re-checked by rules on approval
 }
+/** One value of an annual-report note, in Rs crore (converted by rules), with where it was read. */
+export interface ArRow { label: string; amount: number | null; raw: unknown; page: number; quote: string }
+/** An annual-report note's value (proposal.value for kind ar_note): rows, their sum, and what it's compared with. */
+export interface ArValue { rows: ArRow[]; total: number; against: { label: string; value: number } | null }
+/** An approved annual-report note, notes[`ar:${topic}:${year}`]. AI-read, rule-checked, approved by you. */
+export interface ArNote extends ArValue { proposal: string; topic: string; year: string; file: string | null; ai: true }
+/** POST /api/notes/plan: the pages rules pick per topic and the exact prompt size, before anything is sent. */
+export interface NotesPlan { topics: Record<string, { title: string; pages: number[]; chars: number }>; chars: number }
 /** An attached annual-report PDF (POST /api/report); its page text stays on the server. */
 export interface Report { id: string; file: string; year: string; pages: number }
 /** An approved one-off explanation, notes[`oneoff:${year}`]: words only, AI-written, never a number. */
@@ -115,7 +125,7 @@ export interface Sources {
   basis: 'cogs' | 'revenue' // inventory and payable days run on this
   drivers: Record<string, string> // driver key (and 'lease') -> a short sentence, e.g. "Trade payables from XBRL FY2024, on COGS"
   notes: string[] // filings that weren't used, and why
-  used: Record<'payables' | 'lease' | 'capex', string[]> // year labels
+  used: Record<'payables' | 'lease' | 'capex', string[]> & { capex_ar?: string[] } // year labels; capex_ar: approved annual-report capex
 }
 export interface Parsed {
   company: Company

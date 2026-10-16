@@ -156,6 +156,7 @@ class ModelRequest(BaseModel):
     n: int = 5
     valuation: Valuation = Valuation()
     filings: list[Filing] = []
+    notes: dict = {}  # "oneoff:FY2020" (3.2b, words), "ar:<topic>:FY2021" (3.3); an approved capex note feeds capex
 
     @model_validator(mode="after")
     def _new_drivers(self):
@@ -171,8 +172,8 @@ class ModelRequest(BaseModel):
         return self
 
     def upgraded(self):
-        """The company with what the attached filings add (model.upgrade), as the engine uses it."""
-        return model.upgrade(self.company.model_dump(), [f.model_dump() for f in self.filings])
+        """The company with what the attached filings and approved capex notes add (model.upgrade), as the engine uses it."""
+        return model.upgrade(self.company.model_dump(), [f.model_dump() for f in self.filings], ar_capex(self.notes))
 
     def args(self):
         if not 1 <= self.n <= 15:
@@ -215,7 +216,8 @@ class ModelDoc(ModelRequest):
     # page, quote, tag}, reasoning, checks: [{name, pass, detail}], status (proposed | approved | rejected), ai}];
     # notes: approved oneoff_note / ar_note results keyed for display
     proposals: list[dict] = []
-    notes: dict = {}  # "oneoff:FY2020": {proposal, summary, file, page, quote, from_numbers, ai} (3.2b)
+    # notes (in ModelRequest): "oneoff:FY2020": {proposal, summary, file, page, quote, from_numbers, ai} (3.2b);
+    # "ar:segments:FY2021": {proposal, topic, year, file, rows, total, against, ai} (3.3)
     reports: list[Report] = []  # attached annual reports (3.2b); added within version 5, so it defaults to none
 
     @model_validator(mode="after")
@@ -224,10 +226,21 @@ class ModelDoc(ModelRequest):
         return self
 
 
-def _company_payload(co, excluded=(), filings=()):
+def ar_capex(notes):
+    """{year label: Rs crore} from approved annual-report capex notes ("ar:capex:FY2021"); the client keeps notes
+    in step with the approved proposals, and the server's rules checked each before approving it."""
+    out = {}
+    for k, v in (notes or {}).items():
+        t = isinstance(v, dict) and v.get("total")
+        if k.startswith("ar:capex:") and isinstance(t, (int, float)) and math.isfinite(t) and t >= 0:
+            out[k.removeprefix("ar:capex:")] = float(t)
+    return out
+
+
+def _company_payload(co, excluded=(), filings=(), notes=None):
     """What the dashboard derives from the company. Ratios, defaults and one-offs use the upgraded history (with the
     filings' payables, leases and cash-flow capex); "company" stays as parsed, for the document."""
-    labels, q, up = model.labels(co["dates"]), co.get("quarters"), model.upgrade(co, filings)
+    labels, q, up = model.labels(co["dates"]), co.get("quarters"), model.upgrade(co, filings, ar_capex(notes))
     return {
         "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
                     "market": co.get("market") or Market().model_dump(),
@@ -458,6 +471,125 @@ def explain(req: ExplainRequest):
             "status": "proposed" if ok else "rejected", "ai": True}
 
 
+# ---------- annual-report notes (3.3): rules pick pages per topic, the LLM extracts, rules check, the user approves ----------
+
+class NotesRequest(BaseModel):
+    company: Company
+    filings: list[Filing] = []
+    report: Report
+    topic: str | None = None  # extract: one of ai.TOPICS
+
+    def year(self):
+        """(row index, year end) of the report's year in the company's reported years."""
+        co = self.company
+        labels = model.labels(co.dates)
+        if self.report.year not in labels:
+            raise HTTPException(422, f"{self.report.year} isn't one of the reported years in this model.")
+        i = labels.index(self.report.year)
+        return i, co.dates[i].date()
+
+    def pages(self):
+        raw = MODELS / REPORTS / f"{self.report.id}.json"
+        if not raw.is_file():
+            raise HTTPException(422, f"The text of {self.report.file} isn't on this machine any more; attach it again.")
+        return [tuple(p) for p in json.loads(raw.read_bytes())["pages"]]
+
+
+def _against(req, topic, i):
+    """What a topic's sum must tie to, [(label, Rs crore)], from Screener and the filings (rules)."""
+    y = req.report.year
+    h, up = req.company.hist[i], model.upgrade(req.company.model_dump(), [f.model_dump() for f in req.filings])
+    u = up["hist"][i]
+    if topic == "segments":
+        return [(f"Screener's {y} revenue", h["revenue"])]
+    if topic == "maturity":
+        return [(f"Screener's {y} borrowings (incl. leases)", h["borrowings"])] + (
+            [(f"{y} borrowings without leases (XBRL)", u["borrowings"])] if u.get("lease") else [])
+    if topic == "capex":
+        return [(f"the XBRL cash-flow capex for {y}", u["capex_cf"])] if y in up["sources"]["used"]["capex"] else []
+    return None
+
+
+def _ar_note(req, topic, reply, sent, pages):
+    """The ar_note proposal for one topic's reply: values converted to Rs crore and checked by rules (ai.note_checks).
+    A failed check comes back rejected (kept for audit)."""
+    i, end = req.year()
+    h, r = req.company.hist[i], req.report
+    rows, total, checks = ai.note_checks(topic, reply, pages, sent, end, _against(req, topic, i))
+    ref = {"contingent": ("Net worth", h["share_cap"] + h["reserves"]), "related": ("Revenue", h["revenue"])}.get(topic)
+    against = (_against(req, topic, i) or [None])[0] or ref
+    first = rows[0]
+    ok = all(c["pass"] is not False for c in checks)
+    return {"id": hashlib.sha1(f"ar:{topic}:{r.id}:{json.dumps(reply, sort_keys=True)}".encode()).hexdigest()[:12],
+            "kind": "ar_note", "field": topic, "value": {"rows": rows, "total": total,
+                                                          "against": against and {"label": against[0], "value": against[1]}},
+            "unit": "Rs crore", "period": r.year,
+            "source": {"file": r.file, "page": first["page"], "quote": first["quote"], "tag": None},
+            "report": r.id, "pages": sent, "reply": reply,
+            "reasoning": f"{ai.TOPICS[topic][0]} read from PDF page{'s' if len(sent) > 1 else ''} "
+                         f"{', '.join(map(str, sent))}; printed in {reply['unit']}.",
+            "checks": checks, "status": "proposed" if ok else "rejected", "ai": True}
+
+
+def _topic(t):
+    if t not in ai.TOPICS:
+        raise HTTPException(422, f"Unknown topic {t!r}; one of {', '.join(ai.TOPICS)}.")
+    return t
+
+
+@app.post("/api/notes/plan")
+def notes_plan(req: NotesRequest):
+    """Before anything is sent: the pages rules pick per topic and the exact prompt size, so the cost shows first."""
+    _, end = req.year()
+    pages, out = req.pages(), {}
+    for t, (title, _, _) in ai.TOPICS.items():
+        sent = ai.pick_topic_pages(pages, t, end)
+        chars = len(ai.note_prompt(t, req.report.year, end, [(n, ai.page_text(pages[n - 1])) for n in sent])) if sent else 0
+        out[t] = {"title": title, "pages": sent, "chars": chars}
+    return {"topics": out, "chars": sum(x["chars"] for x in out.values())}
+
+
+@app.post("/api/notes/extract")
+def notes_extract(req: NotesRequest):
+    """One topic: rules pick the pages, the LLM extracts values with page and quote, rules check every value."""
+    if not ai.available():
+        raise HTTPException(503, ai.NOT_SET)
+    topic, (_, end) = _topic(req.topic), req.year()
+    pages = req.pages()
+    sent = ai.pick_topic_pages(pages, topic, end)
+    title = ai.TOPICS[topic][0].lower()
+    if not sent:
+        raise HTTPException(422, f"No page of {req.report.file} looks like the {title} note.")
+    try:
+        reply = ai.extract_note(topic, req.report.year, end, [(n, ai.page_text(pages[n - 1])) for n in sent])
+    except ai.LLMError as e:
+        raise HTTPException(502, str(e))
+    if reply.get("found") is False:
+        raise HTTPException(422, f"The model found no {title} on PDF pages {', '.join(map(str, sent))}.")
+    return _ar_note(req, topic, reply, sent, pages)
+
+
+class NoteDecision(NotesRequest):
+    report: Report | None = None
+    proposal: dict
+
+
+@app.post("/api/notes/approve")
+def notes_approve(req: NoteDecision):
+    """Re-run the rules on the saved reply against the stored page text (no LLM call); approve only if all pass."""
+    p = req.proposal
+    rep = next((r for r in [req.report] if r and r.id == p.get("report")), None)
+    if p.get("kind") != "ar_note" or rep is None or not isinstance(p.get("reply"), dict) or ai.note_shape(p["reply"]):
+        raise HTTPException(422, "That isn't an annual-report note proposal, or its report isn't attached.")
+    req.report = rep
+    sent = [n for n in p.get("pages") or [] if isinstance(n, int)]
+    again = _ar_note(req, _topic(p.get("field")), p["reply"], sent, req.pages())
+    failed = [c["detail"] for c in again["checks"] if c["pass"] is False]
+    if failed:
+        raise HTTPException(422, "The rules reject this note: " + " ".join(failed))
+    return dict(again, id=p.get("id", again["id"]), status="approved")
+
+
 @app.get("/api/sample")
 def sample():
     from test_model import fake_screener  # ponytail: synthetic demo company, swap for a real export later
@@ -471,11 +603,12 @@ class DefaultsRequest(BaseModel):
     company: Company
     excluded_years: list[str] = []
     filings: list[Filing] = []
+    notes: dict = {}
 
     def payload(self):
         try:
             return _company_payload(self.company.model_dump(), self.excluded_years,
-                                    [f.model_dump() for f in self.filings])
+                                    [f.model_dump() for f in self.filings], self.notes)
         except ValueError as e:
             raise HTTPException(422, str(e))
 
@@ -636,7 +769,8 @@ def open_model(model_id: str):
     """The saved document plus everything the dashboard derives from the company, defaults honouring exclusions."""
     doc = load_model(model_id)
     try:
-        parsed = _company_payload(doc.company.model_dump(), doc.excluded_years, [f.model_dump() for f in doc.filings])
+        parsed = _company_payload(doc.company.model_dump(), doc.excluded_years, [f.model_dump() for f in doc.filings],
+                                  doc.notes)
     except ValueError as e:
         raise HTTPException(422, str(e))
     return {"id": model_id, "doc": doc.model_dump(mode="json"), "parsed": parsed}

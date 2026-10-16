@@ -11,6 +11,8 @@ import tempfile
 import unicodedata
 from datetime import date
 
+from model import _cr  # Rs crore with Indian grouping (ai may use model; model never imports ai)
+
 TIMEOUT = 180  # seconds per call
 NOT_SET = "Set LLM_CMD to a command that reads a prompt on stdin and prints the reply, then restart."
 
@@ -237,3 +239,169 @@ def quote_checks(reply, pages, sent, end: date):
         {"name": "Report for the year", "pass": n >= 3,
          "detail": f"{n} pages name the year." + ("" if n >= 3 else " Is this the right year's report?")},
     ]
+
+
+# ---------- annual-report notes (3.3): rules pick the pages per topic, the LLM extracts, rules check every value ----------
+
+# topic: (title, what to extract, words that point at its page (word, weight); a page needs a word of weight >= 3)
+TOPICS = {
+    "segments": ("Segment revenue", "the revenue from operations of each reportable business segment for the year "
+                 "(external revenue; not geographies, not segment results, not the total)",
+                 (("segment information", 4), ("operating segment", 3), ("reportable segment", 3),
+                  ("segment revenue", 3), ("segment result", 3), ("revenue from operations", 1))),
+    "maturity": ("Debt maturity", "the borrowings (and lease liabilities, if the table includes them) falling due in "
+                 "each period as at the year end, one item per period (within 1 year, 1-5 years, after 5 years...)",
+                 (("contractual maturities", 4), ("maturity profile", 4), ("maturity analysis", 4),
+                  ("liquidity risk", 3), ("repayment", 1), ("borrowings", 1), ("lease liabilities", 1))),
+    "capex": ("Capex", "from the cash flow statement for the year: purchase of property, plant and equipment "
+              "(including capital work in progress) and, if shown on its own line, purchase of intangible assets",
+              (("purchase of property, plant", 4), ("acquisition of property, plant", 4),
+               ("cash flows from investing activities", 3), ("cash flow from investing activities", 3),
+               ("purchase of intangible", 2))),
+    "contingent": ("Contingent liabilities", "each contingent liability as at the year end (claims not acknowledged "
+                   "as debt, tax demands, guarantees...), not commitments",
+                   (("contingent liabilities", 4), ("acknowledged as debt", 4), ("commitments and contingencies", 4),
+                    ("contingent liability", 3), ("contingencies", 3), ("guarantees", 1))),
+    "related": ("Related-party transactions", "the largest related-party transactions of the year, at most 8: label "
+                "each with the party (or group of parties) and the nature, e.g. 'Holding company: dividend paid'",
+                (("related party", 3), ("related parties", 3), ("key management personnel", 2),
+                 ("transactions with", 1))),
+}
+TOPIC_PAGES = 3  # ponytail: the 3 best pages per topic, cut to 8k characters; a missed note means attach + read again
+UNITS = {"crore": 1.0, "lakh": 0.01, "million": 0.1, "billion": 100.0, "thousand": 1e-4, "rupees": 1e-7}
+UNIT_WORDS = {"crore": ("crore", " cr"), "lakh": ("lakh", "lac"), "million": ("million", " mn"),
+              "billion": ("billion", " bn"), "thousand": ("thousand", "'000", "000s")}
+TIE = {"segments": 0.02, "maturity": 0.05, "capex": 0.02}  # sums agree with the statements within these
+
+
+def pick_topic_pages(pages, topic, end: date):
+    """Page numbers (1-based) of up to 3 pages for the topic, best first: word hits, then the consolidated notes
+    (Screener's figures are consolidated) and the year. A page needs a strong word, not just the year."""
+    words, yr, scored = TOPICS[topic][2], year_re(end), []
+    for i, (raw, _) in enumerate(pages):
+        t = norm(raw)
+        if not any(w in t for w, wt in words if wt >= 3):
+            continue
+        hits = sum(min(t.count(w), 5) * wt for w, wt in words)
+        group = 3 * ("consolidated" in t) - 3 * ("standalone financial statements" in t or "standalone statement" in t)
+        scored.append((hits + group + min(len(yr.findall(t)), 3), -i))
+    return [-i + 1 for _, i in sorted(scored, reverse=True)[:TOPIC_PAGES]]
+
+
+def page_text(page):
+    """What the model reads of a page: the -layout text (table rows stay on one line), runs of spaces cut to two."""
+    return re.sub(r"[ \t]{3,}", "  ", page[1])[:MAX_PAGE_CHARS]
+
+
+def note_prompt(topic, year, end: date, pages):
+    """The prompt for one topic, `pages` [(page number, text)]. Also used, without a call, to show its size."""
+    title, what, _ = TOPICS[topic]
+    text = "\n\n".join(f"=== PAGE {n} ===\n{t}" for n, t in pages)
+    return (f"Pages from an Indian listed company's annual report for {year} (the year to {end:%d %B %Y}); only "
+            f"these were read:\n{text}\n\n"
+            f"Extract {what}. Use the consolidated figures when the report has both, and the column for the year to "
+            f"{end:%d %B %Y}, not the previous year. For every item give the amount exactly as printed (a number, "
+            "in the report's unit), the page number it is on, and a quote copied character for character from that "
+            "page that contains the amount (the table row or sentence, 5 to 40 words). Give the unit the amounts are "
+            'in: "crore", "lakh", "million", "billion", "thousand" or "rupees". Never convert, add up or estimate; '
+            'if the pages don\'t show it, answer {"found": false}.\n'
+            'Answer as a JSON object: {"found": true, "unit": "crore", "items": [{"label": "...", "amount": 123.4, '
+            '"page": 12, "quote": "..."}]}.')
+
+
+def note_shape(v):
+    if not isinstance(v, dict) or not isinstance(v.get("found", True), bool):
+        return 'expected {"found": true, "unit": ..., "items": [...]} or {"found": false}'
+    if v.get("found") is False:
+        return None
+    if v.get("unit") not in UNITS:
+        return f'"unit" must be one of {", ".join(UNITS)}'
+    items = v.get("items")
+    if not isinstance(items, list) or not items or len(items) > 20:
+        return '"items" must be a list of 1 to 20 items'
+    for x in items:
+        if not (isinstance(x, dict) and isinstance(x.get("label"), str) and isinstance(x.get("page"), int)
+                and isinstance(x.get("quote"), str) and isinstance(x.get("amount"), (int, float, str))):
+            return 'each item must be {"label": string, "amount": number, "page": number, "quote": string}'
+    return None
+
+
+def extract_note(topic, year, end: date, pages):
+    """{found, unit, items: [{label, amount, page, quote}]} for the topic from `pages` [(page number, text)]."""
+    return ask_json(note_prompt(topic, year, end, pages), note_shape)
+
+
+def amount(v):
+    """A printed amount as a float: 1,64,177 / (34) / -34 / 2,719.50; None when it doesn't parse."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if abs(v) < 1e15 else None
+    s = str(v).strip().replace(",", "").replace(" ", "")
+    neg = s.startswith("(") and s.endswith(")")
+    try:
+        x = float(s.strip("()"))
+    except ValueError:
+        return None
+    return -x if neg else x
+
+
+def in_quote(x, quote):
+    """The amount, as printed, occurs in the quote (Indian or Western grouping, brackets for negatives)."""
+    nums = [amount(n) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", quote)]
+    return any(n is not None and abs(n - abs(x)) <= 0.005 + 1e-9 * abs(x) for n in nums)
+
+
+def note_checks(topic, reply, pages, sent, end: date, against=None):
+    """Rules on an extracted note: every item's page was sent, its quote is on that page, its amount parses and is in
+    its quote, the unit is printed on a cited page, the report is for the year, and the sum ties to one of `against`
+    [(label, Rs crore)] where the topic has a tie (TIE). Returns (rows in Rs crore, total, checks)."""
+    unit, items = reply["unit"], reply["items"]
+    rows, bad_page, bad_quote, bad_num = [], [], [], []
+    for x in items:
+        page, quote, v = x["page"], norm(x["quote"]), amount(x["amount"])
+        on = 1 <= page <= len(pages) and any(quote in norm(t) for t in pages[page - 1])
+        if page not in sent:
+            bad_page.append(x["label"])
+        if not on or len(quote.split()) < 3:
+            bad_quote.append(x["label"])
+        if v is None or not in_quote(v, x["quote"]):
+            bad_num.append(x["label"])
+        if v is not None and topic != "segments":
+            v = abs(v)  # capex, debt due, claims and transactions are sizes; a cash outflow prints in brackets
+        rows.append({"label": x["label"].strip()[:120], "amount": None if v is None else v * UNITS[unit], "raw": x["amount"],
+                     "page": page, "quote": x["quote"].strip()[:400]})
+    cited = {x["page"] for x in items if 1 <= x["page"] <= len(pages)}
+    unit_seen = (not any(w in norm(pages[p - 1][0]) for p in cited for ws in UNIT_WORDS.values() for w in ws)
+                 if unit == "rupees" else any(w in norm(pages[p - 1][0]) for p in cited for w in UNIT_WORDS[unit]))
+    n_items, yrs = len(items), mentions_year(pages, end)
+    what = lambda bad: ", ".join(bad[:4]) + (f" and {len(bad) - 4} more" if len(bad) > 4 else "")  # noqa: E731
+    total = sum(r["amount"] for r in rows if r["amount"] is not None)
+    checks = [
+        {"name": "Pages were read", "pass": not bad_page,
+         "detail": f"Every item cites one of the pages sent ({', '.join(map(str, sent))})." if not bad_page
+         else f"{what(bad_page)} cite a page that wasn't sent ({', '.join(map(str, sent))})."},
+        {"name": "Quotes are on their pages", "pass": not bad_quote,
+         "detail": ("The quote occurs on the cited page." if n_items == 1 else f"All {n_items} quotes occur on the cited pages.") if not bad_quote
+         else f"The quote for {what(bad_quote)} doesn't occur on its page, so the note is rejected."},
+        {"name": "Numbers are in their quotes", "pass": not bad_num,
+         "detail": ("The amount parses and appears in its quote." if n_items == 1 else f"All {n_items} amounts parse and appear in their quotes.") if not bad_num
+         else f"The amount for {what(bad_num)} doesn't parse or isn't in its quote."},
+        {"name": "Unit", "pass": unit_seen,
+         "detail": f"Amounts in {unit}, converted to Rs crore by rules (x {UNITS[unit]:g})."
+         + ("" if unit_seen else f" But no cited page says {unit}.")},
+        {"name": "Report for the year", "pass": yrs >= 3,
+         "detail": f"{yrs} pages name the year." + ("" if yrs >= 3 else " Is this the right year's report?")},
+    ]
+    if topic in TIE:
+        tol, cands = TIE[topic], [(k, v) for k, v in against or () if v]
+        if not cands:
+            checks.append({"name": "Ties to the statements", "pass": None,
+                           "detail": "No cash-flow capex from an XBRL filing for this year to compare with."
+                           if topic == "capex" else "Nothing to compare with for this year."})
+        else:
+            k, v = min(cands, key=lambda c: abs(total / c[1] - 1))  # the closest (borrowings with or without leases)
+            gap = total / v - 1
+            checks.append({"name": "Ties to the statements", "pass": abs(gap) <= tol,
+                           "detail": f"Sum {_cr(total)} vs {k} {_cr(v)}: {gap:+.1%} (within {tol:.0%} needed)."})
+    return rows, total, checks
