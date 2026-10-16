@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Upgrade } from './App'
-import { api, dec2, fmt, money, type Check, type Company, type Filing, type Proposal, type Sources as Used } from './lib'
+import { api, dec2, fmt, money, postJson, type Check, type Company, type Decided, type Filing, type Proposal, type Sources as Used } from './lib'
 
 const KIND: Record<Filing['kind'], string> = { quarter: 'Quarter', half: 'Half year', annual: 'Year', other: 'Period' }
 const PER_SHARE = new Set(['eps_basic', 'eps_diluted', 'face_value'])
@@ -21,7 +21,7 @@ const day = (iso: string | null) => (iso
 const title = (f: Filing) =>
   `${KIND[f.kind]} to ${day(f.period_end)}${f.consolidated == null ? '' : f.consolidated ? ' · Consolidated' : ' · Standalone'}`
 /** A proposal's value: Rs crore as "Rs 4.20 cr", anything else with its unit. */
-const show = (p: Proposal) => (typeof p.value !== 'number' ? String(p.value)
+const show = (p: Proposal) => (typeof p.value !== 'number' ? (p.value == null ? '–' : String(p.value))
   : p.unit === 'Rs crore' ? `Rs ${Math.abs(p.value) >= 100 ? money(p.value) : dec2(p.value)} cr` : `${dec2(p.value)}${p.unit ? ` ${p.unit}` : ''}`)
 const amount = (k: string, v: number) => (PER_SHARE.has(k) ? `Rs ${dec2(v)}` : money(v))
 
@@ -60,7 +60,11 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState('')
   const [over, setOver] = useState(false)
+  const [asking, setAsking] = useState<string | null>(null) // the filing whose tags are with the model
   const head = useRef<HTMLHeadingElement>(null)
+  // LLM_CMD set on the server? Only the "Propose mappings" buttons need it; everything else works without.
+  const [ai, setAi] = useState<{ available: boolean; message: string | null } | null>(null)
+  useEffect(() => { api<typeof ai>('/api/ai').then(setAi).catch(() => setAi(null)) }, [])
 
   const attach = async (file: File | undefined) => {
     if (!file || busy) return
@@ -85,8 +89,41 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
     setNote(`Removed ${f.file}.`)
     head.current?.focus() // its Remove button is gone
   }
-  const decide = (p: Proposal, status: Proposal['status']) =>
-    onProposals(ps => ps.map(x => (x.id === p.id ? { ...x, status } : x)))
+  /** The LLM proposes a std key per unmapped tag; the server's rules check each one. New ones join the list; a
+   * proposal already decided keeps its decision. */
+  const propose = async (f: Filing) => {
+    if (busy) return
+    setBusy(`Asking the model about ${f.unmapped.length} tags in ${f.file}…`)
+    setAsking(f.id)
+    setError(null)
+    setNote('')
+    try {
+      const r = await api<{ proposals: Proposal[]; left: string[] }>('/api/mappings/propose', postJson({ filing: f }))
+      onProposals(ps => [...ps, ...r.proposals.filter(p => !ps.some(x => x.id === p.id))])
+      const ok = r.proposals.filter(p => !p.checks.some(c => c.pass === false)).length
+      setNote(`${r.proposals.length} mapping${r.proposals.length === 1 ? '' : 's'} proposed for ${f.file}` +
+        `${r.proposals.length ? ` (${ok} pass${ok === 1 ? 'es' : ''} the checks)` : ''}; ` +
+        `${r.left.length} tag${r.left.length === 1 ? '' : 's'} left unmapped. Nothing is used until you approve it.`)
+    } catch (e) { setError((e as Error).message) } finally { setBusy(null); setAsking(null) }
+  }
+  const decide = async (p: Proposal, status: Proposal['status']) => {
+    if (p.kind !== 'mapping') return onProposals(ps => ps.map(x => (x.id === p.id ? { ...x, status } : x)))
+    if (busy) return
+    setBusy(status === 'approved' ? 'Saving the mapping and reading the filings again…' : 'Saving…')
+    setError(null)
+    setNote('')
+    try {
+      const r = await api<Decided>(`/api/mappings/${status === 'approved' ? 'approve' : 'reject'}`,
+        postJson({ proposal: p, filings, company }))
+      onProposals(ps => ps.map(x => (x.id === p.id ? r.proposal : x)))
+      onFilings(fs => fs.map(x => r.filings.find(y => y.id === x.id) ?? x))
+      const tag = p.source.tag
+      setNote(status === 'approved'
+        ? `Saved: ${tag} is now read as ${label(p.field).toLowerCase()} in every filing, with no AI call.` +
+          (r.missing.length ? ` Attach ${r.missing.join(', ')} again to apply it there.` : '')
+        : p.status === 'approved' ? `Taken back: ${tag} is unmapped again.` : `Rejected; kept here for the record.`)
+    } catch (e) { setError((e as Error).message) } finally { setBusy(null) }
+  }
   const sorted = [...filings].sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''))
   const apply = () => {
     onApply()
@@ -155,6 +192,16 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
                 <p className="muted small src-meta">
                   {f.file}{f.company && <> · {f.company}</>} · {facts.length} lines mapped · {f.unmapped.length} unmapped
                 </p>
+                {f.unmapped.length > 0 && (
+                  <div className="prop-ask">
+                    <button type="button" onClick={() => propose(f)} disabled={!ai?.available} aria-disabled={!!busy}
+                      aria-describedby={ai && !ai.available ? `ai-off-${f.id}` : undefined}>Propose mappings</button>
+                    <span className="muted small" id={`ai-off-${f.id}`} aria-busy={asking === f.id}>
+                      {asking === f.id ? busy : ai && !ai.available ? ai.message
+                        : 'AI suggests a line for each unmapped tag; rules check it and you approve it.'}
+                    </span>
+                  </div>
+                )}
                 <Checks checks={f.checks} />
                 {facts.length > 0 && (
                   <details>
@@ -193,21 +240,23 @@ export default function Sources({ company, filings, proposals, onFilings, onProp
             {proposals.map(p => (
               <li key={p.id} className={`src-item prop is-${p.status}`}>
                 <div className="src-head">
-                  <h4>{label(p.field)}{p.period && <> · {p.period}</>}: <span className="prop-value">
+                  <h4>{label(p.field)}{p.period && <> · {/^\d{4}-\d\d-\d\d$/.test(p.period) ? day(p.period) : p.period}</>}: <span className="prop-value">
                     {show(p)}</span></h4>
                   <span className="prop-status">{p.status === 'proposed' ? 'Waiting for you' : p.status === 'approved' ? 'Approved' : 'Rejected'}</span>
                 </div>
-                <p className="muted small">
-                  {p.ai && <span className="prop-ai">AI-read · </span>}
+                <p className="muted small src-meta">
+                  {p.ai && <span className="prop-ai">{p.kind === 'mapping' ? 'AI-proposed' : 'AI-read'} · </span>}
                   {p.source.file}{p.source.page != null && <>, page {p.source.page}</>}{p.source.tag && <>, tag {p.source.tag}</>}
                 </p>
                 {p.source.quote && <blockquote className="prop-quote">“{p.source.quote}”</blockquote>}
-                {p.reasoning && <p className="small">{p.reasoning}</p>}
+                {p.reasoning && <p className="small">{p.ai && <span className="muted">AI’s reasoning: </span>}{p.reasoning}</p>}
                 <Checks checks={p.checks} />
                 <div className="prop-actions">
                   <button type="button" aria-pressed={p.status === 'approved'} onClick={() => decide(p, 'approved')}
-                    disabled={p.checks.some(c => c.pass === false)}>Approve</button>
-                  <button type="button" aria-pressed={p.status === 'rejected'} onClick={() => decide(p, 'rejected')}>Reject</button>
+                    disabled={p.checks.some(c => c.pass === false)} aria-disabled={!!busy}
+                    aria-label={`Approve ${p.source.tag ?? label(p.field)} as ${label(p.field)}`}>Approve</button>
+                  <button type="button" aria-pressed={p.status === 'rejected'} onClick={() => decide(p, 'rejected')}
+                    aria-disabled={!!busy} aria-label={`Reject ${p.source.tag ?? label(p.field)} as ${label(p.field)}`}>Reject</button>
                 </div>
               </li>
             ))}

@@ -333,7 +333,7 @@ a { color: var(--pencil); }
 .src-head .lib-del { padding: 2px 4px; }
 .src-meta { margin: 2px 0 6px; overflow-wrap: anywhere; }
 .src-checks { list-style: none; margin: 0 0 6px; padding: 0; font-size: 13px; }
-.src-checks li { padding: 2px 0 2px 20px; text-indent: -20px; }
+.src-checks li { padding: 2px 0 2px 20px; text-indent: -20px; overflow-wrap: anywhere; }
 .src-mark { display: inline-block; width: 20px; text-indent: 0; font-weight: 700; }
 .src-checks .is-pass .src-mark { color: var(--pencil); }
 .src-checks .is-fail { color: var(--amber); }
@@ -391,3 +391,7 @@ tbody tr:hover th, tbody tr:hover td { background: var(--pencil-soft); }
 .src-upgrade { margin: 10px 0 0; padding: 10px 12px; border-left: 3px solid var(--pencil); background: var(--pencil-soft); border-radius: 0 6px 6px 0; }
 .src-upgrade p { margin: 0 0 8px; }
 .src-upgrade button { border: 1px solid var(--pencil); background: var(--paper); color: var(--pencil); border-radius: 999px; padding: 4px 14px; font-size: 13px; min-height: 28px; }
+.prop-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0 0 8px; }
+.prop-ask button { border: 1px solid var(--pencil); background: var(--paper); color: var(--pencil); border-radius: 999px; padding: 4px 14px; font-size: 13px; min-height: 28px; }
+.prop-ask button:disabled { border-color: var(--rule); color: var(--ink-2); cursor: default; }
+.prop-ask .small { flex: 1 1 220px; }

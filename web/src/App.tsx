@@ -299,7 +299,7 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
 
   // A filing attached or removed changes the history (payables, leases, cash-flow capex) and so the defaults; like
   // excluding a year, it never changes the assumptions by itself. The upgraded defaults are offered in one click.
-  const filingIds = filings.map(f => f.id).join()
+  const filingIds = JSON.stringify(filings.map(f => [f.id, f.facts])) // an approved mapping re-reads a filing in place
   const seenIds = useRef(filingIds)
   const [upgrades, setUpgrades] = useState<Upgrade[]>([])
   useEffect(() => {

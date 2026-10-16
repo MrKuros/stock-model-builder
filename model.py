@@ -417,7 +417,7 @@ def parse_xbrl(file, mappings=None, company=None):
     if _local(root.tag) != "xbrl":
         raise ValueError("Not an XBRL instance (the file's root isn't <xbrl>). Download the XBRL link of a financial "
                          "results filing from NSE or BSE.")
-    tags = {**XBRL_TAGS, **(mappings or {})}
+    tags = {**(mappings or {}), **XBRL_TAGS}  # an approved mapping never overrides a standard element
     blank = lambda: {"start": None, "end": None, "instant": False, "basis": None, "dims": False}  # noqa: E731
     ctx, units = {}, {}
     for c in root.iter(_XI + "context"):
@@ -499,14 +499,16 @@ def parse_xbrl(file, mappings=None, company=None):
         scale = _xbrl_scale(uid, units.get(uid, []))
         if key and scale and (scale[0] == "share") == (key in XBRL_PER_SHARE):
             val = round(v * scale[1], 6)
-            if key not in facts:
+            if key not in facts or (facts[key] == 0 and val):  # a filed 0 gives way to a company tag's number
                 facts[key], seen[key] = val, tag
-            elif abs(facts[key] - val) > 1e-6:  # the same line twice with different numbers: keep the first, say so
+            elif val and abs(facts[key] - val) > 1e-6:  # the same line twice with different numbers: keep the first, say so
                 check(f"One value for {key}", False, f"{seen[key]} = {facts[key]:,.2f} and {tag} = {val:,.2f} "
                       f"(context {cid}); kept the first")
         elif v and len(unmapped) < XBRL_MAX_UNMAPPED:  # ponytail: zeros (most of a results filing) aren't listed
             val = round(v * scale[1], 6) if scale else v
-            unmapped.setdefault((tag, val), {"tag": tag, "value": val, "context": cid if scale else f"{cid} ({uid})"})
+            unit = {"money": "Rs crore", "share": "Rs per share"}[scale[0]] if scale else uid
+            unmapped.setdefault((tag, val), {"tag": tag, "value": val, "unit": unit,
+                                             "context": cid if scale else f"{cid} ({uid})"})
 
     if facts.get("profit") and not facts.get("pat") and not facts.get("minority"):
         if "pat" in facts:  # Hindalco Dec 2021 files 0 for both owners and minority
@@ -569,6 +571,73 @@ def _xbrl_ties(f, kind, end, co, consolidated):
                 detail += ". This filing is standalone; Screener's export is usually consolidated."
         out.append({"name": f"{line} for {label} matches Screener", "pass": ok, "detail": detail})
     return out
+
+
+# For checking a proposed mapping of a leftover tag (mapping_checks): the lines a tag may map to, with a one-line
+# meaning for the prompt (the standard element's name in words); lines that are never negative; totals and their parts.
+XBRL_KEYS = {}
+for _tag, _key in XBRL_TAGS.items():
+    XBRL_KEYS.setdefault(_key, re.sub(r"(?<=[a-z])(?=[A-Z])", " ", _tag).lower())
+XBRL_NONNEG = (set(XBRL_BS.values()) - {"other_equity", "equity_parent", "equity", "nci"}) | {
+    "revenue", "total_income", "materials", "purchases", "employee", "interest", "dep", "other_exp", "total_exp",
+    "paid_up_capital", "face_value"}
+XBRL_TOTALS = {"total_exp": ("materials", "purchases", "inventory_change", "employee", "interest", "dep", "other_exp"),
+               "total_income": ("revenue", "other_income"), "total_assets": ("noncurrent_assets", "current_assets"),
+               "total_liabilities": ("noncurrent_liabilities", "current_liabilities"),
+               "equity_parent": ("share_cap", "other_equity")}
+TIE_TOL = 0.01  # a total and its parts agree within 1% (at least Rs 1 crore)
+
+
+def mapping_checks(filing, tag, key, others=()):
+    """Rule checks on mapping a filing's unmapped `tag` to std `key` -> (value, unit, checks). `others` = the keys
+    other proposals in the same batch map to (two tags onto one line would count it twice)."""
+    checks = []
+    check = lambda n, ok, d: checks.append({"name": n, "pass": ok, "detail": d})  # noqa: E731
+    u = next((x for x in filing.get("unmapped", []) if x["tag"] == tag), None)
+    known = key in XBRL_KEYS
+    check("A line this app knows", known, f"{key} ({XBRL_KEYS[key]})" if known else
+          f"{key!r} isn't one of this app's lines, so the mapping can't be used.")
+    amt = lambda x: _cr(x) if abs(x) >= 100 else f"{x:.2f}"  # noqa: E731  Indian grouping for amounts
+    check("The tag is in this filing", u is not None, f"{tag} = {amt(u['value'])}, context {u['context']}" if u else
+          f"{tag} isn't among this filing's unmapped tags.")
+    if u and len({x["value"] for x in filing["unmapped"] if x["tag"] == tag}) > 1:
+        check("One value", False, f"{tag} has more than one value in this filing (e.g. opening and closing), so "
+              "a rule can't tell which is the line.")
+    if not (known and u):
+        return (u and u["value"]), (u and u.get("unit")), checks
+    v, unit, facts = u["value"], u.get("unit"), filing.get("facts", {})
+    want = "Rs per share" if key in XBRL_PER_SHARE else "Rs crore"
+    if unit is None:  # a filing attached before units were kept
+        check("Unit", None, f"The filing's unit wasn't kept; attach the file again to check it is {want}.")
+    else:
+        check("Unit", unit == want, f"The tag is in {unit}; {key} is in {want}.")
+    if facts.get(key):
+        check("Not counted twice", False, f"The filing already gives {key} = {amt(facts[key])} from a standard tag.")
+    elif key in others:
+        check("Not counted twice", False, f"Another tag in this batch is also proposed as {key}.")
+    else:
+        check("Not counted twice", True, f"The filing has no other {key}" + (" (its standard tag is 0)." if key in facts else "."))
+    if key in XBRL_NONNEG and v < 0:
+        check("Sign", False, f"{key} is never negative; the tag is {amt(v)}.")
+    big = max((abs(facts.get(k, 0.0)) for k in ("revenue", "total_income", "total_assets")), default=0.0)
+    if want == "Rs crore" and unit in (None, want) and big:
+        check("Size", abs(v) <= 10 * big, f"{_cr(v)} against the filing's largest total {_cr(big)} (at most 10 times).")
+    for total, parts in XBRL_TOTALS.items():
+        if key != total and key not in parts:
+            continue
+        after = {**facts, key: v}
+        if total not in after or not any(p in after for p in parts):
+            continue
+        tie = lambda x: abs(sum(x.get(p, 0.0) for p in parts) - x[total]) <= max(1.0, TIE_TOL * abs(x[total]))  # noqa: E731
+        s = sum(after.get(p, 0.0) for p in parts)
+        detail = f"{', '.join(parts)} add up to {_cr(s)}; {total} is {_cr(after[total])}"
+        if tie(after):
+            check(f"{total} still ties", True, detail + ".")
+        elif total in facts and tie(facts):
+            check(f"{total} still ties", False, detail + ": they tied before this mapping.")
+        else:
+            check(f"{total} ties", None, detail + ": they didn't tie before either; other lines may be missing.")
+    return v, unit, checks
 
 
 def on_cogs(hist):

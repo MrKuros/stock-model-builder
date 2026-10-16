@@ -72,14 +72,17 @@ export interface Check { name: string; pass: boolean | null; detail: string }
 export interface Filing {
   id: string; file: string; kind: 'quarter' | 'half' | 'annual' | 'other'; company: string | null
   period_start: string | null; period_end: string | null; consolidated: boolean | null
-  facts: Record<string, number>; unmapped: { tag: string; value: number; context: string }[]; checks: Check[]
+  facts: Record<string, number>; unmapped: { tag: string; value: number; unit?: string; context: string }[]; checks: Check[]
 }
 /** Something read by AI that could change a number: shown with its source and checks, used only once approved. */
 export interface Proposal {
   id: string; kind: 'mapping' | 'oneoff_note' | 'ar_note'; field: string; value: unknown; unit: string | null
   period: string | null; source: { file: string; page?: number | null; quote?: string | null; tag?: string | null }
   reasoning: string; checks: Check[]; status: 'proposed' | 'approved' | 'rejected'; ai: boolean
+  filing?: string // a mapping: the id of the filing whose unmapped tag it maps
 }
+/** POST /api/mappings/approve | reject: the decided proposal and the filings re-read by rules with mappings.json. */
+export interface Decided { proposal: Proposal; filings: Filing[]; missing: string[] }
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
 export interface ModelDoc {
   version: 5
