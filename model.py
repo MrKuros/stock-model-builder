@@ -23,7 +23,11 @@ CF = {"Cash from Operating Activity": "cfo", "Cash from Investing Activity": "cf
       "Cash from Financing Activity": "cff"}
 OPTIONAL = {"Dividend Amount", "Cash from Operating Activity", "Cash from Investing Activity",
             "Cash from Financing Activity"}
-SECTION_HEADS = (("PROFIT & LOSS", "pl"), ("QUARTERS", None), ("BALANCE SHEET", "bs"),
+# Screener "Quarters" block (last ten quarters) -> company["quarters"]["rows"] keys. All are flows, so TTM sums them.
+QUARTERS = {"Sales": "sales", "Expenses": "expenses", "Operating Profit": "op_profit", "Other Income": "other_income",
+            "Depreciation": "depreciation", "Interest": "interest", "Profit before tax": "pbt", "Tax": "tax",
+            "Net profit": "net_profit"}
+SECTION_HEADS = (("PROFIT & LOSS", "pl"), ("QUARTERS", "q"), ("BALANCE SHEET", "bs"),
                  ("CASH FLOW", "cf"), ("PRICE", None), ("DERIVED", None))
 TOL = 1.0  # Rs crore; Screener rounds to 2 decimals per line
 
@@ -178,7 +182,44 @@ def parse_screener(file):
     if all(not h["receivables"] and not h["inventory"] for h in hist) or (ir > 0.3 and wc < 0.05) or oca > 2.0:
         raise ValueError("Looks like a bank/NBFC/insurer (loan book or interest dominates, no receivables/inventory). "
                          "Financial companies are not supported yet.")
-    return {"name": str(name), "dates": dates, "hist": hist, "market": _market(ws, s["pl"]["report date"], dates)}
+    return {"name": str(name), "dates": dates, "hist": hist, "market": _market(ws, s["pl"]["report date"], dates),
+            "quarters": _quarters(s.get("q"))}
+
+
+def _quarters(rows):
+    """{"dates", "rows": {key: [float|None per quarter]}} from the Quarters block, or None when the export has none
+    (Milky Mist). Operating profit uses the annual EBITDA rule (PBT + interest + depreciation - other income), so the
+    TTM column lines up with the reported years; Screener's own row is the fallback when a line is missing."""
+    cols = [(i, d) for i, d in enumerate((rows or {}).get("report date") or ()) if isinstance(d, datetime)]
+
+    def num(label, i, d):
+        try:
+            return _cell(rows.get(label.lower(), ()), i, "Quarters", label, d)
+        except ValueError:
+            return None  # ponytail: quarters are optional extras; a text cell blanks that quarter, never fails the parse
+    q = {key: [num(label, i, d) for i, d in cols] for label, key in QUARTERS.items()}
+    for j in range(len(cols)):
+        parts = [q[k][j] for k in ("pbt", "interest", "depreciation", "other_income")]
+        if None not in parts:
+            q["op_profit"][j] = parts[0] + parts[1] + parts[2] - parts[3]
+        elif q["op_profit"][j] is None and None not in (q["sales"][j], q["expenses"][j]):
+            q["op_profit"][j] = q["sales"][j] - q["expenses"][j]
+    keep = [j for j in range(len(cols)) if q["sales"][j] is not None]
+    if not keep:
+        return None
+    return {"dates": [cols[j][1] for j in keep], "rows": {k: [v[j] for j in keep] for k, v in q.items()}}
+
+
+def ttm(q, back=0):
+    """Trailing twelve months ending `back` quarters before the latest: each row summed over four quarters, None
+    where one is missing. None when there are fewer than four, or they aren't consecutive (80-100 days apart).
+    Mirrored by the TTM column on the Quarters sheet (back=0)."""
+    d = (q or {}).get("dates") or []
+    hi = len(d) - back
+    if hi < 4 or not all(80 <= (b - a).days <= 100 for a, b in zip(d[hi - 4:hi], d[hi - 3:hi])):
+        return None
+    return {"end": d[hi - 1], "values": {k: None if None in v[hi - 4:hi] else sum(v[hi - 4:hi])
+                                         for k, v in q["rows"].items()}}
 
 
 def _pos(v):
@@ -955,6 +996,46 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill):
         vs.column_dimensions[get_column_letter(2 + j)].width = 12
 
 
+# Quarters sheet rows: (label, key); "opm" is a formula row (operating profit / sales)
+Q_LAYOUT = [("Sales", "sales"), ("Expenses", "expenses"), ("Operating profit (EBITDA)", "op_profit"),
+            ("Operating margin", "opm"), ("Other income", "other_income"), ("Depreciation", "depreciation"),
+            ("Interest", "interest"), ("Profit before tax", "pbt"), ("Tax", "tax"), ("Net profit", "net_profit")]
+
+
+def _quarters_sheet(wb, q, formats):
+    """'Quarters' sheet: reported quarters as values (ink), then a TTM column of live SUMs over the last four
+    (blank when one is missing, like ttm()). No TTM column when the last four quarters aren't consecutive."""
+    qs = wb.create_sheet("Quarters")
+    qs["A1"] = ("Quarterly results as reported, Rs crore (Screener.in export). Operating profit = profit before tax + "
+                "interest + depreciation - other income. TTM = sum of the last four quarters.")
+    qs["A1"].font = Font(italic=True, color="808080")
+    top, nq, t = 3, len(q["dates"]), ttm(q)
+    heads = [f"{d:%b %Y}" for d in q["dates"]] + ([f"TTM {t['end']:%b %Y}"] if t else [])
+    qs.cell(top, 1, "Rs crore").font = Font(bold=True)
+    for j, h in enumerate(heads):
+        qs.cell(top, 2 + j, h).font = Font(bold=True)
+    rows = {key: top + 1 + i for i, (_, key) in enumerate(Q_LAYOUT)}
+    for label, key in Q_LAYOUT:
+        r = rows[key]
+        qs.cell(r, 1, label).font = Font(bold=key in ("op_profit", "net_profit"))
+        for j in range(len(heads)):
+            c, x = qs.cell(r, 2 + j), get_column_letter(2 + j)
+            if key == "opm":
+                op, sales = f"{x}{rows['op_profit']}", f"{x}{rows['sales']}"
+                c.value = f'=IF(AND(ISNUMBER({op}),ISNUMBER({sales}),N({sales})>0),{op}/{sales},"")'
+            elif j < nq:
+                c.value = q["rows"][key][j]
+            else:
+                span = f"{get_column_letter(2 + nq - 4)}{r}:{get_column_letter(1 + nq)}{r}"
+                c.value = f'=IF(COUNT({span})=4,SUM({span}),"")'
+            c.number_format = formats["pct" if key == "opm" else "num"]
+            c.font = Font(bold=key in ("op_profit", "net_profit") or j == nq)
+    qs.column_dimensions["A"].width = 28
+    for j in range(len(heads)):
+        qs.column_dimensions[get_column_letter(2 + j)].width = 12
+    qs.freeze_panes = qs.cell(top + 1, 2)
+
+
 def col(j):
     """Valuation sheet column for explicit year j (B = first projected year)."""
     return get_column_letter(2 + j)
@@ -1033,6 +1114,8 @@ def to_excel(co, scenarios, n=5, active="base", val=None):
                   co.get("market"), inputs=ex)
     _valuation_sheet(wb, co, n, v, src, lambda k, j: f"{get_column_letter(2 + j)}{rows[k]}", headers[nh:],
                      formats, head_fill)
+    if co.get("quarters"):
+        _quarters_sheet(wb, co["quarters"], formats)
     cash_proj = f"{get_column_letter(2 + nh)}{rows['cash']}:{get_column_letter(1 + len(headers))}{rows['cash']}"
     ws.conditional_formatting.add(cash_proj, CellIsRule(operator="lessThan", formula=["0"],
                                                         font=Font(color="C00000", bold=True),

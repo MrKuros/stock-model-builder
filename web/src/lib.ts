@@ -29,7 +29,13 @@ export function seed(base: Paths): Scenarios {
 
 /** Share price (Rs) and count (crore) from the export; null when Screener left them out. */
 export interface Market { price: number | null; shares: number | null; price_hist: (number | null)[]; shares_hist: (number | null)[] }
-export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market }
+/** The export's Quarters block (model.QUARTERS keys: sales, op_profit, net_profit, ...), null where Screener left a gap. */
+export interface Quarters { dates: string[]; rows: Record<string, (number | null)[]> }
+export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market; quarters?: Quarters | null }
+/** Trailing twelve months (model.ttm): the four quarters ending `end`, each row summed (null if one is missing). */
+export interface Ttm { end: string; values: Row }
+/** A reported figure that moved > 0.5% against the latest saved model of this company (server.restatements). */
+export interface Restated { id: string; saved_at: string | null; changes: { year: string; line: string; old: number; new: number }[] }
 /** DCF inputs (model.VALUATION). kd null = base scenario's interest rate; price/shares null = market data. */
 export interface ValInputs {
   rf: number; erp: number; beta: number; kd: number | null; g: number; mid_year: boolean
@@ -61,7 +67,7 @@ export interface Valuation {
 }
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
 export interface ModelDoc {
-  version: 4
+  version: 5
   company: Company
   n: number
   active: Scenario
@@ -69,6 +75,10 @@ export interface ModelDoc {
   excluded_years: string[]
   saved_at: string | null
   valuation: ValInputs
+  // Phase 3 blocks (sources, AI proposals, approved notes); shapes in server.ModelDoc
+  filings: unknown[]
+  proposals: unknown[]
+  notes: Record<string, unknown>
 }
 /** A reported year whose metric sits far from the company's own median (model.detect_oneoffs). */
 export interface OneOff { year: string; metric: string; value: number; typical: number; note: string }
@@ -79,6 +89,9 @@ export interface Parsed {
   defaults: Record<string, number>
   checks: string[]
   oneoffs: OneOff[]
+  ttm?: Ttm | null // null: no quarters, or the last four aren't consecutive
+  ttm_prev?: Ttm | null // the four quarters a year earlier, for TTM growth
+  restated?: Restated | null // only on a fresh upload; null when no model of this company is saved
   valuation: ValInputs // defaults for a new document
   drivers: Driver[]
   layout: LayoutLine[]
