@@ -61,9 +61,11 @@ function remember(id: string | null) {
   } catch { /* private mode */ }
 }
 
+// a re-import of a saved company keeps its filings, proposals, notes and reports (p.defaults already use them)
 const newDoc = (p: Parsed): ModelDoc => ({
   version: 5, company: p.company, n: 5, active: 'base', scenarios: seed(flatAll(p.defaults)),
   excluded_years: [], saved_at: null, valuation: p.valuation, filings: [], proposals: [], notes: {}, reports: [],
+  ...p.restated?.carry,
 })
 
 export interface SaveState { at: string | null; error: string | null }
@@ -471,14 +473,14 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
           <p className="muted small">
             This file’s reported years differ by more than 0.5% from the model you saved{restated.saved_at
               ? ` on ${when(restated.saved_at)}` : ''}; the company may have restated them. This model uses the new
-            figures; versions saved on earlier days keep the old ones.
+            figures and keeps your filings, proposals and notes; versions saved on earlier days keep the old figures.
           </p>
         </section>
       )}
       {showOneoffs && (
         <OneOffs id="oneoffs" years={oneoffYears} histYears={histYears} excluded={excluded} pending={pending}
           note={defaultsNote} onToggle={toggleYear} explain={year => (
-            <Explain year={year} company={company} filings={filings} ai={ai} proposals={doc.proposals}
+            <Explain year={year} company={company} filings={filings} notes={doc.notes} ai={ai} proposals={doc.proposals}
               report={doc.reports.find(r => r.year === year)} note={doc.notes[`oneoff:${year}`] as OneOffNote | undefined}
               onProposals={onProposals} onReports={f => setDoc(d => ({ ...d, reports: f(d.reports) }))} />
           )} />

@@ -62,10 +62,14 @@ export function withNotes(notes: Record<string, unknown>, ps: Proposal[]): Recor
   return out
 }
 
-/** A note decided (approving a one-off note just pins it). One approved note per year (and topic). */
+/** A note decided (approving a one-off note just pins it). One approved note per year (and topic): the one it
+ * replaces is set to rejected, kept for the record and never asked about again. */
 export const decideNote = (ps: Proposal[], p: Proposal, status: Proposal['status']) => ps.map(x => (x.id === p.id
   ? { ...x, status } : status === 'approved' && x.kind === p.kind && x.field === p.field && x.period === p.period
-    && x.status === 'approved' ? { ...x, status: 'proposed' as const } : x))
+    && x.status === 'approved' ? { ...x, status: 'rejected' as const } : x))
+
+/** A new proposal joins the list; one with the same id already there (decided or not) is kept as it is. */
+const addProposal = (ps: Proposal[], p: Proposal) => (ps.some(x => x.id === p.id) ? ps : [...ps, p])
 
 function Checks({ checks }: { checks: Check[] }) {
   if (!checks.length) return null
@@ -125,8 +129,11 @@ export default function Sources({
       const again = filings.some(x => x.id === f.id)
       onFilings(fs => [...fs.filter(x => x.id !== f.id), f])
       const failed = f.checks.filter(c => c.pass === false).length
+      const ties = f.checks.filter(c => c.pass === false && c.name.endsWith('matches Screener')).length
       setNote(`${again ? 'Read again' : 'Attached'}: ${title(f)}. ${Object.keys(f.facts).length} lines mapped, ` +
-        `${f.unmapped.length} unmapped${failed ? `, ${failed} check${failed > 1 ? 's' : ''} failed` : ''}.`)
+        `${f.unmapped.length} unmapped${failed ? `, ${failed} check${failed > 1 ? 's' : ''} failed` : ''}.` +
+        (ties > 1 ? ` Revenue and profit don’t match Screener’s${f.company ? ` (the filing is ${f.company})` : ''}; ` +
+          'check it is the same company and basis.' : ''))
     } catch (e) { setError((e as Error).message) } finally { setBusy(null) }
   }
   const remove = (f: Filing) => {
@@ -359,8 +366,11 @@ export function ProposalItem({ p, busy, onDecide, as: H = 'h4' }: {
 }) {
   const note = p.kind === 'oneoff_note'
   const ar = p.kind === 'ar_note' ? p.value as ArValue : null
-  const what = note ? `the explanation of ${p.period}` : ar ? `${TOPICS[p.field] ?? p.field} ${p.period}`
-    : `${p.source.tag ?? label(p.field)} as ${label(p.field)}`
+  // the source, value and status make each button's name unique among same-year proposals kept for the record
+  const what = (note ? `the explanation of ${p.period}, ${p.from_numbers ? 'from the numbers'
+    : `from ${p.source.file} page ${p.source.page}`}` : ar ? `${TOPICS[p.field] ?? p.field} ${p.period}, Rs ${money(ar.total)} cr, ${p.source.file}`
+    : `${p.source.tag ?? label(p.field)} as ${label(p.field)}, ${p.source.file}`)
+    + (p.status === 'proposed' ? '' : `, ${PROP_STATUS[p.status].toLowerCase()}`)
   return (
     <li className={`src-item prop is-${p.status}`}>
       <div className="src-head">
@@ -528,7 +538,7 @@ function ReadNotes({ report, company, filings, ai, onProposals }: {
       setBusy(`Reading ${TOPICS[t].toLowerCase()} (${i + 1} of ${chosen.length})…`)
       try {
         const p = await api<Proposal>('/api/notes/extract', postJson({ company, filings, report, topic: t }))
-        onProposals(ps => [...ps.filter(x => x.id !== p.id), p])
+        onProposals(ps => addProposal(ps, p))
         done.push(`${TOPICS[t]}${p.status === 'rejected' ? ' (rejected by the rules)' : ''}`)
       } catch (e) { bad.push(`${TOPICS[t]}: ${(e as Error).message}`) }
     }
@@ -571,8 +581,8 @@ function ReadNotes({ report, company, filings, ai, onProposals }: {
 
 /** Next to a flagged year: explain it in words, from that year's annual report (rules pick the pages and check the
  * quote) or from the numbers only. The result is a proposal; approving it pins the words, no number uses them. */
-export function Explain({ year, company, filings, report, proposals, note, ai, onProposals, onReports }: {
-  year: string; company: Company; filings: Filing[]; report?: Report; proposals: Proposal[]; note?: OneOffNote
+export function Explain({ year, company, filings, notes, report, proposals, note, ai, onProposals, onReports }: {
+  year: string; company: Company; filings: Filing[]; notes: Record<string, unknown>; report?: Report; proposals: Proposal[]; note?: OneOffNote
   ai: AiStatus | null; onProposals: (f: (ps: Proposal[]) => Proposal[]) => void; onReports: (f: (rs: Report[]) => Report[]) => void
 }) {
   const [busy, setBusy] = useState<string | null>(null)
@@ -606,10 +616,12 @@ export function Explain({ year, company, filings, report, proposals, note, ai, o
     setBusy(from ? `Finding the pages about ${year} in ${from.file} and asking the model…` : 'Asking the model…')
     setMsg(null)
     try {
-      const p = await api<Proposal>('/api/oneoffs/explain', postJson({ company, filings, year, report: from }))
-      onProposals(ps => [...ps.filter(x => x.id !== p.id), p])
+      const p = await api<Proposal>('/api/oneoffs/explain', postJson({ company, filings, notes, year, report: from }))
+      const seen = proposals.find(x => x.id === p.id)
+      onProposals(ps => addProposal(ps, p))
       const failed = p.checks.filter(c => c.pass === false)
-      setMsg(p.status === 'rejected'
+      setMsg(seen ? { text: `The same explanation as before (${PROP_STATUS[seen.status].toLowerCase()}); it’s already under Sources & proposals.` }
+        : p.status === 'rejected'
         ? { text: `The rules rejected the explanation: ${failed.map(c => c.detail).join(' ')} It’s kept under Sources & proposals.`, bad: true }
         : { text: from ? `Explained from ${from.file}, PDF page ${p.source.page}; the quote is on that page. Approve it to pin it.`
           : 'Explained from the numbers only. Approve it to pin it.' })

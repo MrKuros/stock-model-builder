@@ -11,11 +11,13 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, model_validator
 
 import ai
@@ -32,6 +34,19 @@ MAX_PDF = 60 * 1024 * 1024  # annual reports run 5-30 MB
 MAX_ASK = 80  # unmapped tags sent to the LLM per proposal round; a results filing has ~10-50
 MODEL_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*/\d{4}-\d{2}-\d{2}")  # <company-slug>/<YYYY-MM-DD>
 app = FastAPI()
+
+
+@app.middleware("http")
+async def _same_origin(request: Request, call_next):
+    """Only this app's own pages may change the library: a page on another site can send a form or text/plain POST
+    to localhost without a CORS preflight, and the browser would carry it out."""
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if request.headers.get("sec-fetch-site") == "cross-site" or (
+                origin and urlsplit(origin).netloc != request.headers.get("host")):
+            return JSONResponse({"detail": "Requests from other sites aren't accepted."}, status_code=403)
+    # ponytail: no Host allow-list, so DNS rebinding isn't blocked; add one if the app ever listens beyond localhost
+    return await call_next(request)
 
 
 @app.exception_handler(RequestValidationError)
@@ -132,7 +147,7 @@ class Filing(BaseModel):
     facts: dict[str, FiniteFloat]
     unmapped: list[dict] = []
     checks: list[Check] = []
-    model_config = ConfigDict(extra="allow")  # later Phase 3 features may add fields; keep them on save
+    model_config = ConfigDict(extra="allow")  # keep unknown keys from older saves instead of dropping them on save
 
 
 class Report(BaseModel):
@@ -142,14 +157,14 @@ class Report(BaseModel):
     file: str
     year: str
     pages: int
-    model_config = ConfigDict(extra="allow")  # 3.3 may add fields
+    model_config = ConfigDict(extra="allow")  # keep unknown keys from older saves instead of dropping them on save
 
 
 NEW_DRIVERS = ("cogs_pct", "dpo")  # added in 3.4; scenarios saved before lack them
 
 
 class ModelRequest(BaseModel):
-    """The model document (version 4) minus what the engine ignores (excluded_years, saved_at)."""
+    """The model document (version 5) minus what the engine ignores (excluded_years, saved_at)."""
     company: Company
     scenarios: dict[Scenario, dict[str, DriverPath]]
     active: Scenario = "base"
@@ -212,9 +227,10 @@ class ModelDoc(ModelRequest):
     version: Literal[3, 4, 5]
     excluded_years: list[str] = []
     saved_at: str | None = None
-    # ponytail: untyped dicts (mapping proposals, 3.2, add "filing": the filing id). proposals: [{id, kind (mapping | oneoff_note | ar_note), field, value, unit, period, source: {file,
-    # page, quote, tag}, reasoning, checks: [{name, pass, detail}], status (proposed | approved | rejected), ai}];
-    # notes: approved oneoff_note / ar_note results keyed for display
+    # ponytail: proposals are untyped dicts {id, kind (mapping | oneoff_note | ar_note), field, value, unit, period,
+    # source {file, page, quote, tag}, reasoning, checks [{name, pass, detail}], status (proposed | approved |
+    # rejected), ai}; mapping adds "filing", oneoff_note "report"/"from_numbers", ar_note "report"/"pages"/"reply".
+    # The server re-checks every one it acts on; a pydantic Proposal model if anything but our own client writes them
     proposals: list[dict] = []
     # notes (in ModelRequest): "oneoff:FY2020": {proposal, summary, file, page, quote, from_numbers, ai} (3.2b);
     # "ar:segments:FY2021": {proposal, topic, year, file, rows, total, against, ai} (3.3)
@@ -270,16 +286,42 @@ async def parse(file: UploadFile):
     except Exception:  # corrupt / not an xlsx
         raise HTTPException(422, "Couldn't read that file as an Excel workbook. Upload the .xlsx from "
                                  "Screener.in's 'Export to Excel' button.")
-    return _company_payload(co) | {"restated": restatements(co)}
+    restated = restatements(co, MODELS)  # MODELS at call time (tests point it elsewhere)
+    carry = restated and restated["carry"]
+    if carry:  # the saved model's filings are read again by rules against this file: no AI call
+        carry["filings"], _ = reread([Filing.model_validate(f) for f in carry["filings"]], load_mappings(MODELS), co)
+    carry = carry or {}
+    return _company_payload(co, (), carry.get("filings", ()), carry.get("notes")) | {"restated": restated}
 
 
-def load_mappings(root=MODELS):
-    """The user's approved tag mappings ({tag: std key}); none when the file is missing or damaged."""
+def load_mappings(root=MODELS, strict=False):
+    """The user's approved tag mappings ({tag: std key}); none when the file is missing. A damaged file reads as none
+    for parsing, but `strict` (before writing it) refuses it rather than replace the user's mappings."""
     try:
         m = json.loads((root / MAPPINGS).read_bytes())
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
-    return {k: v for k, v in m.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(m, dict) else {}
+    except (OSError, ValueError):
+        m = None
+    if not isinstance(m, dict):
+        if strict:
+            raise HTTPException(409, f"{MAPPINGS} in the models folder is damaged; fix or delete it, then try again.")
+        return {}
+    return {k: v for k, v in m.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def reread(filings, m, co):
+    """Each filing read again by rules from its kept raw file, with mappings `m` and ties against `co` -> (filings as
+    dicts, files that weren't kept: attached before raw files were, so they need attaching again)."""
+    out, missing = [], []
+    for f in filings:
+        raw = MODELS / FILINGS / f"{f.id}.xml"
+        if not FILING_ID.fullmatch(f.id) or not raw.is_file():
+            missing.append(f.file)
+            out.append(f.model_dump())
+            continue
+        out.append({**f.model_dump(), **model.parse_xbrl(raw.read_bytes(), mappings=m, company=co)})
+    return out, missing
 
 
 @app.post("/api/xbrl")
@@ -321,7 +363,7 @@ def propose(req: ProposeRequest):
     if not ai.available():
         raise HTTPException(503, ai.NOT_SET)
     f = req.filing.model_dump()
-    asked = f["unmapped"][:MAX_ASK]  # ponytail: one round of the first 80; propose again after approving some
+    asked = model.unmapped_rows(f)[:MAX_ASK]  # ponytail: one round of the first 80; propose again after approving some
     if not asked:
         raise HTTPException(422, "This filing has no unmapped tags.")
     try:
@@ -354,7 +396,7 @@ def _decided(req, status):
     tag, key = (p.get("source") or {}).get("tag"), p.get("field")
     if p.get("kind") != "mapping" or not isinstance(tag, str) or not isinstance(key, str):
         raise HTTPException(422, "That isn't a mapping proposal.")
-    m = load_mappings(MODELS)
+    m = load_mappings(MODELS, strict=True)
     if status == "approved" and m.get(tag) != key:
         f = next((f for f in req.filings if f.id == p.get("filing")), None)
         if f is None:
@@ -371,15 +413,7 @@ def _decided(req, status):
         return {"proposal": dict(p, status=status), "filings": [f.model_dump() for f in req.filings], "missing": []}
     # ponytail: read-modify-write of one small file; fine for one user, a lock if two tabs approve at once
     _write(MODELS / MAPPINGS, json.dumps(m, indent=1, sort_keys=True).encode())
-    co = req.company and req.company.model_dump()
-    out, missing = [], []
-    for f in req.filings:
-        raw = MODELS / FILINGS / f"{f.id}.xml"
-        if not FILING_ID.fullmatch(f.id) or not raw.is_file():
-            missing.append(f.file)  # attached before raw files were kept: re-attach to apply
-            out.append(f.model_dump())
-            continue
-        out.append({**f.model_dump(), **model.parse_xbrl(raw.read_bytes(), mappings=m, company=co)})
+    out, missing = reread(req.filings, m, req.company and req.company.model_dump())
     return {"proposal": dict(p, status=status), "filings": out, "missing": missing}
 
 
@@ -405,7 +439,7 @@ async def report(file: UploadFile, year: str = Form(...)):
     if len(data) > MAX_PDF:
         raise HTTPException(413, "That file is over 60 MB. Annual reports are usually 5-30 MB.")
     try:
-        pages = ai.pdf_pages(data)
+        pages = await run_in_threadpool(ai.pdf_pages, data)  # pdftotext takes seconds: keep serving other requests
     except ValueError as e:
         raise HTTPException(503 if str(e) == ai.PDF_MISSING else 422, str(e))
     rid = hashlib.sha1(data).hexdigest()[:12]
@@ -416,8 +450,17 @@ async def report(file: UploadFile, year: str = Form(...)):
 class ExplainRequest(BaseModel):
     company: Company
     filings: list[Filing] = []
+    notes: dict = {}  # approved capex notes change the history the flags come from, as on the dashboard
     year: str
     report: Report | None = None  # None: explain from the numbers only
+
+
+def report_pages(r):
+    """An attached report's page text [(reading order, layout)] as kept by /api/report."""
+    raw = MODELS / REPORTS / f"{r.id}.json"
+    if not raw.is_file():
+        raise HTTPException(422, f"The text of {r.file} isn't on this machine any more; attach it again.")
+    return [tuple(p) for p in json.loads(raw.read_bytes())["pages"]]
 
 
 NOTE_LINES = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("other_income", "Other income"), ("pbt", "PBT"),
@@ -433,7 +476,7 @@ def explain(req: ExplainRequest):
     if not ai.available():
         raise HTTPException(503, ai.NOT_SET)
     co = req.company.model_dump()
-    labels, up = model.labels(co["dates"]), model.upgrade(co, [f.model_dump() for f in req.filings])
+    labels, up = model.labels(co["dates"]), model.upgrade(co, [f.model_dump() for f in req.filings], ar_capex(req.notes))
     flags = [o for o in model.detect_oneoffs(up["hist"], labels) if o["year"] == req.year]
     if not flags:
         raise HTTPException(422, f"{req.year} isn't flagged as an unusual year.")
@@ -449,10 +492,7 @@ def explain(req: ExplainRequest):
             checks = [{"name": "Source", "pass": None, "detail": "From the numbers only, no filing read."}]
             source = {"file": None, "page": None, "quote": None, "tag": None}
         else:
-            raw = MODELS / REPORTS / f"{r.id}.json"
-            if not raw.is_file():
-                raise HTTPException(422, f"The text of {r.file} isn't on this machine any more; attach it again.")
-            pages = [tuple(p) for p in json.loads(raw.read_bytes())["pages"]]
+            pages = report_pages(r)
             sent = ai.pick_pages(pages, {o["metric"] for o in flags}, end)
             if not sent:
                 raise HTTPException(422, f"No page of {r.file} mentions exceptional items or the flagged lines. "
@@ -464,7 +504,9 @@ def explain(req: ExplainRequest):
         raise HTTPException(502, str(e))
     summary = reply["summary"].strip()
     ok = all(c["pass"] is not False for c in checks)
-    return {"id": hashlib.sha1(f"oneoff:{req.year}:{r and r.id}:{summary}".encode()).hexdigest()[:12],
+    # the citation is part of the id: the same summary with another quote is another record (a rejected one stays)
+    key = f"oneoff:{req.year}:{r and r.id}:{summary}:{source['page']}:{source['quote']}"
+    return {"id": hashlib.sha1(key.encode()).hexdigest()[:12],
             "kind": "oneoff_note", "field": "oneoff", "value": summary, "unit": None, "period": req.year,
             "source": source, "report": r and r.id, "from_numbers": r is None,
             "reasoning": "; ".join(f["note"] for f in flags), "checks": checks,
@@ -489,10 +531,7 @@ class NotesRequest(BaseModel):
         return i, co.dates[i].date()
 
     def pages(self):
-        raw = MODELS / REPORTS / f"{self.report.id}.json"
-        if not raw.is_file():
-            raise HTTPException(422, f"The text of {self.report.file} isn't on this machine any more; attach it again.")
-        return [tuple(p) for p in json.loads(raw.read_bytes())["pages"]]
+        return report_pages(self.report)
 
 
 def _against(req, topic, i):
@@ -515,9 +554,10 @@ def _ar_note(req, topic, reply, sent, pages):
     A failed check comes back rejected (kept for audit)."""
     i, end = req.year()
     h, r = req.company.hist[i], req.report
-    rows, total, checks = ai.note_checks(topic, reply, pages, sent, end, _against(req, topic, i))
+    ag = _against(req, topic, i)
+    rows, total, checks = ai.note_checks(topic, reply, pages, sent, end, ag)
     ref = {"contingent": ("Net worth", h["share_cap"] + h["reserves"]), "related": ("Revenue", h["revenue"])}.get(topic)
-    against = (_against(req, topic, i) or [None])[0] or ref
+    against = (ag or [None])[0] or ref
     first = rows[0]
     ok = all(c["pass"] is not False for c in checks)
     return {"id": hashlib.sha1(f"ar:{topic}:{r.id}:{json.dumps(reply, sort_keys=True)}".encode()).hexdigest()[:12],
@@ -578,7 +618,7 @@ class NoteDecision(NotesRequest):
 def notes_approve(req: NoteDecision):
     """Re-run the rules on the saved reply against the stored page text (no LLM call); approve only if all pass."""
     p = req.proposal
-    rep = next((r for r in [req.report] if r and r.id == p.get("report")), None)
+    rep = req.report if req.report and req.report.id == p.get("report") else None
     if p.get("kind") != "ar_note" or rep is None or not isinstance(p.get("reply"), dict) or ai.note_shape(p["reply"]):
         raise HTTPException(422, "That isn't an annual-report note proposal, or its report isn't attached.")
     req.report = rep
@@ -730,7 +770,7 @@ RESTATE_TOL = 0.005  # 0.5%: Screener rounds lines to whole crores or 2 decimals
 
 def restatements(co, root=MODELS):
     """Reported years in a freshly imported file that moved by more than 0.5% against the latest saved model of the
-    same company: {id, saved_at, changes: [{year, line, old, new}]}, or None when nothing of it is saved."""
+    same company: {id, saved_at, changes: [{year, line, old, new}], carry: {filings, proposals, notes, reports}}, or None when nothing of it is saved."""
     saved = [p for p in root.glob(f"{slug(co['name'])}*/*.json") if _saved_name(p) == co["name"]]
     for p in sorted(saved, key=lambda p: p.stem, reverse=True):  # newest day first; a damaged file falls back
         model_id = f"{p.parent.name}/{p.stem}"
@@ -743,7 +783,10 @@ def restatements(co, root=MODELS):
                    for y, d, h in zip(model.labels(co["dates"]), co["dates"], co["hist"]) if (o := old.get(d.date()))
                    for k, line in RESTATED
                    if o.get(k) is not None and abs(h[k] - o[k]) > max(RESTATE_TOL * abs(o[k]), 0.01)]
-        return {"id": model_id, "saved_at": doc.saved_at, "changes": changes}
+        # what was attached, proposed and approved there carries over, so re-importing never loses it
+        carry = {k: [x.model_dump(mode="json") if isinstance(x, BaseModel) else x for x in getattr(doc, k)]
+                 for k in ("filings", "proposals", "reports")} | {"notes": doc.notes}
+        return {"id": model_id, "saved_at": doc.saved_at, "changes": changes, "carry": carry}
     return None
 
 

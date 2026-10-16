@@ -31,7 +31,10 @@ def llm(prompt: str) -> str:
     if not cmd:
         raise LLMError(NOT_SET)
     try:
-        r = subprocess.run(shlex.split(cmd), input=prompt, capture_output=True, text=True, timeout=TIMEOUT)
+        # ponytail: run in a fresh empty folder, so an agent-like command never starts beside the repo or models/;
+        # it doesn't stop absolute paths, so the command itself should have no tools (see the handoff notes)
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run(shlex.split(cmd), input=prompt, capture_output=True, text=True, timeout=TIMEOUT, cwd=d)
     except subprocess.TimeoutExpired:
         raise LLMError(f"LLM_CMD gave no reply within {TIMEOUT} seconds.") from None
     except (OSError, ValueError) as e:  # not found, not executable, unbalanced quotes
@@ -48,7 +51,7 @@ def first_json(text):
         if ch in "[{":
             try:
                 return dec.raw_decode(text, i)[0]
-            except ValueError:
+            except (ValueError, RecursionError):  # RecursionError: thousands of nested brackets
                 continue
     raise ValueError("no JSON object or array in the reply")
 
@@ -161,6 +164,9 @@ ONEOFF_WORDS = {"oi_pct": ("other income", "fair value", "impairment", "write-of
                               "right-of-use", "amalgamation", "merger", "business combination"),
                 "ebitda_margin": ("margin", "impairment", "provision", "write-off", "write off", "one-off")}
 COMMON_WORDS = (("exceptional", 3), ("one-time", 3), ("one time", 3), ("one-off", 3), ("non-recurring", 3))
+# ponytail: a one-off explanation quotes a sentence (5 words at least); a note item quotes a table row, which can be
+# as short as "Bank guarantees 1,234" and must also contain its amount, so 3 words is enough there
+MIN_QUOTE_WORDS, MIN_NOTE_WORDS = 5, 3
 MAX_PAGES, MAX_PAGE_CHARS = 4, 8000  # ponytail: the 4 best-scoring pages, cut to 8k characters each (~10k tokens)
 
 
@@ -181,6 +187,34 @@ def mentions_year(pages, end: date):
     """Pages that name the financial year: a report for that year names it on many pages."""
     yr = year_re(end)
     return sum(1 for raw, _ in pages if yr.search(norm(raw)))
+
+
+def year_counts(pages, end: date):
+    """{-1, 0, 1: pages naming the year before, the year, the year after}: a report names its own year most."""
+    shift = lambda k: end.replace(year=end.year + k, day=28 if (end.month, end.day) == (2, 29) else end.day)  # noqa: E731
+    return {k: mentions_year(pages, shift(k)) for k in (-1, 0, 1)}
+
+
+def year_check(pages, end: date):
+    """Rule: the report is for the year: at least 3 pages name it, and more than name either neighbouring year (the
+    FY2021 report names FY2020 on a third of its pages, as comparatives)."""
+    n = year_counts(pages, end)
+    ok = n[0] >= 3 and n[0] > max(n[-1], n[1])
+    k = max((-1, 1), key=lambda k: n[k])
+    other = end.replace(year=end.year + k, day=28 if (end.month, end.day) == (2, 29) else end.day)
+    detail = f"{n[0]} pages name the year" + (f", {n[k]} the year to {other:%d %b %Y}." if n[k] else ".")
+    if not ok:
+        detail += (f" Is this the report for the year to {other:%d %b %Y}?" if n[k] >= n[0] and n[k]
+                   else " Is this the right year's report?")
+    return {"name": "Report for the year", "pass": ok, "detail": detail}
+
+
+def on_page(quote, texts):
+    """The quote occurs in one of a page's texts (normalised), starting and ending on word / number boundaries: a
+    quote cut inside a number ("(21,23" of "(21,234.56)", "Rs 5" of "Rs 500") isn't on the page."""
+    q = norm(quote or "")
+    pat = re.compile(r"(?<![\w.,])" + re.escape(q) + r"(?![\w]|[.,]\d)")
+    return bool(q) and any(pat.search(norm(t)) for t in texts)
 
 
 def sentences(s):
@@ -225,8 +259,7 @@ def quote_checks(reply, pages, sent, end: date):
     """Rules on a cited explanation: the page was one the model was given, the quote is on it (normalised), long
     enough to mean something, and the report is for that year. [{name, pass, detail}]."""
     page, quote = reply.get("page"), norm(reply.get("quote") or "")
-    on = 1 <= page <= len(pages) and any(quote in norm(t) for t in pages[page - 1]) if isinstance(page, int) else False
-    n = mentions_year(pages, end)
+    on = isinstance(page, int) and 1 <= page <= len(pages) and on_page(quote, pages[page - 1])
     return [
         {"name": "Page was read", "pass": page in sent,
          "detail": f"Page {page} was among the pages sent ({', '.join(map(str, sent))})." if page in sent
@@ -234,10 +267,9 @@ def quote_checks(reply, pages, sent, end: date):
         {"name": "Quote is on the page", "pass": on,
          "detail": f"The quote occurs on page {page}." if on
          else f"The quote doesn't occur on page {page}, so the explanation is rejected."},
-        {"name": "Quote long enough", "pass": len(quote.split()) >= 5,
-         "detail": f"{len(quote.split())} words (at least 5)."},
-        {"name": "Report for the year", "pass": n >= 3,
-         "detail": f"{n} pages name the year." + ("" if n >= 3 else " Is this the right year's report?")},
+        {"name": "Quote long enough", "pass": len(quote.split()) >= MIN_QUOTE_WORDS,
+         "detail": f"{len(quote.split())} words (at least {MIN_QUOTE_WORDS})."},
+        year_check(pages, end),
     ]
 
 
@@ -269,8 +301,16 @@ TOPICS = {
 }
 TOPIC_PAGES = 3  # ponytail: the 3 best pages per topic, cut to 8k characters; a missed note means attach + read again
 UNITS = {"crore": 1.0, "lakh": 0.01, "million": 0.1, "billion": 100.0, "thousand": 1e-4, "rupees": 1e-7}
-UNIT_WORDS = {"crore": ("crore", " cr"), "lakh": ("lakh", "lac"), "million": ("million", " mn"),
-              "billion": ("billion", " bn"), "thousand": ("thousand", "'000", "000s")}
+# unit words as whole words on norm() text ("cr" must not match "credit", "lac" not "place")
+UNIT_RE = {u: re.compile(p) for u, p in {
+    "crore": r"\b(?:crores?|cr)\b", "lakh": r"\b(?:lakhs?|lacs?)\b", "million": r"\b(?:millions?|mn)\b",
+    "billion": r"\b(?:billions?|bn)\b", "thousand": r"\bthousands?\b|'000\b|\b000s\b"}.items()}
+# a table heading that names the unit: "(Rs in lakh)", "(All amounts in ₹ crore)", "Amounts in INR million"; some
+# PDFs print the rupee sign as a backtick ("(` crore)", TCS)
+UNIT_HEAD = re.compile(r"(?:\brs\.?|₹|`|\binr\b|\brupees\b|\bamounts?\s+(?:are\s+)?in)\s*(?:in\s*)?(?:rs\.?\s*|₹\s*|inr\s*)?"
+                       r"(crores?|cr|lakhs?|lacs?|millions?|mn|billions?|bn|thousands?|'000)\b")
+HEAD_UNIT = {"cr": "crore", "la": "lakh", "mi": "million", "mn": "million", "bi": "billion", "bn": "billion",
+             "th": "thousand", "'0": "thousand"}
 TIE = {"segments": 0.02, "maturity": 0.05, "capex": 0.02}  # sums agree with the statements within these
 
 
@@ -302,7 +342,7 @@ def note_prompt(topic, year, end: date, pages):
             f"Extract {what}. Use the consolidated figures when the report has both, and the column for the year to "
             f"{end:%d %B %Y}, not the previous year. For every item give the amount exactly as printed (a number, "
             "in the report's unit), the page number it is on, and a quote copied character for character from that "
-            "page that contains the amount (the table row or sentence, 5 to 40 words). Give the unit the amounts are "
+            "page that contains the amount (the table row or sentence, 3 to 40 words). Give the unit the amounts are "
             'in: "crore", "lakh", "million", "billion", "thousand" or "rupees". Never convert, add up or estimate; '
             'if the pages don\'t show it, answer {"found": false}.\n'
             'Answer as a JSON object: {"found": true, "unit": "crore", "items": [{"label": "...", "amount": 123.4, '
@@ -343,7 +383,7 @@ def amount(v):
         x = float(s.strip("()"))
     except ValueError:
         return None
-    return -x if neg else x
+    return (-x if neg else x) if abs(x) < 1e15 else None  # also None for "inf", "1e999" and "nan"
 
 
 def in_quote(x, quote):
@@ -352,47 +392,99 @@ def in_quote(x, quote):
     return any(n is not None and abs(n - abs(x)) <= 0.005 + 1e-9 * abs(x) for n in nums)
 
 
+NUM = re.compile(r"\(?-?\d[\d,]*(?:\.\d+)?\)?")
+
+
+def row_of(quote, layout):
+    """A quote that starts with a number may start mid-row, after the current year's column: it gets the amounts
+    printed just before it on its -layout line, up to the row's label (a word). A quote that starts with its label
+    is the row (before it may be the other column of a two-column page)."""
+    t = "\n".join(norm(line) for line in layout.split("\n"))
+    m = re.search("[ \n]".join(map(re.escape, norm(quote).split())), t) if norm(quote) else None
+    if not m or not re.match(r"[\d(\-]", m.group()):
+        return m.group() if m else norm(quote)
+    before = t[t.rfind("\n", 0, m.start()) + 1:m.start()]
+    return re.search(r"[\d(),.\- ]*$", before).group() + m.group()
+
+
+def first_amount(row, v):
+    """The first amount printed in a table row: bracketed, with a thousands comma, or 3+ digits, so note numbers
+    (5, 12, 4.1) and years are skipped; a number equal to `v` counts too. None when there is none."""
+    for s in NUM.findall(row):
+        n = amount(s)
+        if n is None or re.fullmatch(r"(?:19|20)\d\d", s):
+            continue
+        if "(" in s or "," in s or len(s.lstrip("(-").split(".")[0]) >= 3 or abs(abs(n) - abs(v)) <= 0.005 + 1e-9 * abs(v):
+            return n
+    return None
+
+
 def note_checks(topic, reply, pages, sent, end: date, against=None):
     """Rules on an extracted note: every item's page was sent, its quote is on that page, its amount parses and is in
     its quote, the unit is printed on a cited page, the report is for the year, and the sum ties to one of `against`
     [(label, Rs crore)] where the topic has a tie (TIE). Returns (rows in Rs crore, total, checks)."""
     unit, items = reply["unit"], reply["items"]
-    rows, bad_page, bad_quote, bad_num = [], [], [], []
+    rows, bad_page, bad_quote, short, bad_num, bad_col, col_known = [], [], [], [], [], [], 0
     for x in items:
         page, quote, v = x["page"], norm(x["quote"]), amount(x["amount"])
-        on = 1 <= page <= len(pages) and any(quote in norm(t) for t in pages[page - 1])
+        valid = 1 <= page <= len(pages)
         if page not in sent:
             bad_page.append(x["label"])
-        if not on or len(quote.split()) < 3:
+        if not (valid and on_page(quote, pages[page - 1])):
             bad_quote.append(x["label"])
+        elif len(quote.split()) < MIN_NOTE_WORDS:
+            short.append(x["label"])
         if v is None or not in_quote(v, x["quote"]):
             bad_num.append(x["label"])
+        elif topic == "capex":
+            # ponytail: Ind AS statements print the current year's column first; a layout that doesn't would fail here
+            first = first_amount(row_of(x["quote"], pages[page - 1][1]) if valid else quote, v)
+            col_known += first is not None
+            if first is not None and abs(abs(first) - abs(v)) > 0.005 + 1e-9 * abs(v):
+                bad_col.append(x["label"])
         if v is not None and topic != "segments":
             v = abs(v)  # capex, debt due, claims and transactions are sizes; a cash outflow prints in brackets
         rows.append({"label": x["label"].strip()[:120], "amount": None if v is None else v * UNITS[unit], "raw": x["amount"],
                      "page": page, "quote": x["quote"].strip()[:400]})
-    cited = {x["page"] for x in items if 1 <= x["page"] <= len(pages)}
-    unit_seen = (not any(w in norm(pages[p - 1][0]) for p in cited for ws in UNIT_WORDS.values() for w in ws)
-                 if unit == "rupees" else any(w in norm(pages[p - 1][0]) for p in cited for w in UNIT_WORDS[unit]))
-    n_items, yrs = len(items), mentions_year(pages, end)
+    cited = sorted({x["page"] for x in items if 1 <= x["page"] <= len(pages)})
+    text = {p: norm(pages[p - 1][0]) for p in cited}
+    heads = {p: {HEAD_UNIT[h[:2]] for h in UNIT_HEAD.findall(text[p])} for p in cited}
+    said = set().union(*heads.values())
+    # rules settle the unit: a table heading on a cited page wins; with none, the claimed unit must be printed there
+    if said:
+        unit_seen = said == {unit}
+        why = ("" if unit_seen else f" But cited pages say {' and '.join(sorted(said))} in their headings." if len(said) > 1
+               else f" But page {next(p for p in cited if heads[p])} says Rs in {next(iter(said))}.")
+    elif unit == "rupees":
+        unit_seen = not any(r.search(t) for t in text.values() for r in UNIT_RE.values())
+        why = "" if unit_seen else " But a cited page names a larger unit."
+    else:
+        unit_seen = any(UNIT_RE[unit].search(t) for t in text.values())
+        why = "" if unit_seen else f" But no cited page says {unit}."
+    n_items = len(items)
     what = lambda bad: ", ".join(bad[:4]) + (f" and {len(bad) - 4} more" if len(bad) > 4 else "")  # noqa: E731
     total = sum(r["amount"] for r in rows if r["amount"] is not None)
     checks = [
         {"name": "Pages were read", "pass": not bad_page,
          "detail": f"Every item cites one of the pages sent ({', '.join(map(str, sent))})." if not bad_page
          else f"{what(bad_page)} cite a page that wasn't sent ({', '.join(map(str, sent))})."},
-        {"name": "Quotes are on their pages", "pass": not bad_quote,
-         "detail": ("The quote occurs on the cited page." if n_items == 1 else f"All {n_items} quotes occur on the cited pages.") if not bad_quote
-         else f"The quote for {what(bad_quote)} doesn't occur on its page, so the note is rejected."},
+        {"name": "Quotes are on their pages", "pass": not (bad_quote or short),
+         "detail": ("The quote occurs on the cited page." if n_items == 1 else f"All {n_items} quotes occur on the cited pages.")
+         if not (bad_quote or short) else " ".join(
+             ([f"The quote for {what(bad_quote)} doesn't occur on its page."] if bad_quote else [])
+             + ([f"The quote for {what(short)} is under {MIN_NOTE_WORDS} words."] if short else [])) + " So the note is rejected."},
         {"name": "Numbers are in their quotes", "pass": not bad_num,
          "detail": ("The amount parses and appears in its quote." if n_items == 1 else f"All {n_items} amounts parse and appear in their quotes.") if not bad_num
          else f"The amount for {what(bad_num)} doesn't parse or isn't in its quote."},
         {"name": "Unit", "pass": unit_seen,
-         "detail": f"Amounts in {unit}, converted to Rs crore by rules (x {UNITS[unit]:g})."
-         + ("" if unit_seen else f" But no cited page says {unit}.")},
-        {"name": "Report for the year", "pass": yrs >= 3,
-         "detail": f"{yrs} pages name the year." + ("" if yrs >= 3 else " Is this the right year's report?")},
+         "detail": f"Amounts in {unit}, converted to Rs crore by rules (x {UNITS[unit]:g})." + why},
+        year_check(pages, end),
     ]
+    if topic == "capex":
+        checks.append({"name": "Current-year column", "pass": False if bad_col else True if col_known else None,
+                       "detail": f"{what(bad_col)} isn't the first amount in its row (the current year's column), so "
+                       "it may be the previous year's." if bad_col else "Each amount is the first in its row, the "
+                       "current year's column." if col_known else "No row shows which column the amount is from."})
     if topic in TIE:
         tol, cands = TIE[topic], [(k, v) for k, v in against or () if v]
         if not cands:
