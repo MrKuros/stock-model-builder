@@ -107,6 +107,7 @@ def main():
     assert model.data_checks(co) == [], model.data_checks(co)
     assert co["hist"][1]["cfi"] is None and co["hist"][1]["net_cf"] is None, "missing CF rows must not be 0"
     quarters_check(tmp, co)
+    xbrl_check(co)
     m = co["market"]
     assert m["price"] == 1600 and m["shares"] == 5.0 and m["shares_hist"] == [5.0] * 10, m
     assert m["price_hist"][0] == 500 and m["price_hist"][-1] is None and len(m["price_hist"]) == 10, m
@@ -346,6 +347,120 @@ def quarters_check(tmp, co):
     fake_screener(p)
     _edit_rows(p, lambda label, row: label == "Expenses" and setattr(row[2], "value", "n/a"))
     assert model.parse_screener(p)["quarters"]["rows"]["expenses"][1] is None
+
+
+def fake_xbrl(co, quarter=False, web=False, standalone=False, extra=""):
+    """Hand-written NSE results XBRL for the synthetic company, laid out like the real files (in-bse-fin elements,
+    rupees with decimals -7, OneD = the quarter, FourD = the year to date, OneI = the balance sheet date). A Q4
+    filing (default) carries the last reported year; quarter=True the last Screener quarter. web=True drops the
+    context definitions, as NSE's "_WEB" files do, and puts the year's cash flow under the quarter's context."""
+    if quarter:
+        i = len(co["quarters"]["dates"]) - 1
+        end, r = co["quarters"]["dates"][i], {k: v[i] for k, v in co["quarters"]["rows"].items()}
+        y = {"revenue": r["sales"], "other_income": r["other_income"], "dep": r["depreciation"],
+             "interest": r["interest"], "pbt": r["pbt"], "tax": r["tax"] or 0.0, "pat": r["net_profit"]}
+        start, ytd = datetime(end.year, end.month - 2, 1), datetime(end.year if end.month > 3 else end.year - 1, 4, 1)
+    else:
+        y = co["hist"][-1]
+        end, start = co["dates"][-1], datetime(co["dates"][-1].year, 1, 1)
+        ytd = datetime(end.year - 1, 4, 1)
+    rs = lambda v: f"{v * 1e7:.2f}"  # noqa: E731
+    ctx = lambda i, a, b, dim="": (  # noqa: E731
+        f'<xbrli:context id="{i}"><xbrli:entity><xbrli:identifier scheme="http://www.nseindia.com/NSESymbol">TESTIND'
+        f'</xbrli:identifier></xbrli:entity><xbrli:period>'
+        + (f"<xbrli:instant>{b:%Y-%m-%d}</xbrli:instant>" if a is None else
+           f"<xbrli:startDate>{a:%Y-%m-%d}</xbrli:startDate><xbrli:endDate>{b:%Y-%m-%d}</xbrli:endDate>")
+        + f"</xbrli:period>{dim}</xbrli:context>")
+    fact = lambda tag, c, v, unit="INR": (  # noqa: E731
+        f'<in-bse-fin:{tag} contextRef="{c}" unitRef="{unit}" decimals="-7">{rs(v)}</in-bse-fin:{tag}>')
+    head = "".join(f'<in-bse-fin:{t} contextRef="{c}">{v}</in-bse-fin:{t}>' for c, a in (("OneD", start), ("FourD", ytd))
+                   for t, v in (("DateOfStartOfReportingPeriod", f"{a:%Y-%m-%d}"),
+                                ("DateOfEndOfReportingPeriod", f"{end:%Y-%m-%d}"),
+                                ("NatureOfReportStandaloneConsolidated", "Standalone" if standalone else "Consolidated")))
+    pl = lambda c, k: "".join(fact(t, c, k * v) for t, v in (  # noqa: E731  k scales the quarter's share of the year
+        ("RevenueFromOperations", y["revenue"]), ("OtherIncome", y["other_income"]),
+        ("DepreciationDepletionAndAmortisationExpense", y["dep"]), ("FinanceCosts", y["interest"]),
+        ("ProfitBeforeTax", y["pbt"]), ("TaxExpense", y["tax"]),
+        ("ProfitLossForPeriodFromContinuingOperations", y["pbt"] - y["tax"]),
+        ("ProfitLossForPeriod", y["pbt"] - y["tax"]), ("ProfitOrLossAttributableToOwnersOfParent", y["pat"])))
+    seg = ctx("OneSegment01D", start, end, '<xbrli:scenario><xbrldi:explicitMember dimension="in-bse-fin:'
+              'DescriptionOfReportableSegmentAxis">in-bse-fin:OneReportableSegment01Member</xbrldi:explicitMember>'
+              '</xbrli:scenario>')
+    contexts = "" if web else ctx("OneD", start, end) + ctx("FourD", ytd, end) + ctx("OneI", None, end) + seg
+    cash = "" if quarter else (fact("CashFlowsFromUsedInOperatingActivities", "OneD" if web else "FourD", 321.5)
+                               + fact("PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",
+                                      "OneD" if web else "FourD", 88.25))
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<xbrli:xbrl xmlns:in-bse-fin="http://www.bseindia.com/xbrl/fin/'
+        '2020-03-31/in-bse-fin" xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:xbrldi="http://xbrl.org/2006/'
+        'xbrldi" xmlns:iso4217="http://www.xbrl.org/2003/iso4217">' + contexts
+        + '<xbrli:unit id="INR"><xbrli:measure>iso4217:INR</xbrli:measure></xbrli:unit>'
+        '<xbrli:unit id="INRLakhs"><xbrli:measure>iso4217:INR</xbrli:measure></xbrli:unit>'
+        '<in-bse-fin:Symbol contextRef="OneD">TESTIND</in-bse-fin:Symbol>' + head
+        + pl("OneD", 1.0 if quarter else 0.26) + pl("FourD", 3.0 if quarter else 1.0) + cash
+        + fact("RevenueFromOperations", "OneSegment01D", 123.0)  # a segment: a breakdown, never a statement line
+        + fact("TradeReceivablesCurrent", "OneI", co["hist"][-1]["receivables"])
+        + fact("BorrowingsNoncurrent", "OneI", 150.0) + fact("BorrowingsCurrent", "OneI", 50.0)
+        + fact("RoyaltyIncome", "OneD" if quarter else "FourD", 4.2) + extra + "</xbrli:xbrl>").encode()
+
+
+def xbrl_check(co):
+    """XBRL results filings: periods, units, contexts (defined or not), duplicates, unknown tags, ties, safety."""
+    h = co["hist"][-1]
+    for web in (False, True):  # contexts defined, and the _WEB style where they aren't
+        f = model.parse_xbrl(fake_xbrl(co, web=web), company=co)
+        assert (f["kind"], f["period_start"], f["period_end"]) == ("annual", "2024-04-01", "2025-03-31"), f
+        assert f["company"] == "TESTIND" and f["consolidated"] is True, f
+        fx = f["facts"]
+        assert abs(fx["revenue"] - h["revenue"]) < 1e-6 and abs(fx["pat"] - h["pat"]) < 1e-6, fx  # rupees -> crore
+        assert fx["cfo"] == 321.5 and fx["purchase_ppe"] == 88.25, "a Q4 filing's cash flow is the year's"
+        assert fx["receivables"] == h["receivables"] and fx["borrowings"] == 200.0, fx
+        assert f["unmapped"] == [{"tag": "RoyaltyIncome", "value": 4.2, "context": "FourD"}], f["unmapped"]
+        assert all(c["pass"] for c in f["checks"]), f["checks"]
+        assert [c["name"] for c in f["checks"]] == ["PBT less tax = profit", "Revenue for FY2025 matches Screener",
+                                                    "Net profit for FY2025 matches Screener"], f["checks"]
+    # the quarter (not the nine months to date) of a Q3 filing, tied to Screener's quarter; no cash flow kept
+    f = model.parse_xbrl(fake_xbrl(co, quarter=True), company=co)
+    assert (f["kind"], f["period_start"], f["period_end"]) == ("quarter", "2025-10-01", "2025-12-31"), f
+    assert abs(f["facts"]["revenue"] - co["quarters"]["rows"]["sales"][-1]) < 1e-6, f["facts"]
+    assert [c["pass"] for c in f["checks"]] == [True, True, True] and "cfo" not in f["facts"], f["checks"]
+    # approved mappings are applied by rules on the next parse
+    f = model.parse_xbrl(fake_xbrl(co), mappings={"RoyaltyIncome": "royalty"})
+    assert f["facts"]["royalty"] == 4.2 and f["unmapped"] == [], f
+    assert all(c["name"] != "Ties to Screener" for c in f["checks"]), "no company: no tie checks"
+    # a mismatch is reported, not blocked; a standalone filing says why it may differ
+    mis = model.parse_xbrl(fake_xbrl(co, standalone=True, extra='<in-bse-fin:RevenueFromOperations contextRef="FourD" '
+                           f'unitRef="INR" decimals="-7">{h["revenue"] * 1.03e7:.2f}</in-bse-fin:RevenueFromOperations>'),
+                           company=co)
+    rev = next(c for c in mis["checks"] if c["name"].startswith("Revenue"))
+    assert mis["consolidated"] is False and rev["pass"] is True, "the first of two different values is kept"
+    dup = next(c for c in mis["checks"] if c["name"] == "One value for revenue")
+    assert dup["pass"] is False and "kept the first" in dup["detail"], mis["checks"]
+    moved = dict(co, hist=[*co["hist"][:-1], dict(h, revenue=h["revenue"] / 1.03)])
+    rev = next(c for c in model.parse_xbrl(fake_xbrl(co, standalone=True), company=moved)["checks"]
+               if c["name"].startswith("Revenue"))
+    assert rev["pass"] is False and "3.0% apart" in rev["detail"] and "standalone" in rev["detail"], rev
+    # exact duplicates (the real files repeat facts) are fine; a year Screener doesn't have is a note
+    same = model.parse_xbrl(fake_xbrl(co, extra='<in-bse-fin:TaxExpense contextRef="FourD" unitRef="INR" '
+                                      f'decimals="-7">{h["tax"] * 1e7:.2f}</in-bse-fin:TaxExpense>'), company=co)
+    assert all(c["pass"] for c in same["checks"]), same["checks"]
+    later = dict(co, dates=co["dates"][:-1], hist=co["hist"][:-1])
+    assert model.parse_xbrl(fake_xbrl(co), company=later)["checks"][-1]["pass"] is None
+    # units by rules: a lakhs unit is divided by 100, a pure number is not money
+    lakhs = model.parse_xbrl(fake_xbrl(co).replace(
+        b'<in-bse-fin:TradeReceivablesCurrent contextRef="OneI" unitRef="INR"',
+        b'<in-bse-fin:TradeReceivablesCurrent contextRef="OneI" unitRef="INRLakhs"'))
+    assert abs(lakhs["facts"]["receivables"] - h["receivables"] * 1e5) < 1e-3, lakhs["facts"]["receivables"]
+    # bad files: DTDs and entities are refused before parsing; not XML; XML that isn't XBRL
+    bomb = b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]><x>&b;</x>'
+    for bad, msg in ((bomb, "DTD"), (b"<?xml version='1.0'?><!doctype x SYSTEM 'file:///etc/passwd'><x/>", "DTD"),
+                     ("<x/>".encode("utf-16"), "DTD"), (b"not xml", "well-formed"), (b"<html></html>", "XBRL")):
+        try:
+            model.parse_xbrl(bad)
+        except ValueError as e:
+            assert msg in str(e), (bad, e)
+        else:
+            raise AssertionError(bad)
 
 
 def _flat_scenarios(co):
@@ -605,6 +720,44 @@ def library_check(root, co, scenarios):
     (root / "test-industries-ltd" / "2026-10-14.json").unlink()
     fails(server.delete_model, 404, "test-industries-ltd/2026-10-15")
     assert server.list_models(root) == []
+    xbrl_api_check(server, root, co, data)
+
+
+def xbrl_api_check(server, root, co, data):
+    """POST /api/xbrl reads a filing with the library's approved mappings; the filing saves and reopens with the model."""
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    client, models = TestClient(server.app), server.MODELS
+    server.MODELS = root  # never the real library
+    try:
+        (root / server.MAPPINGS).write_text(json.dumps({"RoyaltyIncome": "royalty"}))
+        assert server.list_models(root) == [], "mappings.json at the root isn't a model"
+        r = client.post("/api/xbrl", files={"file": ("q4.xml", fake_xbrl(co))},
+                        data={"company": json.dumps(data["company"])})
+        assert r.status_code == 200, r.text
+        f = r.json()
+        assert f["file"] == "q4.xml" and len(f["id"]) == 12 and f["facts"]["royalty"] == 4.2 and f["unmapped"] == [], f
+        assert [c["pass"] for c in f["checks"]] == [True, True, True], f["checks"]
+        (root / server.MAPPINGS).write_text("{damaged")
+        assert server.load_mappings(root) == {}
+        for body, status in ((b"x" * (server.MAX_UPLOAD + 1), 413), (b"<!DOCTYPE x><x/>", 422), (b"<a>", 422)):
+            r = client.post("/api/xbrl", files={"file": ("bad.xml", body)})
+            assert r.status_code == status and isinstance(r.json()["detail"], str), (status, r.text)
+        r = client.post("/api/xbrl", files={"file": ("q4.xml", fake_xbrl(co))}, data={"company": "{}"})
+        assert r.status_code == 422, r.text
+    finally:
+        server.MODELS = models
+        (root / server.MAPPINGS).unlink()
+    mid, _ = server.save_model(server.ModelDoc.model_validate(dict(data, filings=[f])), root)
+    back = server.load_model(mid, root).model_dump(mode="json")["filings"]
+    assert back == [f], "a filing (checks with 'pass', facts, unmapped) round-trips through the library"
+    for bad in (dict(f, kind="weekly"), dict(f, facts={"revenue": "lots"})):
+        try:
+            server.ModelDoc.model_validate(dict(data, filings=[bad]))
+            raise AssertionError(f"expected rejection: {bad['kind']}")
+        except ValidationError:
+            pass
+    server.delete_model(mid, root)
 
 
 def restatement_check(server, root, co):
