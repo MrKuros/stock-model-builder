@@ -18,12 +18,16 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, model_validator
 
+import ai
 import model
 
 MAX_UPLOAD = 5 * 1024 * 1024  # Export exports are ~50 KB
 MAX_SAVE = 512 * 1024  # a saved model document is ~10-20 KB
 MODELS = Path(__file__).parent / "models"  # the local library, gitignored
 MAPPINGS = "mappings.json"  # approved XBRL tag -> std key, at the library root (list_models only reads */*.json)
+FILINGS = "_filings"  # the XBRL files as uploaded, <id>.xml, re-read when a mapping is approved ("_": never a slug)
+FILING_ID = re.compile(r"[0-9a-f]{12}")
+MAX_ASK = 80  # unmapped tags sent to the LLM per proposal round; a results filing has ~10-50
 MODEL_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*/\d{4}-\d{2}-\d{2}")  # <company-slug>/<YYYY-MM-DD>
 app = FastAPI()
 
@@ -195,7 +199,7 @@ class ModelDoc(ModelRequest):
     version: Literal[3, 4, 5]
     excluded_years: list[str] = []
     saved_at: str | None = None
-    # ponytail: untyped until the features that fill them land. proposals: [{id, kind (mapping | oneoff_note | ar_note), field, value, unit, period, source: {file,
+    # ponytail: untyped dicts (mapping proposals, 3.2, add "filing": the filing id). proposals: [{id, kind (mapping | oneoff_note | ar_note), field, value, unit, period, source: {file,
     # page, quote, tag}, reasoning, checks: [{name, pass, detail}], status (proposed | approved | rejected), ai}];
     # notes: approved oneoff_note / ar_note results keyed for display
     proposals: list[dict] = []
@@ -267,7 +271,101 @@ async def xbrl(file: UploadFile, company: str | None = Form(None)):
         f = model.parse_xbrl(data, mappings=load_mappings(MODELS), company=co)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    return {"id": hashlib.sha1(data).hexdigest()[:12], "file": (file.filename or "filing.xml")[:200], **f}
+    fid = hashlib.sha1(data).hexdigest()[:12]
+    _write(MODELS / FILINGS / f"{fid}.xml", data)  # kept to be re-read by rules when a mapping is approved
+    return {"id": fid, "file": (file.filename or "filing.xml")[:200], **f}
+
+
+# ---------- AI-proposed mappings for leftover tags: the LLM proposes, rules check, the user approves ----------
+
+@app.get("/api/ai")
+def ai_status():
+    return {"available": ai.available(), "message": None if ai.available() else ai.NOT_SET}
+
+
+class ProposeRequest(BaseModel):
+    filing: Filing
+
+
+@app.post("/api/mappings/propose")
+def propose(req: ProposeRequest):
+    """Ask the LLM which std key each unmapped tag is, and check every answer by rules (model.mapping_checks). The
+    proposals go back to the client, which keeps them in the document; nothing is used until approved."""
+    if not ai.available():
+        raise HTTPException(503, ai.NOT_SET)
+    f = req.filing.model_dump()
+    asked = f["unmapped"][:MAX_ASK]  # ponytail: one round of the first 80; propose again after approving some
+    if not asked:
+        raise HTTPException(422, "This filing has no unmapped tags.")
+    try:
+        items = ai.propose_mappings(asked, model.XBRL_KEYS, f)
+    except ai.LLMError as e:
+        raise HTTPException(502, str(e))
+    seen = set()
+    items = [x for x in items if not (x["tag"] in seen or seen.add(x["tag"]))]  # one answer per tag, the first
+    keys = [x["std_key"] for x in items]
+    out = []
+    for i, x in enumerate(items):
+        if x["std_key"] is None:
+            continue
+        value, unit, checks = model.mapping_checks(f, x["tag"], x["std_key"], keys[:i] + keys[i + 1:])
+        out.append({"id": hashlib.sha1(f"{f['id']}:{x['tag']}:{x['std_key']}".encode()).hexdigest()[:12],
+                    "kind": "mapping", "filing": f["id"], "field": x["std_key"][:80], "value": value, "unit": unit,
+                    "period": f["period_end"], "source": {"file": f["file"], "page": None, "quote": None, "tag": x["tag"]},
+                    "reasoning": str(x.get("reasoning") or "")[:500], "checks": checks, "status": "proposed", "ai": True})
+    return {"proposals": out, "left": [x["tag"] for x in items if x["std_key"] is None]}
+
+
+class Decision(BaseModel):
+    proposal: dict
+    filings: list[Filing] = []  # the document's filings, re-read with the new mappings
+    company: Company | None = None  # for the tie checks on re-reading
+
+
+def _decided(req, status):
+    p = req.proposal
+    tag, key = (p.get("source") or {}).get("tag"), p.get("field")
+    if p.get("kind") != "mapping" or not isinstance(tag, str) or not isinstance(key, str):
+        raise HTTPException(422, "That isn't a mapping proposal.")
+    m = load_mappings(MODELS)
+    if status == "approved" and m.get(tag) != key:
+        f = next((f for f in req.filings if f.id == p.get("filing")), None)
+        if f is None:
+            raise HTTPException(422, "The filing this proposal came from isn't attached any more.")
+        _, _, checks = model.mapping_checks(f.model_dump(), tag, key)
+        failed = [c for c in checks if c["pass"] is False]
+        if failed:
+            raise HTTPException(422, "The rules reject this mapping: " + "; ".join(c["detail"] for c in failed))
+        p = dict(p, checks=checks)
+        m[tag] = key
+    elif status == "rejected" and m.get(tag) == key:
+        del m[tag]  # an approved mapping taken back; it applies to every model in the library
+    else:
+        return {"proposal": dict(p, status=status), "filings": [f.model_dump() for f in req.filings], "missing": []}
+    # ponytail: read-modify-write of one small file; fine for one user, a lock if two tabs approve at once
+    _write(MODELS / MAPPINGS, json.dumps(m, indent=1, sort_keys=True).encode())
+    co = req.company and req.company.model_dump()
+    out, missing = [], []
+    for f in req.filings:
+        raw = MODELS / FILINGS / f"{f.id}.xml"
+        if not FILING_ID.fullmatch(f.id) or not raw.is_file():
+            missing.append(f.file)  # attached before raw files were kept: re-attach to apply
+            out.append(f.model_dump())
+            continue
+        out.append({**f.model_dump(), **model.parse_xbrl(raw.read_bytes(), mappings=m, company=co)})
+    return {"proposal": dict(p, status=status), "filings": out, "missing": missing}
+
+
+@app.post("/api/mappings/approve")
+def approve(req: Decision):
+    """Save the tag's mapping to mappings.json (after the rules pass again) and re-read the filings by rules."""
+    return _decided(req, "approved")
+
+
+@app.post("/api/mappings/reject")
+def reject(req: Decision):
+    """Mark it rejected (kept for audit); if it was approved, its mapping leaves mappings.json and the filings are re-read."""
+    return _decided(req, "rejected")
 
 
 @app.get("/api/sample")
@@ -351,17 +449,20 @@ def save_model(doc: ModelDoc, root=MODELS, now=None):
     if any(_saved_name(f) not in (None, name) for f in (root / folder).glob("*.json")):
         folder += "-" + hashlib.sha1(name.encode()).hexdigest()[:6]  # another company slugs the same ("Tata Motors"/"TATA MOTORS!")
     model_id = f"{folder}/{now.date().isoformat()}"
-    p = model_file(model_id, root)
+    _write(model_file(model_id, root), text.encode())
+    return model_id, data["saved_at"]
+
+
+def _write(p, data: bytes):
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")  # own temp file per write, so saves can't collide
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
         os.replace(tmp, p)  # atomic: a crash mid-write never leaves half a file
     finally:
         with contextlib.suppress(OSError):
             os.unlink(tmp)  # only still there if the write failed
-    return model_id, data["saved_at"]
 
 
 def _saved_name(p):

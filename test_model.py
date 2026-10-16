@@ -1,5 +1,6 @@
 """Run: uv run python test_model.py  (Excel formula check needs LibreOffice `soffice` on PATH)."""
 import calendar
+import contextlib
 import io
 import json
 import os
@@ -418,7 +419,7 @@ def xbrl_check(co):
         assert abs(fx["revenue"] - h["revenue"]) < 1e-6 and abs(fx["pat"] - h["pat"]) < 1e-6, fx  # rupees -> crore
         assert fx["cfo"] == 321.5 and fx["purchase_ppe"] == 88.25, "a Q4 filing's cash flow is the year's"
         assert fx["receivables"] == h["receivables"] and fx["borrowings"] == 200.0, fx
-        assert f["unmapped"] == [{"tag": "RoyaltyIncome", "value": 4.2, "context": "FourD"}], f["unmapped"]
+        assert f["unmapped"] == [{"tag": "RoyaltyIncome", "value": 4.2, "unit": "Rs crore", "context": "FourD"}], f["unmapped"]
         assert all(c["pass"] for c in f["checks"]), f["checks"]
         assert [c["name"] for c in f["checks"]] == ["PBT less tax = profit", "Revenue for FY2025 matches Export",
                                                     "Net profit for FY2025 matches Export"], f["checks"]
@@ -894,6 +895,164 @@ def library_check(root, co, scenarios):
     fails(server.delete_model, 404, "test-industries-ltd/2026-10-15")
     assert server.list_models(root) == []
     xbrl_api_check(server, root, co, data)
+    ai_check(server, root, co, data)
+
+
+FAKE_LLM = """import pathlib, sys
+d = pathlib.Path(sys.argv[1])
+n = len(list(d.glob("prompt-*.txt")))
+(d / f"prompt-{n}.txt").write_text(sys.stdin.read())
+replies = sorted(d.glob("reply-*.txt"))
+sys.stdout.write(replies[min(n, len(replies) - 1)].read_text() if replies else "")
+"""
+
+
+def fake_llm(folder, *replies):
+    """Point LLM_CMD at a script that logs each prompt and prints the canned replies in turn (then the last one
+    again); returns a function giving the number of calls so far. Deterministic and offline."""
+    import sys  # noqa: PLC0415
+    import shlex  # noqa: PLC0415
+
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True)
+    (folder / "fake_llm.py").write_text(FAKE_LLM)
+    for i, r in enumerate(replies):
+        (folder / f"reply-{i:02d}.txt").write_text(r if isinstance(r, str) else json.dumps(r))
+    os.environ["LLM_CMD"] = shlex.join([sys.executable, str(folder / "fake_llm.py"), str(folder)])
+    return lambda: len(list(folder.glob("prompt-*.txt")))
+
+
+def _mapping_filing(co):
+    """An annual filing with total expenses whose materials line sits under a company tag, a second revenue, a
+    ratio and the fixture's royalty income: leftovers for the AI to map."""
+    h = co["hist"][-1]
+    extra = (_fact("Expenses", 900.0 + h["interest"] + h["dep"], "FourD") + _fact("EmployeeBenefitExpense", 200.0, "FourD")
+             + _fact("OtherExpenses", 300.0, "FourD") + _fact("ManufacturingAndProcessingCost", 400.0, "FourD")
+             + _fact("RevenueFromSaleOfServicesSegment", h["revenue"], "FourD")
+             + '<xbrli:unit id="pure"><xbrli:measure>xbrli:pure</xbrli:measure></xbrli:unit>'
+             '<in-bse-fin:DebtEquityRatio contextRef="FourD" unitRef="pure" decimals="2">0.40</in-bse-fin:DebtEquityRatio>')
+    return fake_xbrl(co, extra=extra)
+
+
+def ai_check(server, root, co, data):
+    """3.2: the LLM (a fake LLM_CMD) proposes mappings for leftover tags, rules check them, approving saves to
+    mappings.json and re-reads the filing by rules; /api/project and /api/export never call the LLM."""
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    assert not re.search(r"^\s*(import|from)\s+ai\b", Path(model.__file__).read_text(), re.M), "model.py imports ai"
+    client, models, env = TestClient(server.app), server.MODELS, os.environ.pop("LLM_CMD", None)
+    server.MODELS = root  # never the real library
+    try:
+        # no LLM_CMD: a calm message, and the rest of the app works
+        assert client.get("/api/ai").json() == {"available": False, "message": ai.NOT_SET}
+        try:
+            ai.llm("hi")
+            raise AssertionError("expected LLMError")
+        except ai.LLMError as e:
+            assert str(e) == ai.NOT_SET
+        assert ai.first_json('Sure! ```json\n[{"a": 1}]\n``` done') == [{"a": 1}]
+        assert ai.first_json('{oops} then {"b": [2]}') == {"b": [2]}
+        # bad JSON is retried once with the problem named, then a clear error
+        calls = fake_llm(root / "llm", "not json at all", '{"tag": "x"}')
+        try:
+            ai.propose_mappings([{"tag": "X", "value": 1.0, "context": "c"}], model.XBRL_KEYS, {})
+            raise AssertionError("expected LLMError")
+        except ai.LLMError as e:
+            assert "twice" in str(e) and "JSON array" in str(e), e
+        assert calls() == 2 and "not usable" in (root / "llm" / "prompt-1.txt").read_text()
+        calls = fake_llm(root / "llm", "Here you go:", '[{"tag": "X", "std_key": null, "reasoning": "a ratio"}]')
+        assert ai.propose_mappings([{"tag": "X", "value": 1.0, "context": "c"}], model.XBRL_KEYS, {})[0]["tag"] == "X"
+        assert calls() == 2
+
+        company = json.dumps(data["company"])
+        f = client.post("/api/xbrl", files={"file": ("fy.xml", _mapping_filing(co))}, data={"company": company}).json()
+        assert (root / server.FILINGS / f"{f['id']}.xml").is_file(), "the uploaded file is kept for re-reading"
+        tags = {u["tag"]: u for u in f["unmapped"]}
+        assert set(tags) == {"RoyaltyIncome", "ManufacturingAndProcessingCost", "RevenueFromSaleOfServicesSegment",
+                             "DebtEquityRatio"} and tags["DebtEquityRatio"]["unit"] == "pure", tags
+        os.environ.pop("LLM_CMD")
+        assert client.post("/api/mappings/propose", json={"filing": f}).status_code == 503
+        reply = [
+            {"tag": "ManufacturingAndProcessingCost", "std_key": "materials", "reasoning": "Cost of materials."},
+            {"tag": "RevenueFromSaleOfServicesSegment", "std_key": "revenue", "reasoning": "Revenue."},  # double count
+            {"tag": "RoyaltyIncome", "std_key": "royalty_income", "reasoning": "Royalty."},  # hallucinated key
+            {"tag": "GhostTag", "std_key": "cwip", "reasoning": "Made up."},  # hallucinated tag
+            {"tag": "DebtEquityRatio", "std_key": "bank_balances", "reasoning": "Wrong."},  # a ratio as money
+            {"tag": "DebtEquityRatio", "std_key": None, "reasoning": "A second answer for one tag is ignored."},
+        ]
+        calls = fake_llm(root / "llm", "Mappings:\n" + json.dumps(reply))
+        r = client.post("/api/mappings/propose", json={"filing": f})
+        assert r.status_code == 200 and calls() == 1, r.text
+        prompt = (root / "llm" / "prompt-0.txt").read_text()
+        assert "ManufacturingAndProcessingCost = 400.0 Rs crore" in prompt and "- materials: cost of materials consumed" in prompt
+        out = r.json()
+        props = {p["source"]["tag"]: p for p in out["proposals"]}
+        assert out["left"] == [] and len(props) == 5, out
+        failed = lambda p: {c["name"] for c in p["checks"] if c["pass"] is False}  # noqa: E731
+        good = props["ManufacturingAndProcessingCost"]
+        assert failed(good) == set() and good["value"] == 400.0 and good["unit"] == "Rs crore", good
+        assert any(c["name"] == "total_exp still ties" and c["pass"] for c in good["checks"]), good["checks"]
+        assert (good["kind"], good["status"], good["ai"], good["filing"]) == ("mapping", "proposed", True, f["id"])
+        assert failed(props["RevenueFromSaleOfServicesSegment"]) == {"Not counted twice"}
+        assert failed(props["RoyaltyIncome"]) == {"A line this app knows"}
+        assert failed(props["GhostTag"]) == {"The tag is in this filing"} and props["GhostTag"]["value"] is None
+        assert failed(props["DebtEquityRatio"]) == {"Unit"}
+        # rules on their own: sign, size, a total that tied before, two tags onto one line
+        fx = {"facts": {"revenue": 1000.0, "total_exp": 600.0, "employee": 600.0},
+              "unmapped": [{"tag": "A", "value": -5.0, "unit": "Rs crore", "context": "c"},
+                           {"tag": "B", "value": 50000.0, "unit": "Rs crore", "context": "c"},
+                           {"tag": "C", "value": 100.0, "unit": "Rs crore", "context": "c"}]}
+        assert {c["name"] for c in model.mapping_checks(fx, "A", "ppe")[2] if c["pass"] is False} == {"Sign"}
+        assert {c["name"] for c in model.mapping_checks(fx, "B", "goodwill")[2] if c["pass"] is False} == {"Size"}
+        assert {c["name"] for c in model.mapping_checks(fx, "C", "other_exp")[2] if c["pass"] is False} == {"total_exp still ties"}
+        assert {c["name"] for c in model.mapping_checks(fx, "C", "cash", ["cash"])[2] if c["pass"] is False} == {"Not counted twice"}
+
+        # approve: saved to mappings.json, the filing re-read by rules, no LLM call
+        body = {"filings": [f], "company": data["company"]}
+        bad = client.post("/api/mappings/approve", json={**body, "proposal": props["RevenueFromSaleOfServicesSegment"]})
+        assert bad.status_code == 422 and "already gives revenue" in bad.json()["detail"], bad.text
+        r = client.post("/api/mappings/approve", json={**body, "proposal": good})
+        assert r.status_code == 200, r.text
+        a = r.json()
+        assert a["proposal"]["status"] == "approved" and a["missing"] == [] and calls() == 1, a
+        assert json.loads((root / server.MAPPINGS).read_text()) == {"ManufacturingAndProcessingCost": "materials"}
+        g = a["filings"][0]
+        assert g["id"] == f["id"] and g["file"] == "fy.xml" and g["facts"]["materials"] == 400.0, g
+        assert "ManufacturingAndProcessingCost" not in {u["tag"] for u in g["unmapped"]}, g["unmapped"]
+        assert server.list_models(root) == [], "mappings.json and _filings aren't models"
+        # the next import applies it by rules: still no LLM call
+        h = client.post("/api/xbrl", files={"file": ("fy.xml", _mapping_filing(co))}, data={"company": company}).json()
+        assert h["facts"]["materials"] == 400.0 and calls() == 1, h["facts"]
+        # /api/project and /api/export never call the LLM (and would fail loudly if they tried)
+        req = {k: data[k] for k in ("company", "scenarios", "n", "valuation")} | {"filings": [g]}
+        llm, ai.llm = ai.llm, None
+        try:
+            assert client.post("/api/project", json=req).status_code == 200
+            assert client.post("/api/export", json=req).status_code == 200
+        finally:
+            ai.llm = llm
+        assert calls() == 1, "project / export called the LLM"
+        # reject keeps it for audit; an approved mapping taken back leaves mappings.json and the filing is re-read
+        r = client.post("/api/mappings/reject", json={"filings": [g], "company": data["company"], "proposal": a["proposal"]})
+        b = r.json()
+        assert b["proposal"]["status"] == "rejected" and json.loads((root / server.MAPPINGS).read_text()) == {}, b
+        assert "materials" not in b["filings"][0]["facts"] and calls() == 1, b["filings"][0]["facts"]
+        r = client.post("/api/mappings/reject", json={**body, "proposal": props["GhostTag"]})
+        assert r.json()["proposal"]["status"] == "rejected" and r.json()["filings"] == [f]
+        assert client.post("/api/mappings/approve", json={**body, "proposal": {"kind": "ar_note"}}).status_code == 422
+        # a filing attached before raw files were kept: the mapping is saved, the filing says to re-attach
+        old = dict(f, id="0" * 12)
+        r = client.post("/api/mappings/approve", json={"filings": [old], "proposal": dict(good, filing=old["id"])})
+        assert r.json()["missing"] == ["fy.xml"] and r.json()["filings"] == [old], r.json()
+    finally:
+        server.MODELS = models
+        os.environ.pop("LLM_CMD", None)
+        if env is not None:
+            os.environ["LLM_CMD"] = env
+        shutil.rmtree(root / server.FILINGS, ignore_errors=True)
+        with contextlib.suppress(FileNotFoundError):
+            (root / server.MAPPINGS).unlink()
 
 
 def xbrl_api_check(server, root, co, data):
