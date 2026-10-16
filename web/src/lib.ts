@@ -35,7 +35,11 @@ export interface Company { name: string; dates: string[]; hist: Row[]; market?: 
 /** Trailing twelve months (model.ttm): the four quarters ending `end`, each row summed (null if one is missing). */
 export interface Ttm { end: string; values: Row }
 /** A reported figure that moved > 0.5% against the latest saved model of this company (server.restatements). */
-export interface Restated { id: string; saved_at: string | null; changes: { year: string; line: string; old: number; new: number }[] }
+export interface Restated {
+  id: string; saved_at: string | null; changes: { year: string; line: string; old: number; new: number }[]
+  // the saved model's filings (read again against this file), proposals, notes and reports, carried into the new one
+  carry?: { filings: Filing[]; proposals: Proposal[]; notes: Record<string, unknown>; reports: Report[] }
+}
 /** DCF inputs (model.VALUATION). kd null = base scenario's interest rate; price/shares null = market data. */
 export interface ValInputs {
   rf: number; erp: number; beta: number; kd: number | null; g: number; mid_year: boolean

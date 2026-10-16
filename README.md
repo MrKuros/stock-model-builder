@@ -28,7 +28,7 @@ Reported years are drawn in **ink**. Your assumptions are drawn in **blue pencil
 - **Multiples cross-check:** P/E, EV/EBITDA and P/B at today's price and at each scenario's value, against the company's own year-end multiples, with a flag when one sits outside its historical range.
 - **Quarters and TTM:** the last ten quarters (sales, operating profit and margin, net profit, year-on-year growth) next to the last reported year and the trailing twelve months, and a sentence on TTM growth. The Excel export adds a Quarters sheet whose TTM column is live SUM formulas.
 - **Restatement check:** importing a newer file for a company you've already modelled lists any overlapping reported year whose revenue, EBITDA, net profit, total assets or borrowings moved by more than 0.5%.
-- **Exchange filings (XBRL):** attach an NSE/BSE financial-results XBRL file to a model. Fixed rules map about 110 standard tags to statement lines in Rs crore (including cost of materials, payables and the balance sheet when filed), list the tags they don't know, and check that PBT less tax equals profit and that revenue and net profit match Export's figure for the same year or quarter within 1%. An annual filing whose revenue matches Export's adds that year's trade payables, lease liabilities and cash-flow capex to the model (see below); other filings are kept for reference.
+- **Exchange filings (XBRL):** attach an NSE/BSE financial-results XBRL file to a model. Fixed rules map about 100 standard tags to statement lines in Rs crore (including cost of materials, payables and the balance sheet when filed), list the tags they don't know, and check that PBT less tax equals profit and that revenue and net profit match Export's figure for the same year or quarter within 1%. An annual filing whose revenue matches Export's adds that year's trade payables, lease liabilities and cash-flow capex to the model (see below); other filings are kept for reference.
 - **AI-proposed mappings for leftover tags (optional):** with `LLM_CMD` set to any command that reads a prompt on stdin and prints the reply (no SDK, any provider), "Propose mappings" asks the model which statement line each unknown tag is. Rules then check every answer (the line exists, the unit is right, the line isn't already filled, the sign and size are plausible, totals such as expenses and total income still tie within 1%), and you approve or reject each one. An approved mapping is saved to `mappings.json` in the model library and the filing is re-read by rules; from then on every filing applies it with no AI call. Projecting and exporting never call the model. Without `LLM_CMD` the button is off and everything else works.
 - **Explain unusual years (optional, words only):** each flagged year has an Explain action. Attach that year's annual-report PDF and rules pick the few pages that mention exceptional or one-time items, the flagged line and the year (text read with the system `pdftotext`); the model answers in at most two sentences with a page and a quote, and the explanation is rejected unless that quote really occurs on that page. Without a report it can explain from the numbers only, labelled as such. Approving pins the note next to the flag, marked as AI-written; no number uses it.
 - **Annual-report notes (optional):** attach a year's annual-report PDF under Sources & proposals. For segment revenue, debt maturity, capex, contingent liabilities and related-party transactions, rules pick the three most likely pages per topic, and the app shows the pages and the exact prompt size before anything is sent. The model returns each figure with its page and a quote; rules check that every quote occurs on its page and contains its number, convert the unit (lakh, million...) to Rs crore, and tie the sums to the statements (segments to revenue within 2%, maturity buckets to borrowings within 5%, capex to the XBRL cash flow when attached). A note that fails is kept as rejected. Approved notes are drawn as a segment mix, a maturity ladder, contingent liabilities against net worth and a related-party table; an approved capex figure becomes that year's capex in the history behind the default.
@@ -61,15 +61,16 @@ Then open the app, drop in a Export.in export, or click **Explore with a sample 
 | Part | Tech |
 |---|---|
 | Engine | Python, openpyxl |
-| API | FastAPI (stateless; the client sends the model back with each request) |
+| API | FastAPI (the client sends the model back with each request; the library folder also keeps uploaded filings, annual-report page text and mappings.json) |
 | UI | React 18 + TypeScript + Vite, with hand-drawn SVG charts and no UI or chart libraries |
 | Tests | Plain-assert self-check, plus LibreOffice headless for Excel recalculation |
 
 ```
 model.py          parse, checks, defaults, projection, ratios, one-offs, valuation, Excel export
 server.py         API + local model library
+ai.py             LLM_CMD calls, PDF page text and picking, quote and number checks
 test_model.py     self-check incl. Excel parity
-web/src/          App, DriverStrip (assumption strips), Chart, Statements, Valuation
+web/src/          App, DriverStrip (assumption strips), Chart, Statements, Valuation, Sources
 ```
 
 ## Design notes
@@ -82,7 +83,7 @@ web/src/          App, DriverStrip (assumption strips), Chart, Statements, Valua
 ## Limitations
 
 - Input is Export.in exports plus optional BSE/NSE XBRL results filings.
-- Inventory and payable days run on COGS (Export's raw material cost less change in inventory) when COGS is at least 10% of revenue in each of the last three years, else on revenue. Trade payables, lease liabilities and capex from the cash-flow statement come only from attached annual XBRL filings; without them payables stay inside other liabilities, leases inside borrowings, and capex is inferred from the change in net block. Lease liabilities count as debt in the valuation and are held flat in the projection.
+- Inventory and payable days run on COGS (Export's raw material cost less change in inventory) when COGS is at least 10% of revenue in each of the last three years, else on revenue. Trade payables, lease liabilities and capex from the cash-flow statement come only from attached annual XBRL filings (capex also from an approved annual-report note); without them payables stay inside other liabilities, leases inside borrowings, and capex is inferred from the change in net block. Lease liabilities count as debt in the valuation and are held flat in the projection.
 - Annual-report reading needs a text PDF (scanned reports have no text) and checks only what it can tie: it reads up to three pages per topic and can miss a note printed elsewhere, and contingent liabilities and related-party items have no total to tie to, so the quote checks are their only guard. Maturity tables that show undiscounted cash flows won't tie to the carrying value of borrowings and come back rejected.
 - Financial companies (banks, NBFCs, insurers) aren't supported yet.
 - It's a modelling tool, not investment advice. The forecasts are only as good as the assumptions you give it.

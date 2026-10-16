@@ -352,6 +352,7 @@ XBRL_CF = {  # the financial year to date (results filings carry it for the half
     "ProceedsFromBorrowingsClassifiedAsFinancingActivities": "borrowings_raised",
     "RepaymentsOfBorrowingsClassifiedAsFinancingActivities": "borrowings_repaid",
     "PaymentsOfLeaseLiabilitiesClassifiedAsFinancingActivities": "lease_payments",
+    "PaymentsOfFinanceLeaseLiabilitiesClassifiedAsFinancingActivities": "lease_payments",  # JSW FY2024 files this one
     "DividendsPaidClassifiedAsFinancingActivities": "dividends_paid",
     "InterestPaidClassifiedAsFinancingActivities": "interest_paid",
     "ProceedsFromIssuingSharesClassifiedAsFinancingActivities": "shares_issued",
@@ -407,8 +408,12 @@ def parse_xbrl(file, mappings=None, company=None):
     define, and some define FourD with the quarter's dates; so each context's DateOfStart/EndOfReportingPeriod facts
     win over its <period>. Balance-sheet facts are taken at the period end, cash flow only for an annual filing."""
     data = file if isinstance(file, bytes) else file.read() if hasattr(file, "read") else Path(file).read_bytes()
+    if data[:4] == b"PK\x03\x04":
+        raise ValueError("That's a zip (or Excel) file. Unzip the download and attach the .xml inside.")
     # no DTDs at all: entity expansion (XML bombs) and external entities need one; NUL = UTF-16/32, which could hide it
-    if re.search(rb"<!(DOCTYPE|ENTITY)", data, re.I) or b"\0" in data:
+    if b"\0" in data:
+        raise ValueError("That isn't a UTF-8 XML file (a PDF, Excel or UTF-16 file?). Attach the XBRL .xml from NSE or BSE.")
+    if re.search(rb"<!(DOCTYPE|ENTITY)", data, re.I):
         raise ValueError("This XML file declares a DTD or entities, which XBRL filings never need, so it wasn't read.")
     try:
         root = ET.fromstring(data)
@@ -480,7 +485,9 @@ def parse_xbrl(file, mappings=None, company=None):
         start, kind = None, "other"
         end = max((c["end"] for c in ctx.values() if c["end"]), default=None)
 
-    facts, seen, unmapped, skipped_cash = {}, {}, {}, False
+    # an approved mapping's value goes aside and only fills a line no standard element gives (or gives as 0), so a
+    # mapping approved on one filing never overrides a standard number in another
+    facts, seen, mapped, mseen, unmapped, skipped_cash = {}, {}, {}, {}, {}, False
     for tag, cid, v, uid in nums:
         c, key = ctx[cid], tags.get(tag)
         if c["dims"] or (consolidated is not None and c["basis"] not in (None, consolidated)):
@@ -499,10 +506,11 @@ def parse_xbrl(file, mappings=None, company=None):
         scale = _xbrl_scale(uid, units.get(uid, []))
         if key and scale and (scale[0] == "share") == (key in XBRL_PER_SHARE):
             val = round(v * scale[1], 6)
-            if key not in facts or (facts[key] == 0 and val):  # a filed 0 gives way to a company tag's number
-                facts[key], seen[key] = val, tag
-            elif val and abs(facts[key] - val) > 1e-6:  # the same line twice with different numbers: keep the first, say so
-                check(f"One value for {key}", False, f"{seen[key]} = {facts[key]:,.2f} and {tag} = {val:,.2f} "
+            fs, sn = (facts, seen) if tag in XBRL_TAGS else (mapped, mseen)
+            if key not in fs or (fs[key] == 0 and val):  # a filed 0 gives way to another tag's number
+                fs[key], sn[key] = val, tag
+            elif val and abs(fs[key] - val) > 1e-6:  # the same line twice with different numbers: keep the first, say so
+                check(f"One value for {key}", False, f"{sn[key]} = {fs[key]:,.2f} and {tag} = {val:,.2f} "
                       f"(context {cid}); kept the first")
         elif v and len(unmapped) < XBRL_MAX_UNMAPPED:  # ponytail: zeros (most of a results filing) aren't listed
             val = round(v * scale[1], 6) if scale else v
@@ -510,6 +518,17 @@ def parse_xbrl(file, mappings=None, company=None):
             unmapped.setdefault((tag, val), {"tag": tag, "value": val, "unit": unit,
                                              "context": cid if scale else f"{cid} ({uid})"})
 
+    for k, v in mapped.items():
+        if not facts.get(k):
+            facts[k], seen[k] = v, mseen[k]
+        elif abs(facts[k] - v) > 1e-6:
+            check(f"One value for {k}", None, f"The standard {seen[k]} = {facts[k]:,.2f} is kept over the approved "
+                  f"mapping {mseen[k]} = {v:,.2f}.")
+    for k in ("purchase_ppe", "purchase_intangibles"):
+        if facts.get(k, 0.0) < 0:  # some filers enter the outflow as negative; a purchase is a size
+            facts[k] = -facts[k]
+            check(f"Sign of {k}", None, f"The filing gives {k} as {_cr(-facts[k])}; a purchase is an outflow, so it "
+                  f"is taken as {_cr(facts[k])}.")
     if facts.get("profit") and not facts.get("pat") and not facts.get("minority"):
         if "pat" in facts:  # Hindalco Dec 2021 files 0 for both owners and minority
             check("Owners' share of profit", None, "The filing leaves the owners / minority split at 0, so net "
@@ -580,7 +599,7 @@ for _tag, _key in XBRL_TAGS.items():
     XBRL_KEYS.setdefault(_key, re.sub(r"(?<=[a-z])(?=[A-Z])", " ", _tag).lower())
 XBRL_NONNEG = (set(XBRL_BS.values()) - {"other_equity", "equity_parent", "equity", "nci"}) | {
     "revenue", "total_income", "materials", "purchases", "employee", "interest", "dep", "other_exp", "total_exp",
-    "paid_up_capital", "face_value"}
+    "paid_up_capital", "face_value", "purchase_ppe", "purchase_intangibles"}
 XBRL_TOTALS = {"total_exp": ("materials", "purchases", "inventory_change", "employee", "interest", "dep", "other_exp"),
                "total_income": ("revenue", "other_income"), "total_assets": ("noncurrent_assets", "current_assets"),
                "total_liabilities": ("noncurrent_liabilities", "current_liabilities"),
@@ -588,19 +607,27 @@ XBRL_TOTALS = {"total_exp": ("materials", "purchases", "inventory_change", "empl
 TIE_TOL = 0.01  # a total and its parts agree within 1% (at least Rs 1 crore)
 
 
+def unmapped_rows(filing):
+    """A filing's unmapped entries that have the shape parse_xbrl writes; a hand-edited or damaged entry is left out
+    (it then reads as "not among this filing's unmapped tags") instead of crashing the rules."""
+    return [x for x in filing.get("unmapped") or [] if isinstance(x, dict) and isinstance(x.get("tag"), str)
+            and isinstance(x.get("value"), (int, float)) and not isinstance(x["value"], bool) and math.isfinite(x["value"])]
+
+
 def mapping_checks(filing, tag, key, others=()):
     """Rule checks on mapping a filing's unmapped `tag` to std `key` -> (value, unit, checks). `others` = the keys
     other proposals in the same batch map to (two tags onto one line would count it twice)."""
     checks = []
     check = lambda n, ok, d: checks.append({"name": n, "pass": ok, "detail": d})  # noqa: E731
-    u = next((x for x in filing.get("unmapped", []) if x["tag"] == tag), None)
+    rows = unmapped_rows(filing)
+    u = next((x for x in rows if x["tag"] == tag), None)
     known = key in XBRL_KEYS
     check("A line this app knows", known, f"{key} ({XBRL_KEYS[key]})" if known else
           f"{key!r} isn't one of this app's lines, so the mapping can't be used.")
     amt = lambda x: _cr(x) if abs(x) >= 100 else f"{x:.2f}"  # noqa: E731  Indian grouping for amounts
-    check("The tag is in this filing", u is not None, f"{tag} = {amt(u['value'])}, context {u['context']}" if u else
+    check("The tag is in this filing", u is not None, f"{tag} = {amt(u['value'])}, context {u.get('context')}" if u else
           f"{tag} isn't among this filing's unmapped tags.")
-    if u and len({x["value"] for x in filing["unmapped"] if x["tag"] == tag}) > 1:
+    if u and len({x["value"] for x in rows if x["tag"] == tag}) > 1:
         check("One value", False, f"{tag} has more than one value in this filing (e.g. opening and closing), so "
               "a rule can't tell which is the line.")
     if not (known and u):
@@ -705,7 +732,8 @@ def upgrade(co, filings=(), capex=None):
             notes.append(f"{y}: the filing's borrowings {_cr(x['borrowings'])} exceed Export's "
                          f"{_cr(h['borrowings'])}, so no lease liabilities are split out.")
         if "purchase_ppe" in x:
-            h["capex_cf"] = h["capex"] = x["purchase_ppe"] + x.get("purchase_intangibles", 0.0)
+            # abs: a filing saved before parse_xbrl flipped a negative purchase still gives a size
+            h["capex_cf"] = h["capex"] = abs(x["purchase_ppe"]) + abs(x.get("purchase_intangibles", 0.0))
             h["fcf"] = None if h["cfo"] is None else h["cfo"] - h["capex"]
             used["capex"].append(y)
     for y, v in (capex or {}).items():
@@ -1608,7 +1636,9 @@ def to_excel(co, scenarios, n=5, active="base", val=None):
                 h = co["hist"][j]  # missing cash-flow lines stay blank instead of 0-based formulas
                 # cash-flow capex from a filing is a reported number, not the net block formula
                 cell.value = (h.get(key) if key in RAW or h.get(key, 0) is None
-                              or (key == "capex" and h.get("capex_cf") is not None) else _hist_formula(key, x, j > 0, cogs))
+                              or (key == "capex" and h.get("capex_cf") is not None)
+                              # =cfo-capex needs no earlier column when the year's capex is a cash-flow value
+                              else _hist_formula(key, x, j > 0 or (key == "fcf" and h.get("capex_cf") is not None), cogs))
             else:
                 cell.value = (f"=CHOOSE($B$3,{','.join(src(s, key, j - nh) for s in SCENARIOS)})"
                               if key in drivers else _proj_formula(key, x, cogs))

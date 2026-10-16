@@ -110,6 +110,7 @@ def main():
     assert co["hist"][1]["cfi"] is None and co["hist"][1]["net_cf"] is None, "missing CF rows must not be 0"
     quarters_check(tmp, co)
     xbrl_check(co)
+    review_rules_check(co)
     pins_check(co)
     m = co["market"]
     assert m["price"] == 1600 and m["shares"] == 5.0 and m["shares_hist"] == [5.0] * 10, m
@@ -458,7 +459,7 @@ def xbrl_check(co):
     # bad files: DTDs and entities are refused before parsing; not XML; XML that isn't XBRL
     bomb = b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]><x>&b;</x>'
     for bad, msg in ((bomb, "DTD"), (b"<?xml version='1.0'?><!doctype x SYSTEM 'file:///etc/passwd'><x/>", "DTD"),
-                     ("<x/>".encode("utf-16"), "DTD"), (b"not xml", "well-formed"), (b"<html></html>", "XBRL")):
+                     ("<x/>".encode("utf-16"), "UTF-16"), (b"not xml", "well-formed"), (b"<html></html>", "XBRL")):
         try:
             model.parse_xbrl(bad)
         except ValueError as e:
@@ -543,6 +544,93 @@ def _fact(tag, v, c="OneI"):
     return f'<in-bse-fin:{tag} contextRef="{c}" unitRef="INR" decimals="-7">{v * 1e7:.2f}</in-bse-fin:{tag}>'
 
 
+def review_rules_check(co):
+    """Rules from the Phase 3 review: approved mappings never override a standard element, a negative purchase is a
+    size, both lease-payment elements, zip / binary files, and the AI-output rules in ai.py (units as whole words and
+    from table headings, quotes on word boundaries, the current-year column, the report's year, amounts that parse)."""
+    import sys  # noqa: PLC0415
+    import ai  # noqa: PLC0415
+
+    std = b"<in-bse-fin:PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities"
+    x = fake_xbrl(co).replace(std, _fact("CompanyCapexTag", 999.0, "FourD").encode() + std, 1)
+    f = model.parse_xbrl(x, mappings={"CompanyCapexTag": "purchase_ppe"})
+    assert f["facts"]["purchase_ppe"] == 88.25, "a mapped tag filed first must not beat the standard element"
+    assert any(c["name"] == "One value for purchase_ppe" and c["pass"] is None for c in f["checks"]), f["checks"]
+    x0 = x.replace(b">882500000.00</in-bse-fin:PurchaseOf", b">0.00</in-bse-fin:PurchaseOf")
+    assert model.parse_xbrl(x0, mappings={"CompanyCapexTag": "purchase_ppe"})["facts"]["purchase_ppe"] == 999.0, \
+        "a standard 0 still gives way to the approved mapping"
+    neg = model.parse_xbrl(fake_xbrl(co).replace(b">882500000.00</in-bse-fin:PurchaseOf", b">-882500000.00</in-bse-fin:PurchaseOf"))
+    assert neg["facts"]["purchase_ppe"] == 88.25 and any(c["name"] == "Sign of purchase_ppe" for c in neg["checks"]), neg
+    old = {"id": "o", "file": "o.xml", "kind": "annual", "period_end": "2025-03-31", "consolidated": True,
+           "facts": {**neg["facts"], "purchase_ppe": -88.25}}  # saved before the flip
+    assert model.upgrade(co, [old])["hist"][-1]["capex"] == 88.25
+    assert "purchase_ppe" in model.XBRL_NONNEG
+    for a, b in ((632.0, 0.0), (0.0, 632.0)):
+        e = (_fact("PaymentsOfFinanceLeaseLiabilitiesClassifiedAsFinancingActivities", a, "FourD")
+             + _fact("PaymentsOfLeaseLiabilitiesClassifiedAsFinancingActivities", b, "FourD"))
+        assert model.parse_xbrl(fake_xbrl(co, extra=e))["facts"]["lease_payments"] == 632.0
+    for data, says in ((b"PK\x03\x04rest", "zip"), (b"%PDF-1.4\x00", "UTF-8")):
+        try:
+            model.parse_xbrl(data)
+            raise AssertionError("expected ValueError")
+        except ValueError as err:
+            assert says in str(err) and "DTD" not in str(err), err
+    assert model.mapping_checks({"unmapped": [{"value": 1}, {"tag": "Foo", "value": [1], "context": "c"}]}, "Foo",
+                                "revenue")[0] is None, "damaged entries are skipped, not a crash"
+
+    # ai.py rules on made-up pages [(reading order, layout)]
+    end = datetime(2025, 3, 31).date()
+    yr = "Statement for the year ended March 31, 2025"
+    pg = lambda *lines: ("\n".join((yr, *lines)), "\n".join((yr, *lines)))  # noqa: E731
+    capex = lambda amt, quote, unit="crore", pages=None: ai.note_checks("capex", {  # noqa: E731
+        "unit": unit, "items": [{"label": "PPE", "amount": amt, "page": 1, "quote": quote}]}, pages, [1], end)
+    fails = lambda r: {c["name"] for c in r[2] if c["pass"] is False}  # noqa: E731
+    row = "Purchase of property, plant and equipment (21,234.56) (19,876.00)"
+    crore = [pg("(Rs in crore)", row, "Proceeds from sale 45.10")] * 3
+    # units: whole words and the table heading decide, not "credit" or "place"
+    lakh_credit = [pg("(Rs in lakh)", row, "Trade receivables and other credit items")] * 3
+    assert "Unit" in fails(capex("(21,234.56)", row, "crore", lakh_credit)), "' cr' of 'credit' isn't crore"
+    in_place = [pg("(Rs in crore)", row, "right-of-use assets in place")] * 3
+    assert "Unit" in fails(capex("(21,234.56)", row, "lakh", in_place)), "'lac' of 'place' isn't lakh"
+    tonnes = [pg("(All amounts in Rs lakh)", row, "Capacity of 12 million tonnes")] * 3
+    r = capex("(21,234.56)", row, "lakh", tonnes)
+    assert fails(r) == set() and abs(r[1] - 212.3456) < 1e-9, r[2]
+    # quotes cut inside a number aren't on the page
+    for amt, quote in (("2123", "Purchase of property, plant and equipment (21,23"),
+                       ("1,234.56", "1,234.56) (19,876.00) Proceeds from sale"), ("34.56", "34.56) (19,876.00) Proceeds from sale")):
+        assert "Quotes are on their pages" in fails(capex(amt, quote, pages=crore)), quote
+    assert fails(capex("(21,234.56)", "Purchase of property, plant and equipment (21,234.56", pages=crore)) == set()
+    gw = [("Impairment of goodwill of Rs 500 crore in the year", "")] + [(yr, yr)] * 3
+    q = ai.quote_checks({"page": 1, "quote": "the impairment of goodwill of Rs 5"}, gw, [1], end)
+    assert {c["name"] for c in q if c["pass"] is False} == {"Quote is on the page"}, q
+    # the previous year's column is rejected, also when the quote starts mid-row
+    assert fails(capex("19,876.00", row, pages=crore)) == {"Current-year column"}
+    assert fails(capex("(19,876.00)", "(19,876.00)  Proceeds from sale", pages=[pg("(Rs in crore)", row + "  Proceeds from sale")] * 3)) == {
+        "Current-year column"}
+    two = [pg("(Rs in crore)", "Exchange gain   (21)   (117)     Purchase of PPE   (2,719)   (2,538)")] * 3  # two columns
+    assert fails(capex("(2,719)", "Purchase of PPE  (2,719)  (2,538)", pages=two)) == set()
+    assert fails(capex("(2,538)", "Purchase of PPE  (2,719)  (2,538)", pages=two)) == {"Current-year column"}
+    noted = "Purchase of PPE 4.1 (21,234.56) (19,876.00)"  # a note number before the amounts is skipped
+    assert fails(capex("21,234.56", noted, pages=[pg("(Rs in crore)", noted)] * 3)) == set()
+    # the report is for the year: named more often than the years either side
+    fy21 = [("Year ended March 31, 2021 and March 31, 2020", "")] * 3 + [("March 31, 2021", "")] * 5
+    assert ai.year_check(fy21, datetime(2021, 3, 31).date())["pass"] is True
+    wrong = ai.year_check(fy21, datetime(2020, 3, 31).date())
+    assert wrong["pass"] is False and "31 Mar 2021" in wrong["detail"], wrong
+    assert ai.year_check(fy21, datetime(2022, 3, 31).date())["pass"] is False
+    # amounts that don't parse to a finite number; deep nesting is "no JSON", not a crash
+    assert all(ai.amount(v) is None for v in ("inf", "1e999", "nan", "(inf)", "-Infinity"))
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(300)
+    try:
+        ai.first_json("[" * 2000)
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+    finally:
+        sys.setrecursionlimit(limit)
+
+
 def upgrade_check(tmp, co, excel):
     """3.4: annual filings add trade payables, lease liabilities and cash-flow capex to their year by rules; totals
     don't move; days run on COGS where it matters; Excel equals Python for selectors 1-3."""
@@ -610,7 +698,9 @@ def upgrade_check(tmp, co, excel):
     if not excel:
         return
     rows = {key: 5 + i for i, (_, key, _) in enumerate(model.LAYOUT) if key}
-    for name, comp in (("cogs", up), ("rev", up_rev), ("ar", model.upgrade(co, [], {"FY2023": 70.0}))):
+    first = model.labels(co["dates"])[0]  # cash-flow capex in the first reported year: FCF has no earlier column
+    for name, comp in (("cogs", up), ("rev", up_rev), ("ar", model.upgrade(co, [], {"FY2023": 70.0})),
+                       ("ar0", model.upgrade(co, [], {first: 70.0}))):
         base = {k: {"start": x, "end": None} for k, x in model.default_assumptions(comp["hist"]).items()}
         base.update(dpo={"start": 40.0, "end": 70.0}, cogs_pct={"start": 0.5, "end": 0.45}, debt_change={"start": -60.0, "end": None})
         sc = {"base": base, "bull": dict(base, growth={"start": 0.2, "end": None}),
@@ -634,7 +724,8 @@ def upgrade_check(tmp, co, excel):
                                                             "capex", "fcf", "total_liab", *RETURNS)},
                                     **{k: rh[j][k] for k in ("cogs_pct", "dio", "dpo", "int_rate", "capex_pct", "ol_pct",
                                                              "debt_change")}}, (name, "hist", j))
-        assert ("annual report and approved (FY2023)" if name == "ar" else "XBRL filings") in ws["A2"].value, ws["A2"].value
+        assert ("annual report and approved (FY2023)" if name == "ar" else f"annual report and approved ({first})"
+                if name == "ar0" else "XBRL filings") in ws["A2"].value, ws["A2"].value
         assert ("on revenue" if name == "rev" else "on COGS") in ws["A2"].value
 
 
@@ -908,6 +999,32 @@ def library_check(root, co, scenarios):
     ai_check(server, root, co, data)
     oneoff_check(server, root, data)
     ar_notes_check(server, root, co, data)
+    reimport_check(server, root, co, data)
+
+
+def reimport_check(server, root, co, data):
+    """Uploading the export of a saved company again carries over its filings (read again by rules), proposals,
+    notes and reports, so the same-day save never wipes them; the dashboard payload already uses them."""
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    client, models = TestClient(server.app), server.MODELS
+    server.MODELS = root  # never the real library
+    buf = io.BytesIO()
+    fake_export(buf)
+    f25 = _filing(co, -1)  # not a kept raw file: carried as saved
+    notes = {"ar:capex:FY2024": {"topic": "capex", "year": "FY2024", "total": 150.0}, "oneoff:FY2023": {"summary": "x"}}
+    prop, rep = {"id": "p1", "kind": "oneoff_note", "status": "approved"}, {"id": "a" * 12, "file": "ar.pdf", "year": "FY2024", "pages": 3}
+    try:
+        doc = server.ModelDoc.model_validate(dict(data, filings=[f25], proposals=[prop], notes=notes, reports=[rep]))
+        mid, _ = server.save_model(doc, root, now=datetime(2026, 10, 16, 9, 0))
+        r = client.post("/api/parse", files={"file": ("x.xlsx", buf.getvalue())}).json()
+        carry = r["restated"]["carry"]
+        assert (carry["notes"], carry["proposals"], carry["reports"]) == (notes, [prop], [rep]), carry
+        assert [f["id"] for f in carry["filings"]] == [f25["id"]], carry["filings"]
+        assert r["hist"][-2]["capex"] == 150.0 and r["hist"][-1]["capex"] == 88.25, "the payload uses what carries over"
+        server.delete_model(mid, root)
+    finally:
+        server.MODELS = models
 
 
 FAKE_LLM = """import pathlib, sys
@@ -1058,6 +1175,15 @@ def ai_check(server, root, co, data):
         old = dict(f, id="0" * 12)
         r = client.post("/api/mappings/approve", json={"filings": [old], "proposal": dict(good, filing=old["id"])})
         assert r.json()["missing"] == ["fy.xml"] and r.json()["filings"] == [old], r.json()
+        # a damaged mappings.json is never replaced by an approve (it would lose every approved mapping)
+        (root / server.MAPPINGS).write_text('{"TagA": "revenue",\n}')
+        r = client.post("/api/mappings/approve", json={**body, "proposal": good})
+        assert r.status_code == 409 and (root / server.MAPPINGS).read_text() == '{"TagA": "revenue",\n}', r.text
+        (root / server.MAPPINGS).unlink()
+        # damaged unmapped entries in a document: the rules say so (422), no crash
+        bad = dict(f, unmapped=[{"value": 1}, {"tag": "ManufacturingAndProcessingCost", "value": [1], "context": "c"}])
+        r = client.post("/api/mappings/approve", json={"filings": [bad], "company": data["company"], "proposal": good})
+        assert r.status_code == 422 and "isn't among" in r.json()["detail"], r.text
     finally:
         server.MODELS = models
         os.environ.pop("LLM_CMD", None)
@@ -1114,6 +1240,10 @@ def oneoff_check(server, root, data):
         assert (p["kind"], p["status"], p["from_numbers"], p["period"], p["ai"]) == ("oneoff_note", "proposed", True, year, True), p
         assert p["source"] == {"file": None, "page": None, "quote": None, "tag": None} and p["value"].startswith("Other income")
         assert p["checks"] == [{"name": "Source", "pass": None, "detail": "From the numbers only, no filing read."}]
+        # an approved capex note can flag a year, as on the dashboard; explain sees the same history
+        cap = {f"ar:capex:{labels[-1]}": {"total": 0.9 * company["hist"][-1]["revenue"]}}
+        r = client.post("/api/oneoffs/explain", json=dict(body, year=labels[-1], notes=cap))
+        assert r.status_code == 200 and calls() == 2, r.text
         prompt = (root / "llm" / "prompt-0.txt").read_text()
         assert "No filing was read" in prompt and "other income was" in prompt and "Other income:" in prompt, prompt
         # a summary over two sentences is retried once, then a clear error
@@ -1154,13 +1284,16 @@ def oneoff_check(server, root, data):
         assert p["source"] == {"file": "ar.pdf", "page": 2, "quote": good["quote"], "tag": None} and not p["from_numbers"]
         prompt = (root / "llm" / "prompt-0.txt").read_text()
         assert "=== PAGE 2 ===" in prompt and "PAGE 1" not in prompt and "Chairman" not in prompt, prompt
-        # a fabricated quote, or a page that wasn't sent, is rejected by the rules
+        # a fabricated quote, or a page that wasn't sent, is rejected by the rules (and is its own record: the same
+        # summary with another quote gets another id, so the client never replaces one with the other)
+        gid = p["id"]
         for bad, failed in (({**good, "quote": "Other income includes a one-time insurance claim of Rs 900 crore"},
                              {"Quote is on the page"}),
                             ({**good, "page": 3, "quote": "Revenue grew steadily over the year."}, {"Page was read"})):
             fake_llm(root / "llm", bad)
             p = client.post("/api/oneoffs/explain", json=dict(body, report=rep)).json()
             assert p["status"] == "rejected" and {c["name"] for c in p["checks"] if c["pass"] is False} == failed, p
+            assert p["id"] != gid and p["value"] == good["summary"]
             assert "Page was read" in failed or "so the explanation is rejected" in next(c["detail"] for c in p["checks"] if c["name"] == "Quote is on the page")
         # an approved note saves with the document and never feeds a number
         doc = dict(data, company=company, reports=[rep], proposals=[dict(p, status="approved")],
@@ -1346,6 +1479,11 @@ def xbrl_api_check(server, root, co, data):
     try:
         (root / server.MAPPINGS).write_text(json.dumps({"RoyaltyIncome": "royalty"}))
         assert server.list_models(root) == [], "mappings.json at the root isn't a model"
+        # another site's page can't write to the library (a text/plain POST needs no CORS preflight)
+        for h in ({"Origin": "https://evil.example"}, {"Sec-Fetch-Site": "cross-site"}):
+            r = client.post("/api/models", content=b"{}", headers={**h, "Content-Type": "text/plain"})
+            assert r.status_code == 403, (h, r.text)
+        assert client.post("/api/models", content=b"{}", headers={"Origin": "http://testserver"}).status_code == 422
         r = client.post("/api/xbrl", files={"file": ("q4.xml", fake_xbrl(co))},
                         data={"company": json.dumps(data["company"])})
         assert r.status_code == 200, r.text

@@ -392,8 +392,8 @@ tbody tr:hover th, tbody tr:hover td { background: var(--pencil-soft); }
 .src-upgrade p { margin: 0 0 8px; }
 .src-upgrade button { border: 1px solid var(--pencil); background: var(--paper); color: var(--pencil); border-radius: 999px; padding: 4px 14px; font-size: 13px; min-height: 28px; }
 .prop-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0 0 8px; }
-.prop-ask button { border: 1px solid var(--pencil); background: var(--paper); color: var(--pencil); border-radius: 999px; padding: 4px 14px; font-size: 13px; min-height: 28px; }
-.prop-ask button:disabled { border-color: var(--rule); color: var(--ink-2); cursor: default; }
+.prop-ask button:not(.link) { border: 1px solid var(--pencil); background: var(--paper); color: var(--pencil); border-radius: 999px; padding: 4px 14px; font-size: 13px; min-height: 28px; }
+.prop-ask button:not(.link):disabled { border-color: var(--rule); color: var(--ink-2); cursor: default; }
 .prop-ask .small { flex: 1 1 220px; }
 
 /* one-off explanations (3.2b): AI-written words beside a flagged year, amber-labelled, never a number */
