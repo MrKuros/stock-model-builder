@@ -94,6 +94,14 @@ export default function Evidence({ parsed, doc, setDoc, projection, go, upgrades
             st="Deterministic ✓" /> : null}
           {checks.filter(c => c.id.startsWith('oneoff-') || c.id === 'data').map(c => <Row key={c.id} id={c.id} kind="rule" claim={<>{c.name}: {c.fact}</>}
             src={c.rule} st={STATUS[c.status]} cls={c.status === 'clear' ? 'ok' : c.status === 'filing' ? 'wait' : c.status} />)}
+          {doc.note && (() => {
+            const tn = doc.note, stale = projection?.inputs_hash != null && projection.inputs_hash !== tn.inputs_hash
+            const nq = Object.keys(tn.cites).length
+            return <Row id="thesis" kind="ai" claim="Thesis, risks, triggers and what to watch"
+              src={<>Written {when(tn.written_at)} by the AI command from {Object.keys(tn.facts).length} computed facts{nq ? ` and ${nq} approved quote${nq > 1 ? 's' : ''}` : ''}, nothing else{tn.rounds > 1 ? '; passed on the retry' : ''}.
+                Rules: {tn.checks.map(c => c.name.toLowerCase()).join(', ')}.</>}
+              st={stale ? 'Written for earlier inputs: rewrite' : 'Numbers tie ✓ · quotes on page ✓'} cls={stale ? 'wait' : 'ok'} />
+          })()}
           {Object.entries(doc.notes).filter(([k]) => k.startsWith('oneoff:')).map(([k, x]) => {
             const n = x as OneOffNote
             return <Row key={k} kind="ai" claim={<>Why {k.slice(7)} was unusual</>}

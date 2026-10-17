@@ -497,7 +497,7 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
 
       <main id="main" className="wrap" tabIndex={-1}>
         <div role="tabpanel" id="view" aria-labelledby={`tab-${view}`}>
-        {view === 'note' && <Note parsed={parsed} doc={doc} projection={proj} go={go} />}
+        {view === 'note' && <Note parsed={parsed} doc={doc} setDoc={setDoc} projection={proj} go={go} />}
         {view === 'model' && <ModelView parsed={parsed} doc={doc} setDoc={setDoc} projection={proj} anchor={anchor} go={go} />}
         {view === 'evidence' && <Evidence parsed={parsed} doc={doc} setDoc={setDoc} projection={proj} go={go}
           upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals} toggleYear={toggleYear}

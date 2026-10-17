@@ -667,10 +667,8 @@ FY_RE = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MON}|\b{_MON}\s+\d{{1,2}}(
 PROSE_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
-def numbers_check(summary, given, quote=None):
-    """Rule: every number in AI prose is one the app gave it (its computed figures and flag text, `given`) or one in the
-    cited quote, at the precision written ("29%" matches 0.2913 and 29.13; "1,234" matches 1,234.4). Years and
-    financial-year labels and page references ("page 185") pass; so do counts up to 12 ("5 years"). {name, pass, detail}."""
+def unmatched(summary, given, quote=None):
+    """The numbers in `summary` that are neither in `given` nor in `quote`, at the precision written (numbers_check)."""
     pool = {n for t in (given, quote or "") for n in (amount(x) for x in PROSE_NUM.findall(FY_RE.sub(" ", t))) if n is not None}
     pool |= {x * 100 for x in pool}
     bad = []
@@ -680,7 +678,15 @@ def numbers_check(summary, given, quote=None):
             continue  # ponytail: small counts pass unchecked; "10 years" can't be told from a computed 10
         dp = len(raw.split(".")[1]) if "." in raw else 0
         if not any(abs(round(abs(p), dp) - x) <= 10 ** -dp / 2 + 1e-9 for p in pool):
-            bad.append(raw)
+            bad.append(raw.rstrip(","))
+    return bad
+
+
+def numbers_check(summary, given, quote=None):
+    """Rule: every number in AI prose is one the app gave it (its computed figures and flag text, `given`) or one in the
+    cited quote, at the precision written ("29%" matches 0.2913 and 29.13; "1,234" matches 1,234.4). Years and
+    financial-year labels and page references ("page 185") pass; so do counts up to 12 ("5 years"). {name, pass, detail}."""
+    bad = unmatched(summary, given, quote)
     return {"name": "Numbers match", "pass": not bad,
             "detail": "Every number in the text is one the app computed or one in the quote." if not bad
             else f"{', '.join(bad[:4])} {'is' if len(bad) == 1 else 'are'} neither computed by the app nor in the quote, "
@@ -848,3 +854,135 @@ def assumption_checks(key, kind, value, bad, source, outside, reasoning, ctx):
                            "detail": "The base case pays these dividends from its own cash in every year." if need < 0.5
                            else f"The base case has to borrow {_cr(need)} to keep cash above zero with this payout."})
     return checks
+
+
+# ---------- the research note's words (4.4): the LLM writes from the app's numbers; rules check every number ----------
+
+# recommendation wording the note must never use (SEBI: analysis, not advice). ponytail: a word list, so "sell" in
+# "sell more steel" is rejected too; the retry names the word and the model rephrases
+FORBIDDEN = re.compile(r"\b(?:buy|sell|target price|price target|recommend\w*|accumulate|outperform\w*|underperform\w*"
+                       r"|overweight|underweight)\b", re.I)
+THESIS_LEN = {"headline": 160, "head": 90, "text": 650, "priced_in": 450, "risk": 350, "trigger": 300, "watch": 200}
+
+
+def thesis_prompt(name, facts, cites):
+    """facts {key: text} (the app's numbers, written as shown); cites {id: {what, file, page, quote}} (approved quotes)."""
+    f = "\n".join(f"- {k}: {t}" for k, t in facts.items())
+    c = "\n".join(f'- {i}: {x["what"]} {x["file"]}, page {x["page"]}: "{x["quote"]}"' for i, x in cites.items())
+    return (f"You write the words of a short equity research note on {name}, an Indian listed company, for one reader "
+            "who reviews it. Every number is already computed by the app's rules; your job is to read them and judge "
+            "what matters: what the price assumes against what the business does, what the value hinges on, the risks.\n\n"
+            f"FACTS (computed by the app; key: text):\n{f}\n\n"
+            "CITATIONS (quotes from documents, each already checked against its page; id: what, file, page, quote):\n"
+            f"{c or '(none: no document has been read and approved)'}\n\n"
+            "Rules:\n"
+            "- Use only these facts and citations. Every number you write must be one of them as written above (you may "
+            "round it: 16.63% as 16.6% or 17%), or appear in a quote you cite. Don't work out new numbers: no "
+            "differences, ratios, sums or averages of your own.\n"
+            "- This is analysis, not a recommendation. Never write buy, sell, target price, price target, recommend, "
+            "accumulate, outperform or underperform. Say value range, priced for, upside or downside to our value.\n"
+            "- The page already shows the price, our value range and the growth the price needs. Don't spend a thesis "
+            "point restating them: each point makes one judgement an analyst would make (growth, margins, cash, the "
+            "balance sheet, what the value hinges on) and backs it with the facts.\n"
+            "- Plain English, short sentences, no hype. Money in Rs crore with Indian grouping (1,64,177), as in the facts.\n"
+            '- "refs" lists the fact keys or citation ids behind the point, at least one each.\n\n'
+            "Answer as a JSON object:\n"
+            '{"headline": "one sentence under 160 characters: what the price assumes against what the business does",\n'
+            ' "thesis": [exactly 3 of {"head": "a short claim under 90 characters", "text": "2 or 3 sentences under 650 '
+            'characters", "refs": ["fact key or citation id"]}],\n'
+            ' "priced_in": "under 450 characters: what the price needs, against our base case",\n'
+            ' "risks": [1 to 4 of {"text": "under 350 characters", "refs": [...]}],\n'
+            ' "bull_trigger": "under 300 characters: what would lift our value toward or past the price",\n'
+            ' "bear_trigger": "under 300 characters: what would lower it",\n'
+            ' "what_to_watch": [1 to 4 strings under 200 characters: what to check in the next results or filings]}')
+
+
+def _points(v, key, n):
+    xs = v.get(key)
+    return isinstance(xs, list) and n[0] <= len(xs) <= n[1] and all(
+        isinstance(p, dict) and isinstance(p.get("text"), str) and p["text"].strip() and isinstance(p.get("refs"), list)
+        and (key != "thesis" or isinstance(p.get("head"), str) and p["head"].strip()) for p in xs)
+
+
+def thesis_shape(v):
+    if not isinstance(v, dict):
+        return "expected a JSON object"
+    for k in ("headline", "priced_in", "bull_trigger", "bear_trigger"):
+        if not isinstance(v.get(k), str) or not v[k].strip():
+            return f'"{k}" must be a non-empty string'
+    if not _points(v, "thesis", (3, 3)):
+        return '"thesis" must be exactly 3 objects {"head": string, "text": string, "refs": [...]}'
+    if not _points(v, "risks", (1, 4)):
+        return '"risks" must be 1 to 4 objects {"text": string, "refs": [...]}'
+    w = v.get("what_to_watch")
+    if not (isinstance(w, list) and 1 <= len(w) <= 4 and all(isinstance(x, str) and x.strip() for x in w)):
+        return '"what_to_watch" must be 1 to 4 strings'
+    return None
+
+
+def write_thesis(prompt, why=None):
+    """One reply in thesis_shape; `why` = the rule failures of the previous reply, named so the model can fix them."""
+    if why:
+        prompt += f"\n\nYour previous note failed these rule checks, so it was rejected. Fix them:\n{why}"
+    return ask_json(prompt, thesis_shape)
+
+
+def thesis_items(v):
+    """(where, text, refs or None, length limit) for every piece of prose in a note reply."""
+    yield "Headline", v["headline"], None, THESIS_LEN["headline"]
+    for i, p in enumerate(v["thesis"], 1):
+        yield f"Thesis {i} head", p["head"], p["refs"], THESIS_LEN["head"]
+        yield f"Thesis {i}", p["text"], p["refs"], THESIS_LEN["text"]
+    yield "Priced in", v["priced_in"], None, THESIS_LEN["priced_in"]
+    for i, p in enumerate(v["risks"], 1):
+        yield f"Risk {i}", p["text"], p["refs"], THESIS_LEN["risk"]
+    yield "Bull trigger", v["bull_trigger"], None, THESIS_LEN["trigger"]
+    yield "Bear trigger", v["bear_trigger"], None, THESIS_LEN["trigger"]
+    for i, w in enumerate(v["what_to_watch"], 1):
+        yield f"Watch {i}", w, None, THESIS_LEN["watch"]
+
+
+def thesis_checks(v, facts, cites, texts):
+    """Rules on a note reply. A ref is a fact key, a citation id, or {file, page, quote}; texts(file, page) gives that
+    page's texts ([] = no such page, None = the document's text isn't on this machine). Every number must be a fact or
+    in a quote the item cites (items without refs: any citation's quote). [{name, pass, detail}]."""
+    given, every = "\n".join(facts.values()), " ".join(c["quote"] for c in cites.values())
+    bad = {k: [] for k in ("Numbers match", "Sources exist", "Quotes on page", "No recommendation wording", "Length")}
+    gone = set()
+    for where, text, refs, lim in thesis_items(v):
+        if len(text) > lim:
+            bad["Length"].append(f"{where} is {len(text)} characters (limit {lim})")
+        if m := FORBIDDEN.search(text):
+            bad["No recommendation wording"].append(f'{where} says "{m.group(0)}"')
+        quotes, head = [every] if refs is None else [], where.endswith("head")  # a head shares its point's refs
+        for r in refs or []:
+            if isinstance(r, str) and r in facts:
+                continue
+            c = cites.get(r) if isinstance(r, str) else r if isinstance(r, dict) else None
+            if not (isinstance(c, dict) and isinstance(c.get("quote"), str) and isinstance(c.get("page"), int)
+                    and isinstance(c.get("file"), str)):
+                if not head:
+                    bad["Sources exist"].append(f"{where}: {json.dumps(r)[:40]} is neither a fact key nor a citation")
+                continue
+            t = texts(c["file"], c["page"])
+            if t is None:
+                gone.add(c["file"])
+            elif not head and not on_page(c["quote"], t):
+                bad["Quotes on page"].append(f'{where}: the quote "{c["quote"][:50]}" isn\'t on page {c["page"]} of {c["file"]}')
+            quotes.append(c["quote"])
+        if refs is not None and not refs and not head:
+            bad["Sources exist"].append(f"{where} cites nothing")
+        if xs := unmatched(text, given, " ".join(quotes)):
+            bad["Numbers match"].append(f"{where}: {', '.join(xs[:3])}")
+    ok = {"Numbers match": "Every number is one the app computed or one in a cited quote.",
+          "Sources exist": "Every reference is a computed fact or an approved citation.",
+          "Quotes on page": "Every cited quote occurs on its page.",
+          "No recommendation wording": "No buy, sell, target-price or recommend wording.",
+          "Length": "Every part is within its length limit."}
+    why = {"Numbers match": " (neither computed by the app nor in a cited quote)", "Sources exist": "",
+           "Quotes on page": "", "No recommendation wording": "", "Length": ""}
+    out = [{"name": k, "pass": not xs, "detail": ok[k] if not xs else "; ".join(xs[:5]) + why[k] + "."} for k, xs in bad.items()]
+    if gone and not bad["Quotes on page"]:
+        out[2] = {"name": "Quotes on page", "pass": None,
+                  "detail": f"The text of {', '.join(sorted(gone))} isn't on this machine any more; those quotes were checked when approved."}
+    return out

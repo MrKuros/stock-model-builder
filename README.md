@@ -1,15 +1,15 @@
 # Stock Model Builder
 
-Turn an Indian listed company's reported financials into a three-statement forecast you can steer, then export it as an Excel model with live formulas.
+Open an Indian listed company and get a research note: what the price assumes against what the business does, the value range, what the value hinges on, the red flags and a written thesis. Behind it sit a three-statement model you can steer and an Excel export with live formulas.
 
-Reported years are drawn in **ink**. Your assumptions are drawn in **blue pencil**: each driver is a strip showing its own history, and you drag a pencil line to set the future.
+Numbers come from fixed rules. Words come from an AI command you choose, and every number in them is checked against the model before they are saved. It is analysis, not a recommendation.
 
-![Workspace: Milky Mist Dairy Food Ltd with a revenue-growth fade and base/bull/bear scenarios](docs/screenshots/desk-light.png)
+![Research note: Tata Consultancy Services, the price needs 16.6% growth a year against 5.8%](docs/screenshots/note-light.png)
 
 <table>
 <tr>
-<td><img src="docs/screenshots/landing.png" alt="Landing page" /></td>
-<td><img src="docs/screenshots/desk-dark.png" alt="Workspace in dark mode" /></td>
+<td><img src="docs/screenshots/landing.png" alt="Coverage: every company's price against our value range" /></td>
+<td><img src="docs/screenshots/note-dark.png" alt="The research note in dark mode" /></td>
 </tr>
 </table>
 
@@ -23,7 +23,7 @@ Reported years are drawn in **ink**. Your assumptions are drawn in **blue pencil
 - **Scenarios:** base, bull and bear, shown as overlays on the chart and compared in a single sentence.
 - **Return ratios:** ROE, ROCE, asset turnover, net debt/EBITDA and interest cover, for history and projection.
 - **One-off detection:** unusual years (tax, capex, other income, margin) are flagged with robust statistics (median and MAD). You can leave them out of the defaults.
-- **DCF valuation:** free cash flow to firm discounted at a WACC you build (risk-free rate, equity risk premium, beta, cost of debt), Gordon terminal value, and a bridge to value per share. A price ruler puts today's price (ink) next to the bear, base and bull values (pencil). The Excel export has a Valuation sheet with live formulas.
+- **DCF valuation:** free cash flow to firm discounted at a WACC you build (risk-free rate, equity risk premium, beta, cost of debt), Gordon terminal value, and a bridge to value per share. The note's ruler puts today's price next to the bear, base and bull values. The Excel export has a Valuation sheet with live formulas.
 - **Sensitivity and reverse DCF:** value per share across WACC × terminal growth (live formulas in Excel) and revenue growth × EBITDA margin (values, since each cell is a full re-projection), and the flat revenue growth today's price implies.
 - **Multiples cross-check:** P/E, EV/EBITDA and P/B at today's price and at each scenario's value, against the company's own year-end multiples, with a flag when one sits outside its historical range.
 - **Quarters and TTM:** the last ten quarters (sales, operating profit and margin, net profit, year-on-year growth) next to the last reported year and the trailing twelve months, and a sentence on TTM growth. The Excel export adds a Quarters sheet whose TTM column is live SUM formulas.
@@ -32,6 +32,10 @@ Reported years are drawn in **ink**. Your assumptions are drawn in **blue pencil
 - **AI-proposed mappings for leftover tags (optional):** with `LLM_CMD` set to any command that reads a prompt on stdin and prints the reply (no SDK, any provider), "Propose mappings" asks the model which statement line each unknown tag is. Rules then check every answer (the line exists, the unit is right, the line isn't already filled, the sign and size are plausible, totals such as expenses and total income still tie within 1%), and you approve or reject each one. An approved mapping is saved to `mappings.json` in the model library and the filing is re-read by rules; from then on every filing applies it with no AI call. Projecting and exporting never call the model. Without `LLM_CMD` the button is off and everything else works.
 - **Explain unusual years (optional, words only):** each flagged year has an Explain action. Attach that year's annual-report PDF and rules pick the few pages that mention exceptional or one-time items, the flagged line and the year (text read with the system `pdftotext`); the model answers in at most two sentences with a page and a quote, and the explanation is rejected unless that quote really occurs on that page. Without a report it can explain from the numbers only, labelled as such. Approving pins the note next to the flag, marked as AI-written; no number uses it.
 - **Annual-report notes (optional):** attach a year's annual-report PDF under Sources & proposals. For segment revenue, debt maturity, capex, contingent liabilities and related-party transactions, rules pick the three most likely pages per topic, and the app shows the pages and the exact prompt size before anything is sent. The model returns each figure with its page and a quote; rules check that every quote occurs on its page and contains its number, convert the unit (lakh, million...) to Rs crore, and tie the sums to the statements (segments to revenue within 2%, maturity buckets to borrowings within 5%, capex to the XBRL cash flow when attached). A note that fails is kept as rejected. Approved notes are drawn as a segment mix, a maturity ladder, contingent liabilities against net worth and a related-party table; an approved capex figure becomes that year's capex in the history behind the default.
+- **Research note (home screen):** the verdict in one sentence ("The price needs 16.6% growth a year. It is doing 5.8%."), downside or upside to our base value, how many of the 50 sensitivity cases sit below the price, and the input the value hinges on with its break-even. A two-scale ruler puts the price against the bear–bull range and the growth each value needs. Then the rule-check strip, the tornado of what moves value, break-evens, key numbers, the value bridge and what would close or widen the gap. Every number has a footnote with its source. Model and Evidence tabs hold the tables, documents and checks (N / M / E keys).
+- **Forensic radar:** 15 rules for cash conversion, receivable and inventory days, capital WIP, other income, tax swings, debt and interest cover, working capital, a Beneish-style M-score, and (from approved annual-report notes) contingent liabilities, related parties, promoter pledge and the auditor. Each lit flag can be explained from the annual report with a checked quote.
+- **Drafted assumptions:** attach annual reports, earnings-call transcripts or investor presentations, and the AI command proposes bear, base and bull for every driver with a page and a quote. Rules check the quote, the bounds, the company's own 10-year history, the order of the cases and the cash consequences; you accept, edit or reject each one.
+- **Thesis writer:** "Write the note" sends the AI command only the numbers on the note (verdict, what moves value, break-evens, key numbers, lit flags, inputs and their sources) and the quotes you approved, never whole pages. It writes a headline, three thesis points, what is priced in, risks, bull and bear triggers and what to watch. Rules reject it unless every number is one the app computed or one in a cited quote, every reference exists, every quote is on its page, nothing says buy, sell, target price or recommend, and each part fits its length; a failure is retried once with the reasons, then shown. The saved note is marked AI-written; when an input changes it is marked "written for earlier inputs", and it is only rewritten when you ask.
 - **Model library:** models autosave to `models/` locally, and you can reopen any of them from the start page.
 - **Excel export:** every projected statement cell is a live formula. Inputs are blue, and a scenario selector switches the whole workbook between base, bull and bear.
 
@@ -70,13 +74,13 @@ model.py          parse, checks, defaults, projection, ratios, one-offs, valuati
 server.py         API + local model library
 ai.py             LLM_CMD calls, PDF page text and picking, quote and number checks
 test_model.py     self-check incl. Excel parity
-web/src/          App, DriverStrip (assumption strips), Chart, Statements, Valuation, Sources
+web/src/          App (shell, coverage), Note, Ruler, Model, Evidence, Draft, DriverStrip, Chart, Statements, Valuation, Sources
 ```
 
 ## Design notes
 
-- **Ink and pencil** comes from how analysts mark up statements: actuals in ink, estimates in pencil.
-- **Fonts:** Bricolage Grotesque (display), Instrument Sans (UI), IBM Plex Mono (numbers).
+- **Type is provenance:** Martian Mono for every number computed by rules, Source Serif 4 for written words (AI prose, quotes), Archivo for the interface.
+- **Colour is who says it:** ochre for the market price, blue for our model, carmine for a lit rule, green for a passed check, black for reported history.
 - **Numbers** use Indian digit grouping (1,23,456), with negatives in brackets.
 - **Accessibility:** light and dark themes, works down to 390 px, keyboard-accessible sliders and tabs, and reduced motion is respected.
 
@@ -85,6 +89,7 @@ web/src/          App, DriverStrip (assumption strips), Chart, Statements, Valua
 - Input is Export.in exports plus optional BSE/NSE XBRL results filings.
 - Inventory and payable days run on COGS (Export's raw material cost less change in inventory) when COGS is at least 10% of revenue in each of the last three years, else on revenue. Trade payables, lease liabilities and capex from the cash-flow statement come only from attached annual XBRL filings (capex also from an approved annual-report note); without them payables stay inside other liabilities, leases inside borrowings, and capex is inferred from the change in net block. Lease liabilities count as debt in the valuation and are held flat in the projection.
 - Annual-report reading needs a text PDF (scanned reports have no text) and checks only what it can tie: it reads up to three pages per topic and can miss a note printed elsewhere, and contingent liabilities and related-party items have no total to tie to, so the quote checks are their only guard. Maturity tables that show undiscounted cash flows won't tie to the carrying value of borrowings and come back rejected.
+- The thesis writer checks numbers by value, not by meaning: a number that matches a computed fact passes even if the sentence attaches it to the wrong thing, so read the note before marking it reviewed. It knows only what the app computed and the quotes you approved: no management access, channel checks or industry news.
 - Financial companies (banks, NBFCs, insurers) aren't supported yet.
 - It's a modelling tool, not investment advice. The forecasts are only as good as the assumptions you give it.
 
@@ -93,5 +98,5 @@ web/src/          App, DriverStrip (assumption strips), Chart, Statements, Valua
 1. ~~Daily driver: scenarios, fades, ratios, one-offs, model library~~ ✓
 2. ~~Valuation: DCF (FCFF), sensitivity tables, reverse DCF, multiples~~ ✓
 3. ~~Richer data: BSE/NSE XBRL, AI-proposed mappings, annual-report notes, quarterly/TTM~~ ✓
-4. The analyst: research note first, assumptions proposed from filings and concalls, forensic red-flag radar
+4. ~~The analyst: research note first, assumptions proposed from filings and concalls, forensic red-flag radar, thesis writer~~ ✓
 5. Hands-off coverage: fetch by ticker, automatic peers, tracking results against the forecast

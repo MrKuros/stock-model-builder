@@ -1,11 +1,11 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import Ruler from './Ruler'
 import { SEV, bySeverity } from './Evidence'
-import { FlagNoteView } from './Sources'
+import { FlagNoteView, useAi } from './Sources'
 import type { Go } from './App'
 import {
-  fmt, money, rs, type Cagr, type Impact, type ModelDoc, type OneOffNote, type Parsed, type Path, type Projection,
-  type RuleCheck, type Row, type ValInputs, type Valuation,
+  api, fmt, money, postJson, rs, when, type Cagr, type Impact, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
+  type Path, type Projection, type RuleCheck, type Row, type ThesisNote, type ValInputs, type Valuation,
 } from './lib'
 
 /** Average of a straight-line path over the projection: what "ours" means for a faded driver. */
@@ -22,8 +22,8 @@ const LOW = (c: RuleCheck) => (c.severity === 'low' ? ' (low)' : '')
 const NAMES = { growth: 'Revenue growth', ebitda_margin: 'EBITDA margin', wacc: 'Discount rate (WACC)', g: 'Terminal growth' } as const
 
 /** A cited number: dotted underline, a footnote mark that jumps to the Notes list, the source on hover or focus. */
-function Cite({ n, src, children, plain }: { n: number; src: string; children: ReactNode; plain?: boolean }) {
-  const id = `cite-${n}`
+function Cite({ n, src, children, plain, uid }: { n: number; src: string; children: ReactNode; plain?: boolean; uid?: string }) {
+  const id = `cite-${n}${uid ? `-${uid}` : ''}`
   return (
     <span className="cite">
       <span className={plain ? undefined : 'num'}>{children}</span>
@@ -35,9 +35,37 @@ function Cite({ n, src, children, plain }: { n: number; src: string; children: R
   )
 }
 
-interface Props { parsed: Parsed; doc: ModelDoc; projection: Projection | null; go: Go }
+interface Props { parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null; go: Go }
 
-export default function Note({ parsed, doc, projection, go }: Props) {
+const refKey = (r: NoteRef) => (typeof r === 'string' ? r : JSON.stringify(r))
+/** What a ref stands for, as the note was written: the fact's text, or the file, page and quote. */
+function refSource(tn: ThesisNote, r: NoteRef) {
+  if (typeof r !== 'string') return { file: true, text: `${r.file}, p.${r.page}`, quote: r.quote, page: r.page }
+  if (tn.facts[r] != null) return { file: false, text: tn.facts[r], quote: undefined, page: 0 }
+  const c = tn.cites[r]
+  return c ? { file: true, text: `${c.file}, p.${c.page}. ${c.what}`, quote: c.quote, page: c.page } : null
+}
+
+const nums = (t: string) => (t.match(/\d[\d,]*(?:\.\d+)?/g) ?? []).map(x => x.replace(/,/g, ''))
+
+/** AI prose with every number in mono; a number its refs back gets a footnote and its source on hover or focus.
+ * ponytail: a number is tied to the first ref whose text has the same number as written; a rounded one gets no
+ * footnote. The rules already checked every number against the facts and quotes; this only picks the footnote */
+function Prose({ text, refs, tn, refN, uid }: { text: string; refs: NoteRef[]; tn: ThesisNote; refN: Map<string, number>; uid: string }) {
+  const parts = text.split(/((?<![\w.])\d[\d,]*(?:\.\d+)?(?:%|x\b)?)/)
+  return <>{parts.map((p, i) => {
+    if (i % 2 === 0 || /^(19|20)\d\d$/.test(p)) return p
+    const digits = p.replace(/[,%x]/g, '')
+    if (/^\d+$/.test(digits) && +digits <= 12) return <span key={i} className="num">{p}</span> // a count ("5 years", "1 pp")
+    const r = refs.find(r => { const s = refSource(tn, r); return s && nums(`${s.text} ${s.quote ?? ''}`).includes(digits) })
+    const n = r && refN.get(refKey(r))
+    const s = r && refSource(tn, r)
+    return n && s ? <Cite key={i} n={n} uid={`${uid}-${i}`} src={s.quote ? `${s.text}: “${s.quote}”` : `Computed by rules: ${s.text}`}>{p}</Cite>
+      : <span key={i} className="num">{p}</span>
+  })}</>
+}
+
+export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
   const { company, years } = parsed
   const hist = parsed.hist ?? company.hist
   const name = subject(company.name)
@@ -63,7 +91,21 @@ export default function Note({ parsed, doc, projection, go }: Props) {
   const cite = (kind: string, text: ReactNode, quote?: string, to?: () => void) => { notes.push({ kind, text, quote, to }); return notes.length }
   const nImplied = implied == null ? 0 : cite('Computed', <>Reverse DCF: the flat revenue growth, every projected year, at which base value equals the price; searched from −30% to +80%, other inputs as set.</>, undefined, () => go('evidence', 'verdict'))
   const nValue = cite('Computed', <>DCF of free cash flow to firm, base, bear and bull cases; WACC {v ? pc(v.wacc) : '–'}, terminal growth {v ? pc(v.g) : '–'}, valued at the {last} year end.</>, undefined, () => go('model', 'valuation'))
+  // the written note's refs, in reading order: facts (computed) and quotes (files), each a footnote linking to its evidence
+  const tn = doc.note
+  const refN = new Map<string, number>()
+  const factTo = (k: string) => (k.startsWith('flag_') ? () => go('evidence', k.slice(5)) : k.startsWith('in_') ? () => go('model', k.slice(3))
+    : k.startsWith('oneoff_') ? () => go('evidence', 'oneoffs') : () => go('model', 'valuation'))
   const nCagr = best3 ? cite('Reported', <>Revenue (Export export, Sales row): {c3.length} rolling three-year window{c3.length > 1 ? 's' : ''} from {years[0]}; fastest {best3.from}–{best3.to}.</>) : 0
+
+  if (tn) for (const r of [...tn.thesis.flatMap(p => p.refs), ...tn.risks.flatMap(p => p.refs)]) {
+    const k = refKey(r), s = refSource(tn, r)
+    if (refN.has(k) || !s) continue
+    refN.set(k, cite(s.file ? `File p.${s.page}` : 'Computed', s.text, s.quote,
+      s.file ? () => go('evidence', 'src-ar-head') : factTo(k)))
+  }
+  const P = (text: string, refs: NoteRef[], uid: string) => (tn ? <Prose text={text} refs={refs} tn={tn} refN={refN} uid={uid} /> : null)
+  const stale = !!tn && projection?.inputs_hash != null && projection.inputs_hash !== tn.inputs_hash
 
   // --- verdict ---
   let h1: ReactNode, stand: ReactNode = null
@@ -162,14 +204,8 @@ export default function Note({ parsed, doc, projection, go }: Props) {
 
       <div className="cols">
         <div className="col">
-          <section className="sec" aria-labelledby="thesis-h">
-            <h2 id="thesis-h" className="label sec-label"><span>Thesis</span><span className="who">Not written yet</span></h2>
-            <div className="empty">
-              <p>No thesis yet. When the thesis writer runs, its three points appear here in serif, marked AI-written, each
-                number tied to a source in the Notes. Everything else on this page is computed by rules.</p>
-            </div>
-          </section>
-          <Risks parsed={parsed} doc={doc} go={go} />
+          <Thesis doc={doc} setDoc={setDoc} tn={tn} stale={stale} P={P} refN={refN} />
+          <Risks parsed={parsed} doc={doc} go={go} tn={tn} P={P} />
         </div>
 
         <div className="col">
@@ -197,7 +233,7 @@ export default function Note({ parsed, doc, projection, go }: Props) {
         </div>
       </div>
 
-      {nb && value != null && price != null && <Change impact={nb.impact} base={value} price={price} oursOf={oursOf} v={v!} be={be} />}
+      {nb && value != null && price != null && <Change impact={nb.impact} base={value} price={price} oursOf={oursOf} v={v!} be={be} tn={tn} P={P} />}
 
       <section className="notes" aria-labelledby="notes-h">
         <h2 id="notes-h" className="label sec-label"><span>Notes · <b>sources for the numbers above</b></span></h2>
@@ -206,7 +242,7 @@ export default function Note({ parsed, doc, projection, go }: Props) {
             <li key={i} id={`fn-${i + 1}`} tabIndex={-1}>
               <span className={`kind ${n.kind === 'Computed' ? 'rule' : 'file'}`}>{n.kind}</span>{n.text}
               {n.quote && <q className="quote">{n.quote}</q>}
-              {n.to && <> <button type="button" className="link" onClick={n.to}>Evidence</button></>}
+              {n.to && <> <button type="button" className="link" onClick={n.to}>Open</button></>}
             </li>
           ))}
         </ol>
@@ -254,7 +290,7 @@ function Strip({ checks, go }: { checks: RuleCheck[]; go: Go }) {
 
 /** The forensic flags, worst first, one plain sentence each with any approved explanation (AI-written, cited); then
  * the unusual years and data issues. Each line opens its evidence. */
-function Risks({ parsed, doc, go }: { parsed: Parsed; doc: ModelDoc; go: Go }) {
+function Risks({ parsed, doc, go, tn, P }: { parsed: Parsed; doc: ModelDoc; go: Go; tn: ThesisNote | null; P: Pr }) {
   const recent = parsed.years.slice(-3)
   const oneoffs = parsed.oneoffs.filter(o => recent.includes(o.year))
   const issues = parsed.checks
@@ -295,6 +331,10 @@ function Risks({ parsed, doc, go }: { parsed: Parsed; doc: ModelDoc; go: Go }) {
         {issues.length > 0 && <li><p>{issues.length} issue{issues.length > 1 ? 's' : ''} in the reported data, e.g. {issues[0]}.</p>
           <button type="button" className="link small" onClick={() => go('evidence', 'data')}>See them all</button></li>}
       </ul>
+      {tn && <div className="ai-note">
+        <span className="who">AI-written · checked against the model</span>
+        <ul className="ai-risks">{tn.risks.map((r, i) => <li key={i} className="serif">{P(r.text, r.refs, `r${i}`)}</li>)}</ul>
+      </div>}
       {waiting.length > 0 && <p className="small-note">Not checked yet: {waiting.map(f => f.title.toLowerCase()).join(', ')}.{' '}
         <button type="button" className="link" onClick={() => go('evidence', 'src-ar-head')}>Attach the annual report</button></p>}
     </section>
@@ -443,8 +483,9 @@ function KeyNumbers({ parsed, proj, next, checks, v, go }: {
 }
 
 /** Computed moves toward and away from the price, from the one-step runs and the break-evens. */
-function Change({ impact, base, price, oursOf, v, be }: {
+function Change({ impact, base, price, oursOf, v, be, tn, P }: {
   impact: Impact[]; base: number; price: number; oursOf: (k: string) => number; v: Valuation; be: NonNullable<Valuation['note']>['breakevens']
+  tn: ThesisNote | null; P: Pr
 }) {
   const moves = impact.flatMap(d => ([['down', d.down, -1], ['up', d.up, 1]] as const).filter(m => m[1] != null).map(([, val, s]) => ({
     d, val: val as number, text: `${d.label} ${s > 0 ? 'up' : 'down'} ${stepText(d.key, d.step)} to ${unit(d.key, oursOf(d.key) + s * d.step)}`,
@@ -463,6 +504,7 @@ function Change({ impact, base, price, oursOf, v, be }: {
           {fair && <li><span>{NAMES[fair]} at <span className="num">{unit(fair, be[fair]!.value!)}</span> instead of {unit(fair, oursOf(fair))}: the price is fair.</span></li>}
           {price > base && bull != null && <li><span>Bull case: <span className="num ours">Rs {rs(bull)}</span>, {far(bull)}.</span></li>}
           {!toward.length && !fair && <li><span>Nothing one step away moves our value toward the price.</span></li>}
+          {tn && <li className="ai"><span><span className="kind ai">AI</span><span className="serif">{P(tn.bull_trigger, [], 'bt')}</span></span></li>}
         </ul>
       </div>
       <div className="down">
@@ -471,9 +513,87 @@ function Change({ impact, base, price, oursOf, v, be }: {
           {away.map(m => <li key={m.text}><span>{m.text}: <span className="num ours">Rs {rs(m.val)}</span>.</span></li>)}
           {price > base && bear != null && <li><span>Bear case: <span className="num ours">Rs {rs(bear)}</span>.</span></li>}
           {price < base && bull != null && <li><span>Bull case: <span className="num ours">Rs {rs(bull)}</span>.</span></li>}
+          {tn && <li className="ai"><span><span className="kind ai">AI</span><span className="serif">{P(tn.bear_trigger, [], 'bt2')}</span></span></li>}
         </ul>
       </div>
     </section>
   )
 }
 
+
+type Pr = (text: string, refs: NoteRef[], uid: string) => ReactNode
+
+/** The note's words: written by the LLM only when you press the button, from the facts on this page and the approved
+ * quotes; rules check every number, reference, quote and word before it is saved. Never written on load. */
+function Thesis({ doc, setDoc, tn, stale, P, refN }: {
+  doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; tn: ThesisNote | null; stale: boolean; P: Pr; refN: Map<string, number>
+}) {
+  const ai = useAi()
+  const [busy, setBusy] = useState(false)
+  const [fail, setFail] = useState<{ text: string; checks?: ThesisNote['checks'] } | null>(null)
+  const write = async () => {
+    setBusy(true)
+    setFail(null)
+    try {
+      const r = await api<ThesisNote>('/api/note/write', postJson(doc))
+      if (r.status === 'written') setDoc(d => ({ ...d, note: r, reviewed_at: null })) // new words: back to draft
+      else setFail({ text: 'The note failed the rule checks twice, so it wasn’t saved.', checks: r.checks.filter(c => c.pass === false) })
+    } catch (e) { setFail({ text: (e as Error).message }) } finally { setBusy(false) }
+  }
+  const off = !ai?.available
+  const button = (label: string) => (
+    <p className="write">
+      <button type="button" className="btn" onClick={write} disabled={busy || off} aria-describedby="thesis-why">{busy ? 'Writing…' : label}</button>
+      <span id="thesis-why" className="small-note">{off ? ai?.message ?? 'Checking whether an AI command is set…'
+        : 'Sends only the computed facts and approved quotes on this page; rules check every number before it is saved.'}</span>
+    </p>
+  )
+  const nCites = tn ? Object.keys(tn.cites).length : 0
+  return (
+    <section className="sec thesis" aria-labelledby="thesis-h">
+      <h2 id="thesis-h" className="label sec-label"><span>Thesis · <b>3 points</b></span>
+        <span className={`who${stale ? ' stale' : ''}`}>{!tn ? 'Not written yet' : stale ? 'Written for earlier inputs' : 'AI-written · cited'}</span></h2>
+      <div aria-live="polite">
+        {busy && <p className="small-note">Writing the note from the numbers on this page. This takes a minute or two.</p>}
+        {fail && <div className="fail" role="alert"><p>{fail.text}</p>
+          {fail.checks?.length ? <ul>{fail.checks.map(c => <li key={c.name}><strong>{c.name}:</strong> {c.detail}</li>)}</ul> : null}</div>}
+      </div>
+      {!tn && <div className="empty">
+        <p>Not written yet. The writer reads the verdict, what moves value, the break-evens, key numbers, lit rule checks
+          and the quotes you approved, and writes three points, the risks and what to watch. Everything else on this page
+          is computed by rules.</p>
+        {button('Write the note')}
+      </div>}
+      {tn && <>
+        {stale && <p className="stale-note">Written for earlier inputs: the model has changed since {when(tn.written_at)}, so
+          some numbers below may no longer match. Rewrite to bring the words up to date.</p>}
+        <p className="headline">{P(tn.headline, [], 'h')}</p>
+        {tn.thesis.map((p, i) => {
+          const rows = p.refs.map(r => ({ r, s: refSource(tn, r) }))
+          const missing = rows.filter(x => !x.s).length
+          return (
+            <article className="claim" key={i}>
+              <h3>{p.head}</h3>
+              <p>{P(p.text, p.refs, `t${i}`)}</p>
+              <details className="src">
+                <summary>{rows.length - missing} source{rows.length - missing === 1 ? '' : 's'}</summary>
+                <ol>{rows.map(({ r, s }) => s && (
+                  <li key={refKey(r)}><span className={`kind ${s.file ? 'file' : 'rule'}`}>{s.file ? 'File' : 'Rule'}</span>{s.text}
+                    {s.quote && <> <q className="quote">{s.quote}</q></>}
+                    {refN.has(refKey(r)) && <span className="small-note"> (note {refN.get(refKey(r))})</span>}</li>))}</ol>
+              </details>
+            </article>
+          )
+        })}
+        <h3 className="label sub">Priced in</h3>
+        <p className="serif prose">{P(tn.priced_in, [], 'p')}</p>
+        <h3 className="label sub">What to watch</h3>
+        <ul className="watch">{tn.what_to_watch.map((w, i) => <li key={i} className="serif">{P(w, [], `w${i}`)}</li>)}</ul>
+        <p className="small-note">AI-written {when(tn.written_at)} from the facts on this page{nCites ? ` and ${nCites} approved quote${nCites > 1 ? 's' : ''}` : ''},
+          checked against the model: every number matches one the app computed or a cited quote{tn.rounds > 1 ? ' (passed on the retry)' : ''}.
+          Analysis, not a recommendation.</p>
+        {button('Rewrite thesis')}
+      </>}
+    </section>
+  )
+}
