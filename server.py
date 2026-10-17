@@ -164,7 +164,7 @@ NEW_DRIVERS = ("cogs_pct", "dpo")  # added in 3.4; scenarios saved before lack t
 
 
 class ModelRequest(BaseModel):
-    """The model document (version 5) minus what the engine ignores (excluded_years, saved_at)."""
+    """The model document (version 6) minus what the engine ignores (excluded_years, saved_at)."""
     company: Company
     scenarios: dict[Scenario, dict[str, DriverPath]]
     active: Scenario = "base"
@@ -213,7 +213,7 @@ class ModelRequest(BaseModel):
 
     def dcf(self, co, sc, n, out):
         ex = {s: model.expand(sc[s], n) for s in model.SCENARIOS}
-        v = model.valuation(out, co["hist"], self.valuation.model_dump(), ex["base"], co["market"], inputs=ex)
+        v = model.valuation(out, co["hist"], self.valuation.model_dump(), ex["base"], co["market"], inputs=ex, note=True)
         try:  # extreme but finite inputs (shares 1e-320, rates 1e308) can overflow; JSON can't carry inf/NaN
             json.dumps(v, allow_nan=False)
         except ValueError:
@@ -223,8 +223,8 @@ class ModelRequest(BaseModel):
 
 class ModelDoc(ModelRequest):
     """The full model document as saved in the library. Version 3 (before valuation) loads with default inputs;
-    versions 3 and 4 load with empty Phase 3 blocks."""
-    version: Literal[3, 4, 5]
+    versions 3 and 4 load with empty Phase 3 blocks; 3 to 5 with empty Phase 4 blocks."""
+    version: Literal[3, 4, 5, 6]
     excluded_years: list[str] = []
     saved_at: str | None = None
     # ponytail: proposals are untyped dicts {id, kind (mapping | oneoff_note | ar_note), field, value, unit, period,
@@ -235,10 +235,16 @@ class ModelDoc(ModelRequest):
     # notes (in ModelRequest): "oneoff:FY2020": {proposal, summary, file, page, quote, from_numbers, ai} (3.2b);
     # "ar:segments:FY2021": {proposal, topic, year, file, rows, total, against, ai} (3.3)
     reports: list[Report] = []  # attached annual reports (3.2b); added within version 5, so it defaults to none
+    # Phase 4 (version 6). ponytail: untyped until the features that write them land (4.2 assumption_sources,
+    # 4.3 flag_notes, 4.4 note); 4.1 only reads them, and the note shows their slots empty
+    note: dict | None = None  # the thesis and verdict text (4.4): AI-written words with citations
+    assumption_sources: dict = {}  # driver key -> where its value came from (4.2: an approved proposal, or you)
+    flag_notes: list[dict] = []  # AI explanations of rule-check flags, with citations (4.3)
+    reviewed_at: str | None = None  # "Mark as reviewed" in the review bar; cleared when you change the model
 
     @model_validator(mode="after")
     def _migrate(self):
-        self.version = 5  # v3 -> v4 added "valuation", v4 -> v5 the blocks above; all already defaulted
+        self.version = 6  # v3 -> v4 added "valuation", v4 -> v5 the Phase 3 blocks, v5 -> v6 the Phase 4 ones
         return self
 
 
@@ -267,7 +273,11 @@ def _company_payload(co, excluded=(), filings=(), notes=None):
         "ratios": model.ratios(up["hist"]),
         "defaults": model.default_assumptions(up["hist"], exclude=set(excluded), labels=labels),
         "checks": model.data_checks(co),
-        "oneoffs": model.detect_oneoffs(up["hist"], labels),
+        "oneoffs": (oneoffs := model.detect_oneoffs(up["hist"], labels)),
+        # the note (4.1): rule checks, key numbers against their 3-year median, rolling revenue CAGRs
+        "rule_checks": model.rule_checks(up["hist"], labels, oneoffs, model.data_checks(co), notes),
+        "key_numbers": model.key_numbers(up["hist"], labels),
+        "cagrs": {"3": model.cagrs(up["hist"], labels, 3), "5": model.cagrs(up["hist"], labels, 5)},
         "valuation": model.VALUATION,  # defaults for a new document
         "drivers": model.DRIVERS,
         "layout": model.LAYOUT,
@@ -753,14 +763,35 @@ def list_models(root=MODELS):
         try:
             doc = load_model(model_id, root)
             co, sc, n = doc.args()
-            last = model.project(co["hist"], model.expand(sc[doc.active], n), n)[-1]["revenue"]
+            ex = {s: model.expand(sc[s], n) for s in model.SCENARIOS}
+            projs = {s: model.project(co["hist"], ex[s], n) for s in model.SCENARIOS}
+            last = projs[doc.active][-1]["revenue"]
+            labels = model.labels(co["dates"])
+            checks = model.rule_checks(co["hist"], labels, model.detect_oneoffs(co["hist"], labels),
+                                       model.data_checks(doc.company.model_dump()), doc.notes)
+            cover = _coverage(projs, co, ex, doc.valuation.model_dump())
         except Exception:  # noqa: BLE001
             continue  # ponytail: skip any unreadable file, never fail the whole list
         out.append({"id": model_id, "company": doc.company.name, "active": doc.active, "n": n,
                     "saved_at": doc.saved_at, "year": model.fy(model.projected_dates(co, n)[-1], True),
-                    "revenue": last if last is not None and math.isfinite(last) else None})
+                    "revenue": last if last is not None and math.isfinite(last) else None,
+                    "flags": sum(c["status"] in ("red", "amber") for c in checks), "reviewed_at": doc.reviewed_at,
+                    **cover})
     # ponytail: parses and projects every file per listing; fine for hundreds, add an index file past that
     return sorted(out, key=lambda m: m["saved_at"] or "", reverse=True)
+
+
+def _coverage(projs, co, ex, val):
+    """The landing row: price, bear/base/bull value per share, base's reverse DCF against its own average growth,
+    or why there's no value. Only base gets the reverse DCF (about 50 runs), not the grids or the note."""
+    v = model.valuation(projs, co["hist"], val, ex["base"], co["market"], inputs={"base": ex["base"]})
+    sv = v["scenarios"]
+    g = ex["base"]["growth"]
+    return {"price": v["price"], "values": {s: sv[s]["per_share"] for s in model.SCENARIOS},
+            "implied": sv["base"].get("implied_growth"), "growth": sum(g) / len(g),
+            "why": None if sv["base"]["per_share"] is not None else
+            "no share count" if not v["shares"] else "the WACC doesn't clear terminal growth" if v["error"] else
+            "final-year free cash flow is negative" if sv["base"]["error"] else "no value per share"}
 
 
 RESTATED = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "Net profit"), ("total_assets", "Total assets"),

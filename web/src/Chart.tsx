@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { money, shortYear } from './lib'
 
-const H = 300, M = { top: 28, right: 8, bottom: 30, left: 64 }
+const H = 300, M = { top: 28, right: 8, bottom: 30, left: 76 }
 
 export function niceTicks(lo: number, hi: number) {
   const raw = (hi - lo || 1) / 4

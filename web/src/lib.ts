@@ -67,9 +67,25 @@ export interface Valuation {
   lease?: number; cash: number; investments: number; scenarios: Record<Scenario, ScenarioValue>
   /** Each reported year end's multiples (year-end price), with their median, low and high. Missing on an old server. */
   multiples?: { hist: Record<Multiple, (number | null)[]>; median: Multiples; min: Multiples; max: Multiples }
+  /** The research note's numbers for the base case (model.valuation note=True); null with a WACC error. */
+  note?: NoteNumbers | null
   /** Missing on a server not yet restarted after an update; the panel then hides the grids. */
   steps?: { wacc: number[]; g: number[]; growth: number[]; margin: number[]; implied?: [number, number] }
 }
+/** One driver moved down / up one step, others at base (model.drivers_impact): value per share either way. */
+export interface Impact { key: string; label: string; step: number; down: number | null; up: number | null; swing: number | null }
+/** The flat level of a driver at which base value = price (model.breakevens); value null = none in range. */
+export interface BreakEven { value: number | null; range: [number, number] | null }
+export interface NoteNumbers {
+  impact: Impact[]
+  breakevens: Partial<Record<'growth' | 'ebitda_margin' | 'wacc' | 'g', BreakEven>> // empty without a price
+  growth_scale: [number, number | null][] // flat revenue growth -> value per share, other inputs at base
+}
+/** A cell of the note's rule-check strip (model.rule_checks). */
+export interface RuleCheck { id: string; name: string; status: 'red' | 'amber' | 'clear' | 'filing'; fact: string; rule: string }
+/** A measure's last reported year against the median of the three years before (model.key_numbers). */
+export interface KeyNumber { key: string; label: string; kind: 'pct' | 'x' | 'days'; year: string; last: number | null; typical: number | null }
+export interface Cagr { from: string; to: string; value: number }
 /** A rule check on a filing or proposal; pass null = a note (nothing to compare with). */
 export interface Check { name: string; pass: boolean | null; detail: string }
 /** An attached XBRL results filing (model.parse_xbrl via POST /api/xbrl), facts in Rs crore (EPS in Rs). */
@@ -108,7 +124,7 @@ export interface OneOffNote {
 export interface Decided { proposal: Proposal; filings: Filing[]; missing: string[] }
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
 export interface ModelDoc {
-  version: 5
+  version: 6
   company: Company
   n: number
   active: Scenario
@@ -121,6 +137,11 @@ export interface ModelDoc {
   proposals: Proposal[]
   notes: Record<string, unknown>
   reports: Report[]
+  // Phase 4 blocks (version 6): written by 4.2-4.4; 4.1 shows their slots empty
+  note: Record<string, unknown> | null
+  assumption_sources: Record<string, unknown>
+  flag_notes: Record<string, unknown>[]
+  reviewed_at: string | null // "Mark as reviewed"; cleared when the model changes
 }
 /** A reported year whose metric sits far from the company's own median (model.detect_oneoffs). */
 export interface OneOff { year: string; metric: string; value: number; typical: number; note: string }
@@ -143,6 +164,9 @@ export interface Parsed {
   ttm?: Ttm | null // null: no quarters, or the last four aren't consecutive
   ttm_prev?: Ttm | null // the four quarters a year earlier, for TTM growth
   restated?: Restated | null // only on a fresh upload; null when no model of this company is saved
+  rule_checks?: RuleCheck[] // red, amber, clear, then needs-a-filing (missing on an old server)
+  key_numbers?: KeyNumber[]
+  cagrs?: Record<'3' | '5', Cagr[]> // every rolling 3- and 5-year revenue CAGR
   valuation: ValInputs // defaults for a new document
   drivers: Driver[]
   layout: LayoutLine[]
@@ -151,6 +175,9 @@ export interface Parsed {
 export interface ModelSummary {
   id: string; company: string; active: Scenario; n: number; saved_at: string | null
   year: string; revenue: number | null // final projected year, active scenario
+  // the coverage row (server._coverage); missing on an old server
+  price?: number | null; values?: Record<Scenario, number | null>; implied?: number | null; growth?: number
+  why?: string | null; flags?: number; reviewed_at?: string | null
 }
 /** GET /api/models/{id}: the document plus what the dashboard derives from the company. */
 export interface Opened { id?: string; doc?: ModelDoc; parsed: Parsed }
@@ -188,6 +215,11 @@ const inr = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 })
 const inr2 = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 /** A share price or share count to 2 decimals, Indian grouping. */
 export const dec2 = (v: number) => inr2.format(v)
+
+/** Rs per share: whole rupees from 100 up, paise below (a Rs 12 stock needs them). */
+export const rs = (v: number) => (Math.abs(v) >= 100 ? money(v) : dec2(v))
+/** A share as a percentage, one decimal: 0.1663 -> "16.6%". */
+export const pc = (v: number | null | undefined) => fmt(v, 'pct')
 
 /** Rs crore, Indian digit grouping, accounting-style negatives. */
 export function money(v: number | null | undefined): string {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Upgrade } from './App'
+import type { Upgrade } from './Model'
 import {
   api, dec2, fmt, money, postJson, type ArNote, type ArValue, type Check, type Company, type Decided, type Filing,
   type NotesPlan, type OneOffNote, type Proposal, type Report, type Sources as Used,
