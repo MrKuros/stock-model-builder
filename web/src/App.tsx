@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Landing from './Landing'
 import Workspace from './Workspace'
-import { MobileTop, Side, slugOf } from './Shell'
-import { PAGES, navigate, onLinkClick, pathOf, readRoute, type Page, type Route } from './route'
+import { MobileTop, Side, keysOn, slugOf } from './Shell'
+import { PAGES, navigate, onLinkClick, pathOf, placed, readRoute, type Page, type Route } from './route'
 import { api, defaultPaths, postJson, seed, type ModelDoc, type ModelSummary, type Opened, type Parsed } from './lib'
 
 const LAST = 'financial-model:last' // id of the last open model: only the old #note/#model/#evidence links need it now
@@ -56,6 +56,9 @@ export default function App() {
   const [save, setSave] = useState<SaveState>({ at: null, error: null })
   const [notice, setNotice] = useState<string | null>(null) // another tab saved this company
   const openRef = useRef<string | null>(null) // openId, readable from listeners
+  const openedVer = useRef<string | null>(null) // the ?v= the open doc was opened for (null: the newest)
+  const epoch = useRef(0) // bumped when another company or version opens: a late AI reply for the old one is dropped
+  const later = useRef<{ id: string; saved_at: string } | null>(null) // another tab's save that came while ours was pending
   const savedAt = useRef<string | null>(null) // the newest saved_at this tab knows for the open model
   const clean = useRef<ModelDoc | null>(null) // the doc as opened from disk: nothing to save until it changes
   const pending = useRef<ModelDoc | null>(null) // changed, not yet saved
@@ -101,11 +104,23 @@ export default function App() {
           remember(r.id)
           savedAt.current = r.saved_at
           setSave({ at: r.saved_at, error: null })
+          setNotice(null)
           if (openRef.current !== r.id) { // an older version, saved as today's: the address now means the newest
             openRef.current = r.id
+            openedVer.current = null
             setOpenId(r.id)
             if (location.search) { history.replaceState(history.state, '', location.pathname + location.hash); setRoute(readRoute()) }
           }
+        }
+        // another tab saved after ours reached the server: theirs is on disk, so load it (last save wins)
+        const l = later.current
+        if (l && g === gen.current && saving.current === 0) later.current = null
+        if (l && l.saved_at > r.saved_at && g === gen.current && !pending.current && saving.current === 0) {
+          api<Opened>(`/api/models/${l.id}`).then(o => {
+            if (g !== gen.current || pending.current || saving.current) return
+            openDoc(o.parsed, o.doc!, l.id, null)
+            setNotice('Another tab saved after you, so this tab now shows its changes.')
+          }).catch(() => { /* the next save here wins */ })
         }
         return r.saved_at
       })
@@ -137,7 +152,10 @@ export default function App() {
     return () => window.removeEventListener('pagehide', out)
   }, [])
 
-  const openDoc = (p: Parsed, d: ModelDoc, id: string) => {
+  const openDoc = (p: Parsed, d: ModelDoc, id: string, ver: string | null) => {
+    if (!openRef.current || slugOf(openRef.current) !== slugOf(id) || ver !== openedVer.current) epoch.current++
+    openedVer.current = ver
+    later.current = null
     clean.current = d
     window.clearTimeout(timer.current)
     pending.current = null
@@ -161,7 +179,7 @@ export default function App() {
     setMissing(null)
     const slug = route.slug, version = route.version
     const cur = openRef.current
-    if (cur && slugOf(cur) === slug && (!version || cur === `${slug}/${version}`)) return
+    if (cur && slugOf(cur) === slug && (version ?? null) === openedVer.current) return
     let live = true
     ;(async () => {
       // leaving a company with an edit the server refused: stay, the "Not saved … Try again" line is showing
@@ -175,7 +193,7 @@ export default function App() {
       if (!id) { setMissing(`There’s no saved company at this address (${slug}). It may have been deleted.`); return }
       try {
         const o = await api<Opened>(`/api/models/${id}`)
-        if (live) openDoc(o.parsed, o.doc!, id)
+        if (live) openDoc(o.parsed, o.doc!, id, version)
       } catch (e) { if (live) setMissing((e as Error).message) }
     })()
     return () => { live = false }
@@ -191,13 +209,14 @@ export default function App() {
       const cur = openRef.current
       if (m.type !== 'saved' || !cur || slugOf(m.id) !== slugOf(cur) || (m.saved_at ?? '') < (savedAt.current ?? '')) return
       if (pending.current || saving.current) {
+        later.current = { id: m.id, saved_at: m.saved_at ?? '' }
         setNotice('Another tab saved changes to this company. Your edits here are newer, so they replace those when they save in a moment.')
         return
       }
       const g = gen.current
       api<Opened>(`/api/models/${m.id}`).then(o => {
         if (g !== gen.current || pending.current || saving.current) return
-        openDoc(o.parsed, o.doc!, m.id)
+        openDoc(o.parsed, o.doc!, m.id, null)
         setNotice('Updated with the changes saved in another tab.')
       }).catch(() => { /* the next save here wins */ })
     }
@@ -208,7 +227,7 @@ export default function App() {
   // ---- keys: 1-6 for the pages; N, M and E as before (Overview, Forecast, Checks); never while typing ----
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.defaultPrevented || !keysOn()) return
       const t = e.target as HTMLElement
       if (t.closest('input, textarea, select, [contenteditable="true"], [role="slider"]')) return
       const r = routeRef.current
@@ -224,10 +243,13 @@ export default function App() {
   }, [])
 
   const add = async (p: Parsed) => { // a fresh upload (or the sample) is saved straight away, then its Overview opens
+    // the company you just left may still have an edit on its way (or one the server refused): never drop it
+    if ((await flushRef.current()) === false)
+      throw new Error('Your last change to the open company isn’t saved yet. Open it and press Try again.')
     const d = newDoc(p)
     const r = await api<{ id: string; saved_at: string }>('/api/models', postJson(d))
     channel?.postMessage({ type: 'saved', id: r.id, saved_at: r.saved_at } satisfies Msg)
-    openDoc(p, { ...d, saved_at: r.saved_at }, r.id)
+    openDoc(p, { ...d, saved_at: r.saved_at }, r.id, null)
     loadList()
     navigate(pathOf(slugOf(r.id), 'overview'))
   }
@@ -239,14 +261,29 @@ export default function App() {
   }
 
   const ready = !!route.slug && !!parsed && !!doc && !!openId && slugOf(openId) === route.slug
+    && (route.version ?? null) === openedVer.current
   if (ready) lastUrl.current = location.pathname + location.search
-  useEffect(() => { if (!route.slug) { document.title = TITLE; window.scrollTo(0, route.y ?? 0) } }, [route])
+  useEffect(() => {
+    if (route.slug) return
+    document.title = TITLE
+    window.scrollTo({ top: route.y ?? 0, behavior: 'instant' })
+    if (openRef.current) flushRef.current() // the list shows the values you just set
+  }, [route])
+  useEffect(() => { // "Couldn't open this company": say so, like any page change
+    if (!missing) return
+    if (placed.once) document.getElementById('page-h')?.focus({ preventScroll: true })
+    placed.once = true
+  }, [missing])
+  // updates from a page belong to the company and version it was opened for: an AI reply that lands after you
+  // switched to another company is dropped, never saved into that one
+  const ep = epoch.current
+  const mine = <T,>(f: (x: T) => T) => (x: T) => (epoch.current === ep ? f(x) : x)
 
   if (ready) return (
     <Workspace key={route.slug} route={route} models={models} parsed={parsed!} doc={doc!} save={save} notice={notice}
-      setDoc={f => setDoc(d => d && f(d))} onRetry={flush}
-      setDefaults={defaults => setParsed(p => p && { ...p, defaults })}
-      setParsed={next => setParsed(p => p && { ...next, restated: p.restated })} />
+      setDoc={f => setDoc(d => d && mine(f)(d))} onRetry={flush}
+      setDefaults={defaults => setParsed(p => p && mine<Parsed>(x => ({ ...x, defaults }))(p))}
+      setParsed={next => setParsed(p => p && mine<Parsed>(x => ({ ...next, restated: x.restated }))(p))} />
   )
   return (
     <div className="app">

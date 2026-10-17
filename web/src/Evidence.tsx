@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import Sources, { Explain, FlagExplain, useAi } from './Sources'
+import Sources, { AiOffNote, Explain, FlagExplain, useAi } from './Sources'
 import type { Upgrade } from './Model'
 import { PageHead, Toc } from './Shell'
 import {
@@ -64,6 +64,7 @@ export default function Evidence({ parsed, doc, setDoc, projection, upgrades, on
           below to run the rest, draft inputs and explain a flag with a quote from the filing.</>}
         next={<a className="btn" href="#documents">Add documents</a>} />
       <Toc page="checks" />
+      <AiOffNote ai={ai} />
       {restated && (
         <section className="blk restated" aria-labelledby="restated-h">
           <h2 id="restated-h" className="label sec-label"><span>Restated since your model of {restated.saved_at ? when(restated.saved_at) : 'earlier'}</span></h2>
@@ -80,7 +81,7 @@ export default function Evidence({ parsed, doc, setDoc, projection, upgrades, on
 
       <section className="blk" id="unusual" tabIndex={-1} aria-labelledby="oneoffs-h">
         <h2 id="oneoffs-h">Unusual years · {oneoffYears.length}</h2>
-        <p className="why">Years far from this company’s own history. Leave one out of the defaults, or explain it from that year’s annual report.</p>
+        <p className="why">Years far from this company’s own history (more than 2σ from its median). Leave one out of the defaults, or explain it from that year’s annual report.</p>
         {oneoffYears.length
           ? <OneOffs years={oneoffYears} histYears={years} excluded={doc.excluded_years} pending={pendingYear}
               note={defaultsNote} onToggle={toggleYear} explain={year => (
@@ -93,22 +94,19 @@ export default function Evidence({ parsed, doc, setDoc, projection, upgrades, on
 
       <section className="blk" id="documents" tabIndex={-1} aria-labelledby="docs-h">
         <h2 id="docs-h">Documents</h2>
-        <p className="why">What the app has read, and what each missing document would add. Attach them right here.</p>
+        <p className="why">What the app has read, and what each missing document would add. Attach them in the panel below: pick the document type first.</p>
         <div className="docs">
           <div className="doc"><h3>Export export</h3><p>{company.name}, {years[0]}–{years[years.length - 1]}, read by rules.
             {doc.saved_at ? ` Saved ${when(doc.saved_at)}.` : ''}</p></div>
           <div className={`doc${doc.filings.length ? '' : ' missing'}`}><h3>Exchange results filings <span className="term">XBRL: the machine-readable results file on NSE or BSE</span></h3>
             <p>{doc.filings.length ? `${doc.filings.length} attached; annual ones that tie to Export add payables, leases and cash-flow capex.`
-              : 'Would add trade payables, lease liabilities and cash-flow capex from an annual filing.'}</p>
-            <a className="btn" href="#src-head">Attach XBRL</a></div>
+              : 'Would add trade payables, lease liabilities and cash-flow capex from an annual filing.'}</p></div>
           <div className={`doc${annual.length ? '' : ' missing'}`}><h3>Annual reports</h3>
             <p>{annual.length ? annual.map(r => `${r.year} (${r.pages} pages)`).join(', ') + '.'
-              : 'Would unlock the contingent-liability, related-party, promoter-pledge and auditor checks, and cited explanations.'}</p>
-            <a className="btn" href="#src-ar-head">Attach PDF</a></div>
+              : 'Would unlock the contingent-liability, related-party, promoter-pledge and auditor checks, and cited explanations.'}</p></div>
           <div className={`doc${talk.length ? '' : ' missing'}`}><h3>Call transcripts and presentations</h3>
             <p>{talk.length ? talk.map(r => `${DOC_KINDS[r.kind ?? 'annual']}, ${r.year} (${r.pages} pages)`).join('; ') + '.'
-              : 'Management’s guidance on growth, margins, capex and payout: lets the app draft assumptions with quotes.'}</p>
-            <a className="btn" href="#src-ar-head">Attach PDF</a></div>
+              : 'Management’s guidance on growth, margins, capex and payout: lets the app draft assumptions with quotes.'}</p></div>
         </div>
         <div className="m-sec">
           <Sources company={company} filings={doc.filings} proposals={doc.proposals} sources={parsed.sources}
@@ -178,8 +176,7 @@ function OneOffs({ years, histYears, excluded, pending, note, onToggle, explain 
   const used = histYears.filter(y => !excluded.includes(y)).slice(-3) // mirrors default_assumptions(years=3)
   return (
     <div className="oneoffs">
-      <p className="small-note">Years far from this company’s own history (more than 2σ from its median). Defaults use the last three
-        reported years that aren’t left out; revenue growth always uses the last three.</p>
+      <p className="small-note">Defaults use the last three reported years that aren’t left out; revenue growth always uses the last three.</p>
       <ul>
         {years.map(([year, items]) => (
           <li key={year}>

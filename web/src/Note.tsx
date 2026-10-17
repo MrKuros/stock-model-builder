@@ -1,7 +1,7 @@
 import { useRef, useState, type ReactNode } from 'react'
 import Ruler from './Ruler'
 import { SEV, bySeverity } from './Evidence'
-import { FlagNoteView, useAi } from './Sources'
+import { AiOffNote, FlagNoteView, useAi } from './Sources'
 import { FundStrip } from './Fundamentals'
 import { useHref } from './route'
 import {
@@ -181,6 +181,9 @@ export default function Note({ parsed, doc, setDoc, projection }: Props) {
         <div>
           <p className="label">Overview · <b>base case</b> · what the price assumes against what the business does</p>
           <h1 id="page-h" tabIndex={-1}>{h1}</h1>
+          {doc.active !== 'base' && <p className="small-note">This summary is about the base case. Your {doc.active} case
+            {v?.scenarios[doc.active].per_share != null ? <> is <span className="num ours">Rs {rs(v.scenarios[doc.active].per_share!)}</span> a share</> : ' has no value yet'}:{' '}
+            <a href={href('valuation', 'worth')}>see every case in Valuation</a>.</p>}
           {stand && <p className="lede">{stand}</p>}
         </div>
         {(sv?.upside != null || cells.length > 0 || top) && <aside className="sure" aria-label="How sure">
@@ -298,8 +301,8 @@ function Strip({ checks }: { checks: RuleCheck[] }) {
   return (
     <section className="annun" aria-labelledby="flags-h">
       <div className="strip-head">
-        <h2 id="flags-h" className="label">Rule checks · <b>{red} red · {amber} amber · {clear.length} clear{filing.length ? ` · ${filing.length} need the annual report` : ''}</b></h2>
-        <a className="go" href={href('checks')}>All checks</a>
+        <h2 id="flags-h" className="label">Warning signs · <b>{red} red · {amber} amber · {clear.length} clear{filing.length ? ` · ${filing.length} need the annual report` : ''}</b></h2>
+        <a className="go" href={href('checks')}>All warning signs, in Checks</a>
       </div>
       <div className="cells">
         {lit.map((c, i) => (
@@ -332,7 +335,7 @@ function Risks({ parsed, doc, tn, P }: { parsed: Parsed; doc: ModelDoc; tn: Thes
   const waiting = radar.filter(f => f.needs && f.severity === 'not_checked')
   return (
     <section className="sec" aria-labelledby="risks-h">
-      <h2 id="risks-h" className="label sec-label"><span>Risks · <b>found by rules</b></span><span>worst first</span></h2>
+      <h2 id="risks-h" className="label sec-label"><span>Risks · <b>warning signs found by rules</b></span><span>worst first</span></h2>
       {!lit.length && !oneoffs.length && !issues.length && <p className="small-note">No forensic rule lit, no unusual years and no data issues in the last three reported years.</p>}
       <ul className="risks">
         {lit.map(f => {
@@ -342,7 +345,7 @@ function Risks({ parsed, doc, tn, P }: { parsed: Parsed; doc: ModelDoc; tn: Thes
               <p><span className={`sev ${f.severity}`}>{SEV[f.severity]}</span> {f.detail}</p>
               {n && <FlagNoteView note={n} />}
               <a className="small" href={href('checks', f.key)}
-                aria-label={`${f.title}: ${n ? 'evidence' : 'evidence, and explain it'}`}>{n ? 'Evidence' : 'Evidence · explain it'}</a>
+                aria-label={`${f.title}: ${n ? 'see it in Checks' : 'explain it in Checks'}`}>{n ? 'See it in Checks' : 'Explain it in Checks'}</a>
             </li>
           )
         })}
@@ -589,11 +592,12 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
   }
   const off = !ai?.available
   const button = (label: string) => (
-    <p className="write">
+    <div className="write">
       <button type="button" className="btn" onClick={write} disabled={busy || off} aria-describedby="thesis-why">{busy ? 'Writing…' : label}</button>
-      <span id="thesis-why" className="small-note">{off ? ai?.message ?? 'Checking whether an AI command is set…'
+      <span id="thesis-why" className="small-note">{off ? (ai ? 'AI is off (see just below).' : 'Checking whether an AI command is set…')
         : 'Sends only the computed facts and approved quotes on this page; rules check every number before it is saved.'}</span>
-    </p>
+      <AiOffNote ai={ai} />
+    </div>
   )
   const nCites = tn ? Object.keys(tn.cites).length : 0
   return (
