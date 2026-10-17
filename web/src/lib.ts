@@ -12,6 +12,9 @@ export type Paths = Record<string, Path>
 export const flat = (start: number): Path => ({ start, end: null })
 export const flatAll = (d: Record<string, number>): Paths =>
   Object.fromEntries(Object.entries(d).map(([k, v]) => [k, flat(v)]))
+/** The rule defaults as paths: flat, except a fast grower's growth and capex, which fade to `ends` (model.default_ends). */
+export const defaultPaths = (d: Record<string, number>, ends?: Record<string, number>): Paths =>
+  Object.fromEntries(Object.entries(d).map(([k, v]) => [k, { start: v, end: ends?.[k] ?? null }]))
 
 export const SCENARIOS = ['base', 'bull', 'bear'] as const
 export type Scenario = typeof SCENARIOS[number]
@@ -28,7 +31,7 @@ export function seed(base: Paths): Scenarios {
 }
 
 /** Share price (Rs) and count (crore) from the export; null when Screener left them out. */
-export interface Market { price: number | null; shares: number | null; price_hist: (number | null)[]; shares_hist: (number | null)[] }
+export interface Market { price: number | null; shares: number | null; price_hist: (number | null)[]; shares_hist: (number | null)[]; face_value?: number | null }
 /** The export's Quarters block (model.QUARTERS keys: sales, op_profit, net_profit, ...), null where Screener left a gap. */
 export interface Quarters { dates: string[]; rows: Record<string, (number | null)[]> }
 export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market; quarters?: Quarters | null }
@@ -200,6 +203,7 @@ export interface Parsed {
   years: string[]
   ratios: Row[]
   defaults: Record<string, number>
+  default_ends?: Record<string, number> // a fast grower's fades (growth, capex end values); {} otherwise
   checks: string[]
   oneoffs: OneOff[]
   ttm?: Ttm | null // null: no quarters, or the last four aren't consecutive

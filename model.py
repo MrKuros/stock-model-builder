@@ -258,7 +258,8 @@ def _market(ws, cols, dates):
     price, mcap = first("current price"), first("market capitalization")
     shares_hist = hist("adjusted equity shares in cr")
     shares = mcap / price if price and mcap else next((v for v in reversed(shares_hist) if v), None)
-    return {"price": price, "shares": shares, "price_hist": hist("price"), "shares_hist": shares_hist}
+    return {"price": price, "shares": shares, "price_hist": hist("price"), "shares_hist": shares_hist,
+            "face_value": first("face value")}
 
 
 def data_checks(co):
@@ -284,7 +285,31 @@ def data_checks(co):
     if abs(gap) > TOL:
         issues.append(f"{fy(d[-1])}: asset and liability lines differ by {gap:,.1f} cr; "
                       "first projected year's cash roll-forward check absorbs this (one-time)")
+    if (s := share_gap(co)) is not None:
+        issues.append(f"{fy(d[-1])}: {s['text']}")
     return issues
+
+
+SHARE_GAP = 0.05  # share count from market cap / price against share capital / face value: more = shares issued since
+
+
+def share_gap(co):
+    """{gap, now, then, text} when today's share count (market cap / price) is more than 5% above the last balance
+    sheet's (share capital / face value): an IPO or QIP since, so net debt misses the proceeds. Else None. Only upward:
+    share capital that holds more than the listed shares (JSW Steel: 305 cr against 245 cr shares) would read as a
+    buyback. ponytail: preference or partly paid capital can still hide a real issue."""
+    m, h = co.get("market") or {}, co["hist"][-1]
+    fv, now = m.get("face_value"), m.get("shares")
+    if not fv or not now or h["share_cap"] <= 0:
+        return None
+    then = h["share_cap"] / fv
+    gap = now / then - 1
+    if gap <= SHARE_GAP:
+        return None
+    return {"gap": gap, "now": now, "then": then,
+            "text": f"share count up {gap:.0%} since the last balance sheet ({now:,.1f} cr from market cap / price, "
+                    f"{then:,.1f} cr from share capital / face value): shares issued since (IPO or QIP?), so net debt "
+                    "misses the proceeds and our value per share reads low"}
 
 
 # ---------- XBRL filings (NSE/BSE financial results, Ind AS) ----------
@@ -389,12 +414,8 @@ def _xbrl_scale(unit_id, measures):
 
 
 def _cr(v):
-    """Rs crore with Indian grouping, for check details: Rs 1,64,177 cr."""
-    r = round(v)
-    head, tail = str(abs(r))[:-3], str(abs(r))[-3:]
-    while len(head) > 2:
-        head, tail = head[:-2], f"{head[-2:]},{tail}"
-    return f"Rs {'-' if r < 0 else ''}{head + ',' if head else ''}{tail} cr"
+    """Rs crore with Indian grouping, negatives in brackets: Rs 1,64,177 cr, Rs (124) cr."""
+    return f"Rs {_inr(v)} cr"
 
 
 def parse_xbrl(file, mappings=None, company=None):
@@ -884,6 +905,22 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
     }
 
 
+FAST = 0.15  # last-3-year revenue CAGR above this: a young or booming company, so the defaults fade instead of holding flat
+
+
+def default_ends(hist, d, g=None):
+    """{driver: end value} that turn the flat defaults `d` into fades for a fast grower (3-year CAGR above FAST), else {}.
+    Growth ends at half its pace, at least terminal growth + 3 pp; capex ends at what keeps the net block in step with
+    revenue at that end growth (depreciation plus growth, on the last year's net block / revenue), never above its start.
+    ponytail: one fade shape for every fast grower; a cited guidance proposal (4.2) replaces it where documents say more."""
+    if d["growth"] <= FAST or hist[-1]["revenue"] <= 0:
+        return {}
+    g = VALUATION["g"] if g is None else g
+    end = max(g + 0.03, d["growth"] / 2)
+    k = hist[-1]["net_block"] / hist[-1]["revenue"]
+    return {"growth": end, "capex_pct": min(d["capex_pct"], max(k * (d["dep_pct"] + end) / (1 + end), 0.0))}
+
+
 # (ratios() key, words for the sentence, unit, floor). The floor is the smallest gap from typical worth a flag,
 # so a very steady metric (TCS tax 22-26%) can't flag a 2 pp wobble just because its spread is tiny.
 ONEOFF = (("oi_pct", "other income", " of revenue", 0.02), ("tax_rate", "tax rate", "", 0.10),
@@ -913,7 +950,18 @@ def detect_oneoffs(hist, labels, min_years=4):
                  "note": f"{y} {what} was {_pct(v)}{unit}, typically {_pct(typical)}"}
                 for y, v in pts if abs(v - typical) > band
                 and (key != "tax_rate" or abs(v - 0.25) >= abs(typical - 0.25))]
+    for o in out:  # a low capex year read from a falling net block is a disposal or transfer, not low spending
+        i = labels.index(o["year"])
+        if o["metric"] == "capex_pct" and o["value"] < o["typical"] and capex_unreliable(hist, i):
+            o["unreliable"] = True
+            o["note"] = (f"{o['year']} capex from the net-block change is unreliable: the net block fell, so a disposal or "
+                         "transfer may hide the spending; attach the annual report and read its capex note (cash flow)")
     return sorted(out, key=lambda o: labels.index(o["year"]))
+
+
+def capex_unreliable(hist, i):
+    """Capex for year i is the net-block derivation (no cash-flow figure) and the net block fell that year."""
+    return i > 0 and hist[i].get("capex_cf") is None and hist[i]["net_block"] < hist[i - 1]["net_block"]
 
 
 def _inr(v, dp=0):
@@ -934,8 +982,10 @@ def _median_before(xs, years=3):
 
 def key_numbers(hist, labels):
     """What the numbers say: each measure's last reported year against the median of the three years before it.
-    [{key, label, kind, year, last, typical}]; cash conversion = CFO / net profit (blank when profit <= 0)."""
+    [{key, label, kind, year, last, typical}]; cash conversion = CFO / net profit (blank when profit <= 0, or in a year
+    flagged for one-off other income: a gain in profit that was never operating cash)."""
     r = ratios(hist)
+    gain = {o["year"] for o in detect_oneoffs(hist, labels) if o["metric"] == "oi_pct"}
     series = (("growth", "Revenue growth", "pct", [x["growth"] for x in r]),
               ("ebitda_margin", "EBITDA margin", "pct", [x["ebitda_margin"] for x in r]),
               ("pat_growth", "Net profit growth", "pct",
@@ -943,7 +993,8 @@ def key_numbers(hist, labels):
                         for p, h in zip(hist, hist[1:]))]),
               ("roce", "ROCE", "pct", [h.get("roce") for h in hist]),
               ("cash_conversion", "Cash conversion (CFO / profit)", "x",
-               [h["cfo"] / h["pat"] if h.get("cfo") is not None and h["pat"] > 0 else None for h in hist]),
+               [h["cfo"] / h["pat"] if h.get("cfo") is not None and h["pat"] > 0 and y not in gain else None
+                for y, h in zip(labels, hist)]),
               ("dso", "Receivable days", "days", [x["dso"] for x in r]))
     return [{"key": k, "label": lab, "kind": kind, "year": labels[-1], "last": xs[-1], "typical": _median_before(xs)}
             for k, lab, kind, xs in series]
@@ -957,7 +1008,8 @@ CASH_CONV = (0.5, 0.8)  # CFO / net profit summed over the window: under 0.8 a f
 DAYS_UP = (0.5, 0.2, 0.1)  # receivable / inventory days up this share over 3 years = the book growing faster than sales
 DAYS_MIN = (30, 10, 5)  # ... and by at least these many days, so a 10-day book can't flag on a 2-day wobble
 CWIP_SHARE = (0.6, 0.3, 0.15)  # capital WIP / net block, only while rising: plant not yet earning (or costs parked there)
-OI_SHARE = (0.5, 0.3, 0.2)  # other income / PBT over 3 years: profit that doesn't come from the business
+OI_SHARE = (0.5, 0.3, 0.2)
+OI_SWING = 0.01  # other income / revenue more than 1 pp off its 3-year median (or negative): exceptional items folded in  # other income / PBT over 3 years: profit that doesn't come from the business
 TAX_SWING = (0.20, 0.10)  # max - min effective tax rate over the last 5 profit years; a steady payer moves 2-3 pp
 DEBT_PACE = (0.25, 0.10)  # debt CAGR minus EBITDA CAGR, 3 years, when debt is up 30%+ and net debt > 0: borrowing outruns earnings
 DEBT_UP = 0.30  # ... the 30%: smaller rises are ordinary refinancing noise
@@ -968,6 +1020,7 @@ M_SCORE = (-1.78, -2.22)  # Beneish (1999): above -1.78 most manipulators in his
 NOTE_SHARE = (0.25, 0.10)  # contingent liabilities / net worth and related-party transactions / revenue
 PLEDGE = (0.50, 0.20, 0.0)  # promoter shares pledged: any pledge is worth knowing, a fifth is a risk, half is a margin call away
 SEVERITY = ("high", "medium", "low", "ok", "not_checked")
+OPINIONS = ("unmodified", "qualified", "adverse", "disclaimer")  # an auditor's opinion (ai checks the note against these)
 
 
 def _sev(x, cuts, below=False):
@@ -1023,7 +1076,7 @@ def forensic(hist, labels, notes=None):
     fact, detail, rule, needs}], in a fixed order. Rules only, on the reported years (and approved annual-report
     notes); `needs` = "annual report" when a filing would let the check run. AI never touches these numbers."""
     out, n, last, y = [], len(hist), hist[-1], labels[-1]
-    span = lambda k: f"{labels[-k]}–{y}"  # noqa: E731
+    span = lambda k: f"{labels[-min(k, n)]}–{y}"  # noqa: E731
 
     def add(key, title, sev, value, threshold, years, fact, detail, rule, needs=None):
         out.append({"key": key, "title": title, "severity": sev, "value": value, "threshold": threshold,
@@ -1099,10 +1152,23 @@ def forensic(hist, labels, notes=None):
         add("other_income", "Other income vs PBT", "not_checked", None, OI_SHARE[2], labels[-3:], "PBT not positive",
             f"Profit before tax over {span(3)} adds up to a loss.", rule)
     else:
-        add("other_income", "Other income vs PBT", _sev(oi / pbt, OI_SHARE), oi / pbt, OI_SHARE[2], labels[-3:],
-            f"{_pct(oi / pbt)} of PBT, {span(3)}",
-            f"Other income was {_pct(oi / pbt)} of profit before tax over {span(min(3, n))}"
-            + (" (Screener folds exceptional gains into it)." if oi / pbt > OI_SHARE[2] else "."), rule)
+        sev, fact = _sev(oi / pbt, OI_SHARE), f"{_pct(oi / pbt)} of PBT, {span(3)}"
+        txt = (f"Other income was {_pct(oi / pbt)} of profit before tax over {span(3)}"
+               + (" (Screener folds exceptional gains into it)." if oi / pbt > OI_SHARE[2] else "."))
+        # Screener folds exceptional items (gains and charges) into other income: a swing against its own median
+        # makes reported profit growth that year say little about the business (TCS FY2026: Rs 4,526 cr of charges)
+        pct = [h["other_income"] / h["revenue"] if h["revenue"] > 0 else None for h in hist]
+        typ = _median_before(pct)
+        if pct[-1] is not None and (pct[-1] < 0 or typ is not None and abs(pct[-1] - typ) > OI_SWING):
+            sev = _worst(sev, "low")
+            fact = f"{_pct(pct[-1])} of revenue in {y}" + (f", median {_pct(typ)}" if typ is not None else "")
+            txt += (f" In {y} other income was Rs {_inr(last['other_income'])} cr, {_pct(pct[-1])} of revenue"
+                    + (f" against a median of {_pct(typ)} in the 3 years before" if typ is not None else "")
+                    + ": Screener folds exceptional items into other income, so this year's reported profit growth "
+                    "isn't the business trend (our projection uses the median).")
+        add("other_income", "Other income vs PBT", sev, oi / pbt, OI_SHARE[2], labels[-3:], fact, txt,
+            rule + f"; or other income negative, or {OI_SWING * 100:.0f} pp of revenue off the median of the 3 years "
+            "before: low")
 
     # tax-rate swings
     rule = f"Effective tax rate (tax / PBT) over the last 5 profit years: a spread over {TAX_SWING[1]:.0%} medium, {TAX_SWING[0]:.0%} high"
@@ -1130,11 +1196,15 @@ def forensic(hist, labels, notes=None):
         sev = "high" if nd_e is None else _sev(nd_e, ND_EBITDA)
         txt = (f"Net debt is Rs {_inr(nd)} cr in {y}, " + (f"{nd_e:.1f}x EBITDA." if nd_e is not None else "with EBITDA negative."))
         if n >= 4:
-            d0, e0 = _debt(hist[-4]), hist[-4]["ebitda"]
-            gd, ge = _cagr(d0, _debt(last), 3), _cagr(e0, last["ebitda"], 3)
-            if gd is not None and _debt(last) > d0 * (1 + DEBT_UP):
-                if ge is None:
-                    sev, txt = _worst(sev, "medium"), txt + f" Debt grew {_pct(gd)} a year since {labels[-4]} while EBITDA fell below zero."
+            d0, e0, d1 = _debt(hist[-4]), hist[-4]["ebitda"], _debt(last)
+            gd, ge = _cagr(d0, d1, 3), _cagr(e0, last["ebitda"], 3)
+            if d0 <= 0 < d1:  # no pace from nil; borrowing from nothing in 3 years is worth a look on its own
+                sev, txt = _worst(sev, "low"), txt + f" Debt rose from nil in {labels[-4]}."
+            elif gd is not None and d1 > d0 * (1 + DEBT_UP):
+                if last["ebitda"] <= 0:  # already high on the level test
+                    txt += f" Debt grew {_pct(gd)} a year since {labels[-4]} while EBITDA fell below zero."
+                elif ge is None:  # EBITDA negative then, positive now: no pace to compare, the level test decides
+                    txt += f" Debt grew {_pct(gd)} a year since {labels[-4]} while EBITDA turned positive from a loss."
                 else:
                     sev = _worst(sev, _sev(gd - ge, DEBT_PACE))
                     txt += f" Debt grew {_pct(gd)} a year since {labels[-4]}, EBITDA {_pct(ge)}."
@@ -1193,9 +1263,15 @@ def forensic(hist, labels, notes=None):
         if topic == "related":
             rows = [r for r in rows if "dividend" not in str(r.get("label", "")).lower()]
         t = sum(abs(r["amount"]) for r in rows) if rows else (nt or {}).get("total")
-        if not isinstance(t, (int, float)) or not math.isfinite(t) or base <= 0:
+        if not isinstance(t, (int, float)) or not math.isfinite(t):
             add(topic, title, "not_checked", None, NOTE_SHARE[1], [], "Needs the annual report",
                 f"Attach an annual report and read its {title.lower()} note.", rule, "annual report")
+            continue
+        if base <= 0:  # the note is there; there's just nothing to scale it by
+            add(topic, title, ("high" if t > 0 else "ok") if topic == "contingent" else "not_checked", None,
+                NOTE_SHARE[1], [yr], f"Rs {_inr(t)} cr, {what} not positive ({yr})",
+                f"{title} in the {yr} annual report add up to Rs {_inr(t)} cr, against a {y} {what} of Rs {_inr(base)} cr "
+                "(zero or negative), so it can't be shown as a share.", rule)
             continue
         add(topic, title, _sev(t / base, NOTE_SHARE), t / base, NOTE_SHARE[1], [yr],
             f"Rs {_inr(t)} cr, {_pct(t / base)} of {what} ({yr})",
@@ -1214,11 +1290,13 @@ def forensic(hist, labels, notes=None):
     rule = ("Approved auditor's-report note: adverse opinion or disclaimer high, qualified medium, a change of auditor low "
             "(rotation is compulsory every 5-10 years, so a change alone is mild)")
     aud = sorted(((k.split(":")[2], v) for k, v in (notes or {}).items() if k.startswith("ar:auditor:") and isinstance(v, dict)),
-                 key=lambda t: t[0])
-    if aud:
-        yr, nt = aud[-1]
-        op = nt.get("opinion") if nt.get("opinion") in ("unmodified", "qualified", "adverse", "disclaimer") else "unmodified"
-        firms = [re.sub(r"[^a-z ]", "", str(v.get("auditor", "")).lower()).replace(" llp", "").strip() for _, v in aud]
+                 key=lambda t: t[0])  # every year: the firm across years tells a change
+    yr, nt = _note(notes, "auditor")
+    if nt:
+        op = nt.get("opinion") if nt.get("opinion") in OPINIONS else "unmodified"
+        # letters only, "&" read as "and": "B S R & Co. LLP" and "BSR and Co LLP" are one firm.
+        # ponytail: "Co." vs "Company" or a trailing "Chartered Accountants" still reads as a change
+        firms = [re.sub(r"[^a-z]", "", str(v.get("auditor", "")).lower().replace("&", "and")).removesuffix("llp") for _, v in aud]
         changed = bool(nt.get("changed")) or len(set(f for f in firms if f)) > 1
         sev = {"adverse": "high", "disclaimer": "high", "qualified": "medium"}.get(op, "low" if changed else "ok")
         add("auditor", "Auditor", sev, None, None, [t[0] for t in aud],
@@ -1244,7 +1322,8 @@ def rule_checks(hist, labels, oneoffs, issues, notes=None, radar=None):
             name = dict((k, w) for k, w, _, _ in ONEOFF)[o["metric"]]
             out.append({"id": f"oneoff-{o['metric']}-{o['year']}", "name": name[0].upper() + name[1:],
                         "status": "red" if o["year"] == y else "amber", "severity": "high" if o["year"] == y else "medium",
-                        "fact": f"{_pct(o['value'])} in {o['year']}, typically {_pct(o['typical'])}",
+                        "fact": f"Unreliable in {o['year']}: the net block fell" if o.get("unreliable")
+                        else f"{_pct(o['value'])} in {o['year']}, typically {_pct(o['typical'])}",
                         "rule": "More than 2 sigma (1.4826 x MAD) from the company's own median, and past a floor"})
     if issues:
         out.append({"id": "data", "name": "Reported data", "status": "amber", "severity": "medium",
@@ -1544,6 +1623,7 @@ IMPACT = (("growth", "Revenue growth", GRID_GROWTH[3]), ("ebitda_margin", "EBITD
           ("capex_pct", "Capex % revenue", 0.01), ("tax_rate", "Tax rate", 0.02), ("dso", "Receivable days", 10.0),
           ("dio", "Inventory days", 10.0), ("dpo", "Payable days", 10.0), ("oca_pct", "Other current assets", 0.01),
           ("ol_pct", "Other liabilities", 0.01), ("dep_pct", "Depreciation rate", 0.01))
+NON_NEG = {"capex_pct", "tax_rate", "dso", "dio", "dpo", "oca_pct", "ol_pct", "dep_pct"}  # a step down stops at 0
 GROWTH_SCALE = [round(-0.10 + 0.02 * i, 2) for i in range(26)]  # flat revenue growth, -10% to +40%, for the ruler
 MARGINS = [round(-0.20 + 0.05 * i, 2) for i in range(21)]  # break-even EBITDA margin searched from -20% to 80%
 
@@ -1553,14 +1633,17 @@ def drivers_impact(hist, a, period, wacc, g, per_share):
     a: expand()-shaped inputs of one scenario. Drivers that move nothing (no payables: payable days) are left out."""
     fcff = [r["fcff"] for r in project(hist, a, len(period))]
     at = lambda w, gg: (lambda ev: None if ev is None else per_share(ev))((_dcf(fcff, period, w, gg) or {}).get("ev"))  # noqa: E731
-    out = []
+    out, no_pay = [], all(h.get("payables") is None for h in hist)
     for key, label, step in IMPACT:
+        if key == "dpo" and no_pay:  # Screener-only: payables sit in other liabilities, payable days would add a second copy
+            continue
         if key == "wacc":
             lo, hi = at(wacc - step, g), at(wacc + step, g)
         elif key == "g":
             lo, hi = at(wacc, g - step), at(wacc, g + step)
         else:
-            lo, hi = (_value(hist, {**a, key: [x + d for x in a[key]]}, period, wacc, g, per_share) for d in (-step, step))
+            lo, hi = (_value(hist, {**a, key: [max(0.0, x + d) if key in NON_NEG else x + d for x in a[key]]}, period, wacc, g,
+                             per_share) for d in (-step, step))
         if lo is None and hi is None or lo == hi:
             continue
         out.append({"key": key, "label": label, "step": step, "down": lo, "up": hi,

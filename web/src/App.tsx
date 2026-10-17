@@ -4,7 +4,7 @@ import Note from './Note'
 import ModelView, { UPGRADED, type Upgrade } from './Model'
 import Evidence from './Evidence'
 import {
-  api, flat, flatAll, fmt, groupKeys, money, postJson, rs, seed, when, clock, SCENARIOS,
+  api, defaultPaths, flat, fmt, groupKeys, money, postJson, rs, seed, when, clock, SCENARIOS,
   type ModelDoc, type ModelSummary, type Opened, type Parsed, type Projection, type Proposal, type Scenario,
 } from './lib'
 
@@ -34,7 +34,7 @@ function toggleTheme() {
 
 // a re-import of a saved company keeps its filings, proposals, notes and reports (p.defaults already use them)
 const newDoc = (p: Parsed): ModelDoc => ({
-  version: 6, company: p.company, n: 5, active: 'base', scenarios: seed(flatAll(p.defaults)),
+  version: 6, company: p.company, n: 5, active: 'base', scenarios: seed(defaultPaths(p.defaults, p.default_ends)),
   excluded_years: [], saved_at: null, valuation: p.valuation, filings: [], proposals: [], notes: {}, reports: [],
   note: null, assumption_sources: {}, flag_notes: [], reviewed_at: null,
   ...p.restated?.carry,
@@ -302,7 +302,7 @@ interface WorkspaceProps {
 
 function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onClose, save, onRetry }: WorkspaceProps) {
   const { company, years: histYears, drivers } = parsed
-  const { n, scenarios, valuation, filings, notes } = doc
+  const { n, scenarios, valuation, filings, notes, flag_notes, assumption_sources, excluded_years } = doc
   // any change to what the numbers come from puts the note back to draft; an input changed without a new source
   // (a strip, a typed value) is yours: its source flips to "manual"
   const setDoc = (f: (d: ModelDoc) => ModelDoc) => setDocRaw(d => {
@@ -323,25 +323,34 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
   const [retried, setRetried] = useState<string | null>(null)
   const [[view, anchor], setRoute] = useState(readHash)
   const back = useRef<HTMLButtonElement>(null)
+  // where you were in each view, so Back from an evidence row returns to your place in the note (memory only)
+  const pos = useRef<Partial<Record<View, number>>>({})
+  const viewNow = useRef(view)
+  viewNow.current = view
   const hist = parsed.hist ?? company.hist
   const nHist = hist.length
 
   useEffect(() => {
-    const on = () => setRoute(readHash())
+    const on = () => { pos.current[viewNow.current] = window.scrollY; setRoute(readHash()) }
     window.addEventListener('hashchange', on)
     return () => window.removeEventListener('hashchange', on)
   }, [])
   const go: Go = (v, a) => {
     const h = `#${v}${a ? `:${a}` : ''}`
+    pos.current[view] = window.scrollY
     if (location.hash === h) setRoute([v, a ?? '']) // same link again: scroll to it again
     else location.hash = h
   }
   // after a view switch, bring the anchored element (a strip cell's evidence row, a model input) into view
   useEffect(() => {
-    if (!anchor) { window.scrollTo({ top: 0 }); return }
+    if (!anchor) {
+      window.scrollTo({ top: pos.current[view] ?? 0 }) // ponytail: the scroll comes back, focus doesn't (the row it left is gone)
+      return
+    }
     const t = window.setTimeout(() => {
       const el = document.getElementById(`a-${anchor}`) ?? document.getElementById(anchor)
-      if (el) { el.scrollIntoView({ block: 'center' }); (el.matches('button, a, [tabindex]') ? el : el.querySelector<HTMLElement>('button, a, [tabindex]') ?? el).focus?.({ preventScroll: true }) }
+      // a tall section starts at the top (under the sticky bar: scroll-padding-top); a small target is centred
+      if (el) { el.scrollIntoView({ block: el.offsetHeight > innerHeight * 0.6 ? 'start' : 'center' }); (el.matches('button, a, [tabindex]') ? el : el.querySelector<HTMLElement>('button, a, [tabindex]') ?? el).focus?.({ preventScroll: true }) }
     }, 30)
     return () => window.clearTimeout(t)
   }, [view, anchor, projection != null])
@@ -360,11 +369,12 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
 
   useEffect(() => {
     const ctl = new AbortController()
-    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation, filings, notes }, ctl.signal))
+    // the words' sources go too: they don't move a number, only the note's inputs hash (stale words)
+    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation, filings, notes, flag_notes, assumption_sources, excluded_years }, ctl.signal))
       .then(p => { setProjection(p); setError(null) })
       .catch(e => { if (e.name !== 'AbortError') { setProjection(null); setError(e.message) } })
     return () => ctl.abort()
-  }, [company, scenarios, n, valuation, filings, notes])
+  }, [company, scenarios, n, valuation, filings, notes, flag_notes, assumption_sources, excluded_years])
 
   // A filing attached or removed changes the history (payables, leases, cash-flow capex) and so the defaults; like
   // excluding a year, it never changes the assumptions by itself. The upgraded defaults are offered in one click.
@@ -440,7 +450,8 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
 
   return (
     <>
-      <a className="skip" href="#main">Skip to the {view}</a>
+      {/* not a hash link for the router: "#main" would read as an unknown view and open the note */}
+      <a className="skip" href="#main" onClick={e => { e.preventDefault(); document.getElementById('main')?.focus() }}>Skip to the {view}</a>
       <header className="top">
         <div className="top-in">
           <Brand onClick={onClose} />
@@ -468,12 +479,12 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
       <div className="wrap">
         <p className="meta">
           <span className="meta-co">{company.name}</span>
-          <span>Rs crore · reported {histYears[0]}–{histYears[nHist - 1]}</span>
+          <span className="meta-x">Rs crore · reported {histYears[0]}–{histYears[nHist - 1]}</span>
           {price != null
             ? <span>Price <span className="num mkt">Rs {rs(price)}</span> {valuation.price != null ? '(typed)' : 'in the export'}</span>
             : <span>No share price</span>}
-          {price != null && shares != null && <span>Market cap <span className="num">Rs {money(price * shares)} cr</span></span>}
-          {save.at && !save.error && <span>Saved {clock(save.at)}</span>}
+          {price != null && shares != null && <span className="meta-x">Market cap <span className="num">Rs {money(price * shares)} cr</span></span>}
+          {save.at && !save.error && <span className="meta-x">Saved {clock(save.at)}</span>}
         </p>
         <div className="review" aria-label="Review status">
           <span className={`rv-state${doc.reviewed_at ? ' done' : ''}`}>
@@ -481,7 +492,7 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
           </span>
           <span className="chip">Numbers: rules, from your Screener export{filings.length ? ', filings' : ''}{fromDocs ? `, ${fromDocs} input${fromDocs > 1 ? 's' : ''} drafted from documents and approved` : ''} and your inputs</span>
           <span className="chip serif">Words: {ai ? 'AI-written, cited' : 'none by AI yet'}</span>
-          <button type="button" className="btn" aria-pressed={!!doc.reviewed_at}
+          <button type="button" className="btn"
             onClick={() => setDocRaw(d => ({ ...d, reviewed_at: d.reviewed_at ? null : new Date().toISOString() }))}>
             {doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed'}
           </button>

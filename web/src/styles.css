@@ -423,6 +423,13 @@ button.arow:hover { background: color-mix(in srgb, var(--panel) 70%, transparent
   .arow { grid-template-columns: minmax(130px, 1.3fr) 110px 86px minmax(0, 1fr); }
   .arow .asrc, .arow.head span:last-child { display: none; }
 }
+html { scroll-padding-top: 64px; } /* deep links land below the sticky bar */
+@media (max-width: 860px) { html { scroll-padding-top: 124px; } } /* the bar wraps to two rows */
+@media (max-width: 560px) { /* the verdict nearer the top: name, price and the review state stay */
+  .meta-x, .review .chip { display: none; }
+  .meta { padding-top: 12px; }
+  .review { margin-top: 6px; padding: 6px 0; }
+}
 @media (max-width: 980px) {
   .mgrid { grid-template-columns: minmax(0, 1fr); }
   .panel { position: static; max-height: none; overflow: visible; }

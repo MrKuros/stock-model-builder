@@ -128,7 +128,7 @@ export default function ValuationPanel({ inputs, defaults, v, market, active, as
           : <Ruler v={v} active={active} />}
         {v.shares != null && v.price == null && <p className="muted small">Enter a share price to see the upside.</p>}
         <Implied v={v} active={active} growth={growth} n={n} />
-        <div className="table-wrap" tabIndex={0} role="region" aria-label="Valuation by scenario">
+        <div className="table-wrap" id="a-bridge" tabIndex={0} role="region" aria-label="Valuation by scenario: enterprise value to equity to per share">
           <table className="val-table">
             <thead>
               <tr>

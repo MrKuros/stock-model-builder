@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import statistics
 import os
 import re
 import tempfile
@@ -72,6 +73,7 @@ class Market(BaseModel):
     shares: FiniteFloat | None = None
     price_hist: list[FiniteFloat | None] = []
     shares_hist: list[FiniteFloat | None] = []
+    face_value: FiniteFloat | None = None  # Rs a share (META); saved before 4.4 = none, so no share-count check
 
 
 class Quarters(BaseModel):
@@ -174,6 +176,14 @@ class ModelRequest(BaseModel):
     valuation: Valuation = Valuation()
     filings: list[Filing] = []
     notes: dict = {}  # "oneoff:FY2020" (3.2b, words), "ar:<topic>:FY2021" (3.3); an approved capex note feeds capex
+    # what the note's words are written from besides the numbers (inputs_hash); no number reads them
+    excluded_years: list[str] = []
+    # where each scenario's driver came from (4.2): {scenario: {driver: accepted proposal id | "history" | "manual"}};
+    # a driver missing here is the rule default or an edit made before 4.2
+    assumption_sources: dict[Scenario, dict[str, str]] = {}
+    # AI explanations of forensic flags (4.3), one per flag key, rebuilt by the client from the approved flag_note
+    # proposals: {key, year, proposal, summary, file, page, quote, from_numbers, ai}. Words only: no number reads them
+    flag_notes: list[dict] = []
 
     @model_validator(mode="after")
     def _new_drivers(self):
@@ -227,7 +237,6 @@ class ModelDoc(ModelRequest):
     """The full model document as saved in the library. Version 3 (before valuation) loads with default inputs;
     versions 3 and 4 load with empty Phase 3 blocks; 3 to 5 with empty Phase 4 blocks."""
     version: Literal[3, 4, 5, 6]
-    excluded_years: list[str] = []
     saved_at: str | None = None
     # ponytail: proposals are untyped dicts {id, kind (mapping | oneoff_note | ar_note | flag_note | assumption), field, value, unit, period,
     # source {file, page, quote, tag}, reasoning, checks [{name, pass, detail}], status (proposed | approved |
@@ -238,14 +247,9 @@ class ModelDoc(ModelRequest):
     # notes (in ModelRequest): "oneoff:FY2020": {proposal, summary, file, page, quote, from_numbers, ai} (3.2b);
     # "ar:segments:FY2021": {proposal, topic, year, file, rows, total, against, ai} (3.3)
     reports: list[Report] = []  # attached annual reports (3.2b); added within version 5, so it defaults to none
-    # Phase 4 (version 6). ponytail: `note` stays untyped until 4.4 writes it
+    # Phase 4 (version 6; assumption_sources and flag_notes are in ModelRequest, for the note's inputs hash).
+    # ponytail: `note` is an untyped dict (ThesisNote on the client); a pydantic model if anything but our client writes it
     note: dict | None = None  # the thesis and verdict text (4.4): AI-written words with citations
-    # where each scenario's driver came from (4.2): {scenario: {driver: accepted proposal id | "history" | "manual"}};
-    # a driver missing here is the rule default or an edit made before 4.2
-    assumption_sources: dict[Scenario, dict[str, str]] = {}
-    # AI explanations of forensic flags (4.3), one per flag key, rebuilt by the client from the approved flag_note
-    # proposals: {key, year, proposal, summary, file, page, quote, from_numbers, ai}. Words only: no number reads them
-    flag_notes: list[dict] = []
     reviewed_at: str | None = None  # "Mark as reviewed" in the review bar; cleared when you change the model
 
     @model_validator(mode="after")
@@ -277,7 +281,8 @@ def _company_payload(co, excluded=(), filings=(), notes=None):
         "years": labels,
         "hist": up["hist"], "sources": up["sources"],
         "ratios": model.ratios(up["hist"]),
-        "defaults": model.default_assumptions(up["hist"], exclude=set(excluded), labels=labels),
+        "defaults": (d := model.default_assumptions(up["hist"], exclude=set(excluded), labels=labels)),
+        "default_ends": model.default_ends(up["hist"], d),  # a fast grower's defaults fade (end values), else {}
         "checks": model.data_checks(co),
         "oneoffs": (oneoffs := model.detect_oneoffs(up["hist"], labels)),
         # the note (4.1): rule checks, key numbers against their 3-year median, rolling revenue CAGRs; the forensic
@@ -312,9 +317,10 @@ async def parse(file: UploadFile):
     return _company_payload(co, (), carry.get("filings", ()), carry.get("notes")) | {"restated": restated}
 
 
-def load_mappings(root=MODELS, strict=False):
+def load_mappings(root=None, strict=False):
     """The user's approved tag mappings ({tag: std key}); none when the file is missing. A damaged file reads as none
     for parsing, but `strict` (before writing it) refuses it rather than replace the user's mappings."""
+    root = root or MODELS  # read at call time, so a test that sets server.MODELS covers the routes too
     try:
         m = json.loads((root / MAPPINGS).read_bytes())
     except FileNotFoundError:
@@ -491,6 +497,12 @@ NOTE_LINES = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("other_income", "Ot
               ("borrowings", "Borrowings"))
 
 
+def _numbers(rows, lines):
+    """The reported figures an explanation may use, one line per item, Indian grouping as the rest of the app."""
+    return "\n".join(f"{name}: " + ", ".join(f"{y} {model._inr(h[k])}" if h.get(k) is not None else f"{y} n/a" for y, h in rows)
+                     for k, name in lines)
+
+
 @app.post("/api/oneoffs/explain")
 def explain(req: ExplainRequest):
     """A words-only proposal (kind oneoff_note) for a year detect_oneoffs flags. With a report, rules pick the pages
@@ -505,9 +517,7 @@ def explain(req: ExplainRequest):
         raise HTTPException(422, f"{req.year} isn't flagged as an unusual year.")
     i = labels.index(req.year)
     end = co["dates"][i].date()
-    rows = [(labels[j], up["hist"][j]) for j in range(max(0, i - 2), min(len(labels), i + 2))]
-    numbers = "\n".join(f"{name}: " + ", ".join(f"{y} {h[k]:,.0f}" if h.get(k) is not None else f"{y} n/a" for y, h in rows)
-                        for k, name in NOTE_LINES)
+    numbers = _numbers([(labels[j], up["hist"][j]) for j in range(max(0, i - 2), min(len(labels), i + 2))], NOTE_LINES)
     r = req.report
     try:
         if r is None:
@@ -526,6 +536,7 @@ def explain(req: ExplainRequest):
     except ai.LLMError as e:
         raise HTTPException(502, str(e))
     summary = reply["summary"].strip()
+    checks.append(ai.wording_check(summary))
     ok = all(c["pass"] is not False for c in checks)
     # the citation is part of the id: the same summary with another quote is another record (a rejected one stays)
     key = f"oneoff:{req.year}:{r and r.id}:{summary}:{source['page']}:{source['quote']}"
@@ -559,11 +570,9 @@ def explain_flag(req: FlagRequest):
     co = req.company.model_dump()
     labels, up = model.labels(co["dates"]), model.upgrade(co, [f.model_dump() for f in req.filings], ar_capex(req.notes))
     flag = next((f for f in model.forensic(up["hist"], labels, req.notes) if f["key"] == req.key), None)
-    if flag is None or flag["severity"] not in ("high", "medium", "low"):
+    if flag is None or flag["severity"] not in SEVERITY_WORD:
         raise HTTPException(422, f"{flag['title'] if flag else req.key} isn't flagged.")
-    rows = list(zip(labels, up["hist"]))[-5:]
-    numbers = "\n".join(f"{name}: " + ", ".join(f"{y} {h[k]:,.0f}" if h.get(k) is not None else f"{y} n/a" for y, h in rows)
-                        for k, name in FLAG_LINES)
+    numbers = _numbers(list(zip(labels, up["hist"]))[-5:], FLAG_LINES)
     given = f"{flag['title']} {flag['fact']} {flag['detail']} {flag['rule']}\n{numbers}"
     r = req.report
     try:
@@ -584,7 +593,7 @@ def explain_flag(req: FlagRequest):
     except ai.LLMError as e:
         raise HTTPException(502, str(e))
     summary = reply["summary"].strip()
-    checks.append(ai.numbers_check(summary, given, source["quote"]))
+    checks += [ai.numbers_check(summary, given, source["quote"]), ai.wording_check(summary)]
     ok = all(c["pass"] is not False for c in checks)
     key = f"flag:{req.key}:{r and r.id}:{summary}:{source['page']}:{source['quote']}"
     return {"id": hashlib.sha1(key.encode()).hexdigest()[:12],
@@ -633,7 +642,7 @@ def _draft_ctx(req):
             for k, lb, _ in model.DRIVERS if k in asked]
     dates = model.projected_dates(co, req.n)
     last = hist[-1]
-    return {"hist": hist, "defaults": d, "kinds": kinds, "asked": asked, "ranges": ranges, "rows": rows,
+    return {"hist": hist, "defaults": d, "ends": model.default_ends(hist, d), "kinds": kinds, "asked": asked, "ranges": ranges, "rows": rows,
             "years": (model.fy(dates[0], True), model.fy(dates[-1], True)), "n": req.n,
             "size": max(last["revenue"], model._debt(last)), "revenue": last["revenue"],
             "given": "\n".join(f"{x['key']} " + " ".join(f"{v:.1f}" for _, v in x["hist"]) + f" {x['default']:.1f}" for x in rows)}
@@ -641,8 +650,8 @@ def _draft_ctx(req):
 
 def _history(k, ctx, pid=None):
     """A driver from history: the rule default (default_assumptions) for base, bull and bear seeded around it."""
-    v, s = ctx["defaults"][k], SHIFT.get(k, 0.0)
-    value = {"base": {"start": v, "end": None}, "bull": {"start": v + s, "end": None}, "bear": {"start": v - s, "end": None}}
+    v, s, e = ctx["defaults"][k], SHIFT.get(k, 0.0), ctx["ends"].get(k)
+    value = {c: {"start": v + d, "end": None if e is None else e + d} for c, d in (("base", 0.0), ("bull", s), ("bear", -s))}
     return {"id": pid or hashlib.sha1(f"assume:{k}:history:{v!r}".encode()).hexdigest()[:12], "kind": "assumption",
             "field": k, "value": value, "unit": ctx["kinds"][k], "period": "–".join(ctx["years"]),
             "source": {"file": None, "page": None, "quote": None, "tag": None}, "report": None, "from_history": True,
@@ -889,27 +898,31 @@ def notes_approve(req: NoteDecision):
 # ---------- the research note's words (4.4): AI writes from the app's numbers, rules check every number ----------
 
 def inputs_hash(req: ModelRequest):
-    """What the note's numbers come from: the company, every scenario's inputs, the horizon, the valuation inputs and
-    whatever the filings and approved capex notes add. A saved note with another hash was written for earlier inputs."""
+    """What the note is written from: the company, every scenario's inputs, the horizon, the valuation inputs, what the
+    filings add, and the words and sources behind its facts and citations (approved notes, flag notes, input sources,
+    excluded years). A saved note with another hash was written for earlier inputs."""
     key = {"company": req.company.model_dump(mode="json"), "n": req.n, "valuation": req.valuation.model_dump(),
            "scenarios": {s: {k: v.model_dump() for k, v in a.items()} for s, a in req.scenarios.items()},
-           "filings": [[f.id, f.facts] for f in req.filings], "capex": ar_capex(req.notes)}
+           "filings": [[f.id, f.facts] for f in req.filings], "notes": req.notes, "flag_notes": req.flag_notes,
+           "sources": req.assumption_sources, "excluded": sorted(req.excluded_years)}
     return hashlib.sha1(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
 def _rs(x):
     """Rs a share as the note shows it: whole rupees from 100 up (Indian grouping), paise below."""
-    return model._cr(x)[:-3] if abs(x) >= 100 else f"Rs {x:,.2f}"
+    return f"Rs {model._inr(x)}" if abs(x) >= 100 else f"Rs {model._inr(x, 2)}"
 
 
 _pc = "{:.1%}".format
-SEVERITY = {"high": "Red", "medium": "Amber", "low": "Amber (low)"}
+SEVERITY_WORD = {"high": "Red", "medium": "Amber", "low": "Amber (low)"}
+IN_FACTS = ("growth", "ebitda_margin", "tax_rate", "capex_pct", "oi_pct")  # always stated, with where each came from
 MAX_CITES = 24  # ponytail: quotes only, never whole pages; the approved quotes already say what the pages hold
 
 
 def _thesis_facts(doc: "ModelDoc"):
     """({key: text}, {id: citation}) the note may use: the verdict numbers, what moves value, break-evens, key numbers,
-    lit forensic flags, inputs with their sources, and the quotes behind approved inputs and notes. Rules only."""
+    the margin's own range, rule checks (lit ones, and leverage even when it passed), inputs with their sources, and the
+    quotes behind approved inputs and notes. Rules only."""
     co, sc, n, out = doc.projection()
     v, hist, labels = doc.dcf(co, sc, n, out), co["hist"], model.labels(co["dates"])
     years, last = [model.fy(d, True) for d in model.projected_dates(co, n)], labels[-1]
@@ -939,14 +952,29 @@ def _thesis_facts(doc: "ModelDoc"):
     elif price and value is not None:
         f["implied_growth"] = "No flat revenue growth between -30% and +80% a year gets our base value to the price"
     if not v["error"]:
+        val, dv = doc.valuation, model.VALUATION
         f["wacc"] = f"Discount rate (WACC): {_pc(v['wacc'])}; terminal growth {_pc(v['g'])}"
+        if val.wacc_override is not None:
+            f["wacc"] += " (WACC typed by you)"
+        else:  # the cost of equity's parts, and which of them nobody chose for this company
+            names = {"rf": "the risk-free rate", "erp": "the premium", "beta": "beta"}
+            dflt = [names[k] for k in names if getattr(val, k) == dv[k]]
+            f["wacc"] += (f"; cost of equity {_pc(v['ke'])} = {_pc(val.rf)} risk-free + beta {val.beta:g} x {_pc(val.erp)} "
+                          "premium" + (f" ({', '.join(dflt)}: the app default, not estimated for this company)" if dflt else
+                                       " (set by you)"))
     if sv["base"]["tv_share"] is not None:
         f["tv_share"] = f"Share of our base enterprise value that is terminal value: {_pc(sv['base']['tv_share'])}"
-    for y in (3, 5):
+    # growth history at the price's own horizon (n years), else the longest run the data has; plus the recent pace
+    hz = min(n, len(hist) - 1)
+    cs = model.cagrs(hist, labels, hz)
+    if cs:
+        b = max(cs, key=lambda c: c["value"])
+        f[f"best{hz}"] = (f"Fastest {hz}-year revenue growth since {labels[0]}"
+                          + (f" (the longest run in the data, shorter than the {n} years the price needs)" if hz < n else "")
+                          + f": {_pc(b['value'])} a year ({b['from']}–{b['to']})")
+    for y in sorted({3, hz}):
         cs = model.cagrs(hist, labels, y)
         if cs:
-            b = max(cs, key=lambda c: c["value"])
-            f[f"best{y}"] = f"Fastest {y}-year revenue growth since {labels[0]}: {_pc(b['value'])} a year ({b['from']}–{b['to']})"
             f[f"last{y}"] = f"Revenue growth over the last {y} years ({cs[-1]['from']}–{cs[-1]['to']}): {_pc(cs[-1]['value'])} a year"
     p0 = out["base"][0]
     for k, name in (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "Net profit")):
@@ -958,6 +986,16 @@ def _thesis_facts(doc: "ModelDoc"):
         if k["last"] is not None:
             f[f"kn_{k['key']}"] = (f"{k['label']} {k['year']}: {show[k['kind']](k['last'])}"
                                    + (f" (median of the 3 years before: {show[k['kind']](k['typical'])})" if k["typical"] is not None else ""))
+    # the margin over the whole history: a cyclical's 3-year median is the wrong window
+    ms = [(y, x["ebitda_margin"]) for y, x in zip(labels, model.ratios(hist)) if x["ebitda_margin"] is not None]
+    if len(ms) >= 4:
+        lo, hi = min(ms, key=lambda t: t[1]), max(ms, key=lambda t: t[1])
+        f["range_margin"] = (f"EBITDA margin {labels[0]}–{last}: low {_pc(lo[1])} ({lo[0]}), median "
+                             f"{_pc(statistics.median(m for _, m in ms))}, high {_pc(hi[1])} ({hi[0]})")
+    if (c := hist[-1]["cash"]) > 2 * max(hist[-2]["cash"], 0.0) and c - hist[-2]["cash"] > 0.05 * hist[-1]["revenue"]:
+        f["cash_jump"] = f"Cash {last}: {model._cr(c)}, up from {model._cr(hist[-2]['cash'])} in {labels[-2]}"
+    if g := model.share_gap(co):
+        f["shares"] = f"Share count: {g['text']}"
     nb = v.get("note") or {}
     unit = lambda key, x: f"{x:.0f} days" if key in ("dso", "dio", "dpo") else _pc(x)  # noqa: E731
     ours = lambda key: v["wacc"] if key == "wacc" else v["g"] if key == "g" else avg(key)  # noqa: E731
@@ -968,12 +1006,25 @@ def _thesis_facts(doc: "ModelDoc"):
                                    f"our base value {ends} a share")
     for k, b in (nb.get("breakevens") or {}).items():
         name = {"growth": "Flat revenue growth", "ebitda_margin": "EBITDA margin", "wacc": "WACC", "g": "Terminal growth"}[k]
-        f[f"be_{k}"] = (f"{name} at which our base value equals the price: {_pc(b['value'])}" if b["value"] is not None
-                        else f"No {name.lower()} in the range searched gets our base value to the price")
-    for x in model.forensic(hist, labels, doc.notes):
-        if x["severity"] in SEVERITY:
-            f[f"flag_{x['key']}"] = f"{SEVERITY[x['severity']]} rule check, {x['title']}: {x['fact']}. {x['detail']}"
-    for o in model.detect_oneoffs(hist, labels):
+        if b["value"] is None:
+            f[f"be_{k}"] = f"No {name.lower()} in the range searched gets our base value to the price"
+            continue
+        f[f"be_{k}"] = (f"{name} at which our base value equals the price: {_pc(b['value'])}"
+                        + (" (our base case has no value, so this is far outside it)" if value is None
+                           else f" (more than twice our {_pc(ours(k))}: far outside our base case)"
+                           if ours(k) > 0 and b["value"] > 2 * ours(k) else ""))
+        if k == "ebitda_margin" and len(ms) >= 4 and b["value"] > avg("ebitda_margin"):
+            seen = [(y, m) for y, m in ms if m >= b["value"]]
+            f["be_margin_seen"] = (f"Years since {labels[0]} with an EBITDA margin at or above the {_pc(b['value'])} the "
+                                   "price needs: " + (", ".join(f"{y} ({_pc(m)})" for y, m in seen) or "none"))
+    radar = model.forensic(hist, labels, doc.notes)
+    for x in sorted(radar, key=lambda x: model.SEVERITY.index(x["severity"])):  # red first, as the risks rank
+        if x["severity"] in SEVERITY_WORD:
+            f[f"flag_{x['key']}"] = f"{SEVERITY_WORD[x['severity']]} rule check, {x['title']}: {x['fact']}. {x['detail']}"
+        elif x["key"] in ("debt", "cover") and x["severity"] == "ok":  # leverage is a point for every note
+            f[f"lev_{x['key']}"] = f"Passed rule check, {x['title']}: {x['fact']}. {x['detail']}"
+    oneoffs = model.detect_oneoffs(hist, labels)
+    for o in oneoffs:
         if o["year"] in labels[-3:]:
             f[f"oneoff_{o['metric']}_{o['year']}"] = f"Unusual year: {o['note']}"
 
@@ -987,8 +1038,15 @@ def _thesis_facts(doc: "ModelDoc"):
             cites[f"C{len(cites) + 1}"] = {"what": what, "file": file, "page": src["page"], "quote": src["quote"], "report": report}
             return f"C{len(cites)}"
     label = {k: lab for k, lab, _ in model.DRIVERS}
-    for k, pid in (doc.assumption_sources.get("base") or {}).items():
-        a = sc["base"].get(k)
+    srcs = doc.assumption_sources.get("base") or {}
+    try:
+        dflt = model.default_assumptions(hist, exclude=set(doc.excluded_years), labels=labels)
+    except ValueError:
+        dflt = {}
+    fades = model.default_ends(hist, dflt) if dflt else {}
+    window = [y for y in labels if y not in doc.excluded_years][-3:]  # the default's 3-year window
+    for k in [*srcs, *(k for k in IN_FACTS if k not in srcs)]:
+        a, pid = sc["base"].get(k), srcs.get(k)
         if a is None or k not in label:
             continue
         p = props.get(pid) or {}
@@ -996,8 +1054,18 @@ def _thesis_facts(doc: "ModelDoc"):
             if p.get("kind") == "assumption" and not p.get("from_history") else None
         show_k = (lambda x: f"{x:,.0f} days") if k in ("dso", "dio", "dpo") else model._cr if k == "debt_change" else _pc
         path = show_k(a["start"]) + (f" fading to {show_k(a['end'])}" if a.get("end") is not None else "")
-        why = f"drafted from a document and approved, see {c}" if c else "the rule default from history" \
-            if pid == "history" or p.get("from_history") else "set by you"
+        rule = pid == "history" or p.get("from_history") or pid is None and k in dflt and abs(a["start"] - dflt[k]) < 1e-9 \
+            and (a.get("end") is None if k not in fades else a.get("end") is not None and abs(a["end"] - fades[k]) < 1e-9)
+        why = f"drafted from a document and approved, see {c}" if c else "the rule default from history" if rule else "set by you"
+        if rule and not c:  # a flagged year inside the default's window: say it, and what leaving it out gives
+            for o in oneoffs:
+                if o["metric"] == k and o["year"] in window and o.get("unreliable"):  # no number to cite: it isn't spending
+                    why += f"; includes {o['year']}, whose capex from the net-block change is unreliable"
+                elif o["metric"] == k and o["year"] in window:
+                    why += f"; includes {o['year']}'s flagged {_pc(o['value'])}"
+                    with contextlib.suppress(ValueError):
+                        why += (f"; {_pc(model.default_assumptions(hist, exclude={*doc.excluded_years, o['year']}, labels=labels)[k])}"
+                                f" with {o['year']} left out")
         f[f"in_{k}"] = f"Base input {label[k]}: {path} ({why})"
     for x in doc.flag_notes:
         cite(f"Approved explanation of the {x.get('key')} flag (AI-written): {x.get('summary', '')[:300]}", x,
@@ -1008,6 +1076,8 @@ def _thesis_facts(doc: "ModelDoc"):
         rep = (props.get(x.get("proposal")) or {}).get("report")
         if key.startswith("oneoff:"):
             cite(f"Approved explanation of {key[7:]} (AI-written): {x.get('summary', '')[:300]}", x, rep)
+        elif key.startswith("ar:auditor:") and x.get("opinion", "unmodified") == "unmodified" and not x.get("changed"):
+            continue  # a clean opinion from the same firm isn't a point; the rule check already says it passed
         elif key.startswith("ar:"):
             for row in (x.get("rows") or [])[:4]:
                 amt = f": {model._cr(row['amount'])}" if isinstance(row.get("amount"), (int, float)) else ""
@@ -1116,8 +1186,9 @@ def slug(name):
     return s or "company-" + hashlib.sha1(name.encode()).hexdigest()[:8]  # non-Latin names
 
 
-def model_file(model_id, root=MODELS):
+def model_file(model_id, root=None):
     """The file for an id, only ever inside root. Anything else is rejected, never resolved."""
+    root = root or MODELS
     if not isinstance(model_id, str) or not MODEL_ID.fullmatch(model_id):
         raise HTTPException(422, "That isn't a valid model id.")
     p = (root / f"{model_id}.json").resolve()
@@ -1126,8 +1197,9 @@ def model_file(model_id, root=MODELS):
     return p
 
 
-def save_model(doc: ModelDoc, root=MODELS, now=None):
+def save_model(doc: ModelDoc, root=None, now=None):
     """Write today's version for this company (replacing any earlier one from today). Returns (id, saved_at)."""
+    root = root or MODELS
     doc.args()  # all three scenarios, every driver, a sane horizon
     now = now or datetime.now()
     data = doc.model_dump(mode="json") | {"saved_at": now.isoformat(timespec="seconds")}
@@ -1162,7 +1234,8 @@ def _saved_name(p):
         return None
 
 
-def load_model(model_id, root=MODELS):
+def load_model(model_id, root=None):
+    root = root or MODELS
     p = model_file(model_id, root)
     try:
         return ModelDoc.model_validate_json(p.read_bytes())
@@ -1172,8 +1245,9 @@ def load_model(model_id, root=MODELS):
         raise HTTPException(422, "That saved model is damaged or from an older version of the app.")
 
 
-def list_models(root=MODELS):
+def list_models(root=None):
     """Every saved version, most recent first. Unreadable files are skipped."""
+    root = root or MODELS
     out = []
     for p in root.glob("*/*.json"):
         model_id = f"{p.parent.name}/{p.stem}"
@@ -1216,9 +1290,10 @@ RESTATED = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "Net profit"),
 RESTATE_TOL = 0.005  # 0.5%: Screener rounds lines to whole crores or 2 decimals, so less is noise
 
 
-def restatements(co, root=MODELS):
+def restatements(co, root=None):
     """Reported years in a freshly imported file that moved by more than 0.5% against the latest saved model of the
     same company: {id, saved_at, changes: [{year, line, old, new}], carry: {filings, proposals, notes, reports}}, or None when nothing of it is saved."""
+    root = root or MODELS
     saved = [p for p in root.glob(f"{slug(co['name'])}*/*.json") if _saved_name(p) == co["name"]]
     for p in sorted(saved, key=lambda p: p.stem, reverse=True):  # newest day first; a damaged file falls back
         model_id = f"{p.parent.name}/{p.stem}"
@@ -1238,7 +1313,8 @@ def restatements(co, root=MODELS):
     return None
 
 
-def delete_model(model_id, root=MODELS):
+def delete_model(model_id, root=None):
+    root = root or MODELS
     p = model_file(model_id, root)
     try:
         p.unlink()
