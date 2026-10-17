@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import mimetypes
 import statistics
 import os
 import re
@@ -19,6 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, model_validator
 
 import ai
@@ -1364,6 +1366,24 @@ def remove_model(model_id: str):
     return {"ok": True}
 
 
+mimetypes.add_type("application/manifest+json", ".webmanifest")  # the install manifest
+
+
+class AppPages(StaticFiles):
+    """web/dist, plus the app's own page addresses (/c/tcs/valuation...): any other path without a file extension gets
+    index.html, so a page opened from its URL, a reload or a new tab works. /api never falls back: a wrong API path is a
+    404, not a page, and a missing asset (a dot in its name) stays a 404."""
+
+    async def get_response(self, path, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as e:
+            name = path.rsplit("/", 1)[-1]
+            if e.status_code != 404 or path.split("/", 1)[0] == "api" or "." in name:
+                raise
+            return await super().get_response("index.html", scope)
+
+
 dist = Path(__file__).parent / "web" / "dist"
 if dist.exists():
-    app.mount("/", StaticFiles(directory=dist, html=True), name="web")
+    app.mount("/", AppPages(directory=dist, html=True), name="web")

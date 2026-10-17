@@ -1,14 +1,14 @@
 import type { ReactNode } from 'react'
 import Sources, { Explain, FlagExplain, useAi } from './Sources'
-import type { Go } from './App'
 import type { Upgrade } from './Model'
+import { PageHead, Toc } from './Shell'
 import {
   DOC_KINDS, fmt, isAnnual, money, rs, when, type Forensic, type ModelDoc, type OneOff, type OneOffNote, type Parsed, type Projection, type Proposal,
   type Severity,
 } from './lib'
 
 interface Props {
-  parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null; go: Go
+  parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null
   upgrades: Upgrade[]; onApply: () => void; onProposals: (f: (ps: Proposal[]) => Proposal[]) => void
   toggleYear: (year: string) => void; pendingYear: string | null; defaultsNote: string
 }
@@ -29,7 +29,20 @@ const Row = ({ id, claim, kind, src, st, cls }: { id?: string; claim: ReactNode;
 )
 
 
-export default function Evidence({ parsed, doc, setDoc, projection, go, upgrades, onApply, onProposals, toggleYear, pendingYear, defaultsNote }: Props) {
+/** What each forensic rule looks at, in plain words, shown right under its name. */
+const PLAIN: Record<string, string> = {
+  cash: 'How much of the reported profit arrived as cash.', cash5: 'How much of the reported profit arrived as cash.',
+  dso: 'How long customers take to pay.', dio: 'How long stock sits before it is sold.',
+  cwip: 'Money spent on projects that aren’t running yet.', other_income: 'How much profit comes from outside the main business.',
+  tax: 'Whether the tax rate jumps around from year to year.', debt: 'Borrowings against a year of operating profit.',
+  cover: 'How many times operating profit pays the interest.', nwc: 'Money tied up in running the business day to day.',
+  mscore: 'Beneish M-score: a formula from eight ratios that spots signs of inflated earnings.',
+  contingent: 'Possible bills not on the balance sheet, against net worth.', related: 'Dealings with group companies and insiders.',
+  pledge: 'Shares the promoters have pledged against loans.', auditor: 'What the auditor said, and whether the auditor changed.',
+}
+
+/** Checks: warning signs found by rules, unusual years, the documents (attach here), and the audit trail. */
+export default function Evidence({ parsed, doc, setDoc, projection, upgrades, onApply, onProposals, toggleYear, pendingYear, defaultsNote }: Props) {
   const { company, years } = parsed
   const ai = useAi()
   const v = projection?.valuation
@@ -38,7 +51,7 @@ export default function Evidence({ parsed, doc, setDoc, projection, go, upgrades
   const restated = parsed.restated?.changes.length ? parsed.restated : null
   const oneoffYears = Object.entries(parsed.oneoffs.reduce<Record<string, OneOff[]>>(
     (g, o) => ({ ...g, [o.year]: [...(g[o.year] ?? []), o] }), {}))
-  const decided = doc.proposals.filter(p => p.status !== 'proposed' && p.kind !== 'assumption') // assumptions: Model tab
+  const decided = doc.proposals.filter(p => p.status !== 'proposed' && p.kind !== 'assumption') // assumptions: Forecast
   const annual = doc.reports.filter(isAnnual), talk = doc.reports.filter(r => !isAnnual(r))
   const onReports = (f: (rs: ModelDoc['reports']) => ModelDoc['reports']) => setDoc(d => ({ ...d, reports: f(d.reports) }))
   const nCells = sv ? [...sv.grid.flat(), ...(sv.grid_gm ?? []).flat()].filter(x => x != null).length : 0
@@ -46,35 +59,66 @@ export default function Evidence({ parsed, doc, setDoc, projection, go, upgrades
 
   return (
     <>
-      <div className="m-head"><div>
-        <p className="label">Evidence · <b>every claim on the note</b> · rules first, AI only where cited</p>
-        <h1>Every claim, its source, and the rule that checked it</h1>
-      </div></div>
+      <PageHead label={<>Checks · <b>rules first</b> · AI only where cited</>} title="Checks on the numbers"
+        purpose={<>Fixed rules look for warning signs in the reported years. Attach an annual report or a call transcript
+          below to run the rest, draft inputs and explain a flag with a quote from the filing.</>}
+        next={<a className="btn" href="#documents">Add documents</a>} />
+      <Toc page="checks" />
+      {restated && (
+        <section className="blk restated" aria-labelledby="restated-h">
+          <h2 id="restated-h" className="label sec-label"><span>Restated since your model of {restated.saved_at ? when(restated.saved_at) : 'earlier'}</span></h2>
+          <ul className="check-list">
+            {restated.changes.map(c => <li key={`${c.year}-${c.line}`}>{c.year} {c.line.toLowerCase()}: Rs {money(c.old)} cr → Rs {money(c.new)} cr ({fmt(c.new / c.old - 1, 'pct')})</li>)}
+          </ul>
+          <p className="small-note">This file’s reported years differ by more than 0.5% from the model you saved; the company may
+            have restated them. This model uses the new figures and keeps your filings, proposals and notes.</p>
+        </section>
+      )}
 
-      <section aria-labelledby="docs-h">
-        <h2 id="docs-h" className="label sec-label"><span>Documents</span><span>attached, and what would help</span></h2>
+
+      {parsed.forensic && <Radar flags={parsed.forensic} doc={doc} parsed={parsed} ai={ai} onProposals={onProposals} />}
+
+      <section className="blk" id="unusual" tabIndex={-1} aria-labelledby="oneoffs-h">
+        <h2 id="oneoffs-h">Unusual years · {oneoffYears.length}</h2>
+        <p className="why">Years far from this company’s own history. Leave one out of the defaults, or explain it from that year’s annual report.</p>
+        {oneoffYears.length
+          ? <OneOffs years={oneoffYears} histYears={years} excluded={doc.excluded_years} pending={pendingYear}
+              note={defaultsNote} onToggle={toggleYear} explain={year => (
+                <Explain year={year} company={company} filings={doc.filings} notes={doc.notes} ai={ai} proposals={doc.proposals}
+                  report={annual.find(r => r.year === year)} note={doc.notes[`oneoff:${year}`] as OneOffNote | undefined}
+                  onProposals={onProposals} onReports={onReports} />
+              )} />
+          : <p className="small-note">No year sits more than 2σ from this company’s own median on other income, tax rate, capex or EBITDA margin.</p>}
+      </section>
+
+      <section className="blk" id="documents" tabIndex={-1} aria-labelledby="docs-h">
+        <h2 id="docs-h">Documents</h2>
+        <p className="why">What the app has read, and what each missing document would add. Attach them right here.</p>
         <div className="docs">
           <div className="doc"><h3>Screener export</h3><p>{company.name}, {years[0]}–{years[years.length - 1]}, read by rules.
             {doc.saved_at ? ` Saved ${when(doc.saved_at)}.` : ''}</p></div>
-          <div className={`doc${doc.filings.length ? '' : ' missing'}`}><h3>XBRL results filings</h3>
+          <div className={`doc${doc.filings.length ? '' : ' missing'}`}><h3>Exchange results filings <span className="term">XBRL: the machine-readable results file on NSE or BSE</span></h3>
             <p>{doc.filings.length ? `${doc.filings.length} attached; annual ones that tie to Screener add payables, leases and cash-flow capex.`
               : 'Would add trade payables, lease liabilities and cash-flow capex from an annual filing.'}</p>
-            <button type="button" className="btn" onClick={() => go('evidence', 'src-head')}>Attach XBRL</button></div>
+            <a className="btn" href="#src-head">Attach XBRL</a></div>
           <div className={`doc${annual.length ? '' : ' missing'}`}><h3>Annual reports</h3>
             <p>{annual.length ? annual.map(r => `${r.year} (${r.pages} pages)`).join(', ') + '.'
               : 'Would unlock the contingent-liability, related-party, promoter-pledge and auditor checks, and cited explanations.'}</p>
-            <button type="button" className="btn" onClick={() => go('evidence', 'src-ar-head')}>Attach PDF</button></div>
+            <a className="btn" href="#src-ar-head">Attach PDF</a></div>
           <div className={`doc${talk.length ? '' : ' missing'}`}><h3>Call transcripts and presentations</h3>
             <p>{talk.length ? talk.map(r => `${DOC_KINDS[r.kind ?? 'annual']}, ${r.year} (${r.pages} pages)`).join('; ') + '.'
               : 'Management’s guidance on growth, margins, capex and payout: lets the app draft assumptions with quotes.'}</p>
-            <button type="button" className="btn" onClick={() => go('evidence', 'src-ar-head')}>Attach PDF</button></div>
+            <a className="btn" href="#src-ar-head">Attach PDF</a></div>
+        </div>
+        <div className="m-sec">
+          <Sources company={company} filings={doc.filings} proposals={doc.proposals} sources={parsed.sources}
+            upgrades={upgrades} onApply={onApply} reports={doc.reports} years={years} notes={doc.notes}
+            onReports={onReports} onFilings={f => setDoc(d => ({ ...d, filings: f(d.filings) }))} onProposals={onProposals} />
         </div>
       </section>
 
-      {parsed.forensic && <Radar flags={parsed.forensic} doc={doc} parsed={parsed} ai={ai} go={go} onProposals={onProposals} />}
-
-      <section aria-labelledby="claims-h" className="m-sec">
-        <h2 id="claims-h" className="label sec-label"><span>Claims on the note</span><span>source · check</span></h2>
+      <details className="blk audit" id="audit">
+        <summary>Audit trail: every claim on the Overview, its source and the rule that checked it</summary>
         <div className="ledger">
           <div className="lg head" aria-hidden="true"><div>Claim</div><div>Source and calculation</div><div>Check</div></div>
           {sv?.per_share != null && v && <Row id="verdict" kind="rule"
@@ -82,7 +126,7 @@ export default function Evidence({ parsed, doc, setDoc, projection, go, upgrades
             src={<>DCF of free cash flow to firm over {projection!.years.length} years, WACC <span className="num">{pc(v.wacc)}</span> (cost of equity {pc(v.ke)}, debt {pc(v.kd_after_tax)} after tax, {pc(v.we)} equity weight), Gordon terminal value at <span className="num">{pc(v.g)}</span>; equity = EV − debt + cash + investments, over {v.shares != null ? `${money(v.shares)} cr` : 'no'} shares.</>}
             st="Deterministic ✓" />}
           {sv?.per_share == null && <Row id="verdict" kind="rule" claim="No value yet" cls="wait"
-            src={v?.error ?? sv?.error ?? 'No share count, or the model is still calculating.'} st="Why: see Model" />}
+            src={v?.error ?? sv?.error ?? 'No share count, or the model is still calculating.'} st="Why: see Valuation" />}
           {sv?.implied_growth != null && <Row kind="rule" claim={<>Priced for <span className="num mkt">{pc(sv.implied_growth)}</span> revenue growth a year</>}
             src={<>Reverse DCF: flat revenue growth in every projected year, other inputs as set; scanned from −30% to +80% in 5 pp steps, then bisected to 1e-10 until base value equals the price <span className="num mkt">Rs {rs(v!.price!)}</span>.</>}
             st="Deterministic ✓" />}
@@ -114,43 +158,14 @@ export default function Evidence({ parsed, doc, setDoc, projection, go, upgrades
               src={p.reasoning || '–'} st={<>Rejected{fail ? `: ${fail.detail}` : ''}</>} cls="red" />
           })}
         </div>
-      </section>
-
       {parsed.checks.length > 0 && (
-        <section className="m-sec" id="a-data" tabIndex={-1} aria-labelledby="data-h">
+        <section className="sec" id="a-data" tabIndex={-1} aria-labelledby="data-h">
           <h2 id="data-h" className="label sec-label"><span>Data checks on the export</span><span>{parsed.checks.length} issue{parsed.checks.length > 1 ? 's' : ''}</span></h2>
           <ul className="check-list">{parsed.checks.map(c => <li key={c}>{c}</li>)}</ul>
         </section>
       )}
 
-      {restated && (
-        <section className="m-sec" aria-labelledby="restated-h">
-          <h2 id="restated-h" className="label sec-label"><span>Restated since your model of {restated.saved_at ? when(restated.saved_at) : 'earlier'}</span></h2>
-          <ul className="check-list">
-            {restated.changes.map(c => <li key={`${c.year}-${c.line}`}>{c.year} {c.line.toLowerCase()}: Rs {money(c.old)} cr → Rs {money(c.new)} cr ({fmt(c.new / c.old - 1, 'pct')})</li>)}
-          </ul>
-          <p className="small-note">This file’s reported years differ by more than 0.5% from the model you saved; the company may
-            have restated them. This model uses the new figures and keeps your filings, proposals and notes.</p>
-        </section>
-      )}
-
-      <section className="m-sec" id="a-oneoffs" tabIndex={-1} aria-labelledby="oneoffs-h">
-        <h2 id="oneoffs-h" className="label sec-label"><span>Unusual years · <b>{oneoffYears.length}</b></span><span>rules flag, AI explains, you decide</span></h2>
-        {oneoffYears.length
-          ? <OneOffs years={oneoffYears} histYears={years} excluded={doc.excluded_years} pending={pendingYear}
-              note={defaultsNote} onToggle={toggleYear} explain={year => (
-                <Explain year={year} company={company} filings={doc.filings} notes={doc.notes} ai={ai} proposals={doc.proposals}
-                  report={annual.find(r => r.year === year)} note={doc.notes[`oneoff:${year}`] as OneOffNote | undefined}
-                  onProposals={onProposals} onReports={onReports} />
-              )} />
-          : <p className="small-note">No year sits more than 2σ from this company’s own median on other income, tax rate, capex or EBITDA margin.</p>}
-      </section>
-
-      <div className="m-sec" id="a-src-head">
-        <Sources company={company} filings={doc.filings} proposals={doc.proposals} sources={parsed.sources}
-          upgrades={upgrades} onApply={onApply} reports={doc.reports} years={years} notes={doc.notes}
-          onReports={onReports} onFilings={f => setDoc(d => ({ ...d, filings: f(d.filings) }))} onProposals={onProposals} />
-      </div>
+      </details>
     </>
   )
 }
@@ -190,48 +205,59 @@ const M_PARTS: [string, string][] = [['DSRI', 'Receivable days index'], ['GMI', 
   ['SGI', 'Sales growth index'], ['DEPI', 'Depreciation index'], ['SGAI', 'SG&A index'], ['LVGI', 'Leverage index'],
   ['TATA', 'Accruals / total assets']]
 
-/** Every forensic rule, worst first: what it found, the rule and its threshold, and (when lit) an explanation in words. */
-function Radar({ flags, doc, parsed, ai, go, onProposals }: {
-  flags: Forensic[]; doc: ModelDoc; parsed: Parsed; ai: ReturnType<typeof useAi>; go: Go
+/** Every forensic rule: the lit ones first with their explanation; the clear ones folded away; the ones waiting on an
+ * annual report together, with one attach link. */
+function Radar({ flags, doc, parsed, ai, onProposals }: {
+  flags: Forensic[]; doc: ModelDoc; parsed: Parsed; ai: ReturnType<typeof useAi>
   onProposals: (f: (ps: Proposal[]) => Proposal[]) => void
 }) {
+  const sorted = bySeverity(flags)
+  const lit = sorted.filter(f => f.severity === 'high' || f.severity === 'medium' || f.severity === 'low')
+  const clear = sorted.filter(f => f.severity === 'ok')
+  const waiting = sorted.filter(f => f.severity === 'not_checked')
   const n = (s: Severity) => flags.filter(f => f.severity === s).length
+  const row = (f: Forensic) => {
+    const on = f.severity === 'high' || f.severity === 'medium' || f.severity === 'low'
+    const rule = <p className="rd-rule"><span className="kind rule">Rule</span>{f.rule}.{f.years.length > 0 && <span className="dim"> Years: {f.years.join(', ')}.</span>}</p>
+    return (
+      <li key={f.key} id={`a-${f.key}`} tabIndex={-1} className={`rd s-${f.severity}`} aria-labelledby={`rd-${f.key}`}>
+        <div className="rd-head">
+          <span className={`sev ${f.severity}`}>{SEV[f.severity]}</span>
+          <h3 id={`rd-${f.key}`}>{f.title}</h3>
+          <span className="num rd-fact">{f.fact}</span>
+        </div>
+        {PLAIN[f.key] && <p className="term">{PLAIN[f.key]}</p>}
+        <p className="rd-detail">{f.detail}</p>
+        {on ? rule : <details className="rd-parts"><summary>The rule</summary>{rule}</details>}
+        {f.parts && <details className="rd-parts"><summary>The eight ratios, and what is approximated</summary>
+          <div className="table-wrap" tabIndex={0} role="region" aria-label="M-score ratios"><table className="keys">
+            <tbody>{M_PARTS.map(([k, label]) => <tr key={k}><th scope="row">{label} <span className="dim">{k}</span></th>
+              <td className="num">{f.parts![k] != null ? f.parts![k].toFixed(2) : '–'}</td></tr>)}</tbody>
+          </table></div>
+          {f.approx && <ul className="small-note">{f.approx.map(a => <li key={a}>{a[0].toUpperCase() + a.slice(1)}.</li>)}</ul>}</details>}
+        {on && <FlagExplain flag={f} company={parsed.company} filings={doc.filings} notes={doc.notes} reports={doc.reports.filter(isAnnual)}
+          proposals={doc.proposals} note={doc.flag_notes.find(x => x.key === f.key)} ai={ai} onProposals={onProposals} />}
+      </li>
+    )
+  }
   return (
-    <section className="m-sec" id="a-radar" tabIndex={-1} aria-labelledby="radar-h">
-      <h2 id="radar-h" className="label sec-label"><span>Forensic radar · <b>{n('high')} high · {n('medium')} medium · {n('low')} low · {n('ok')} clear{n('not_checked') ? ` · ${n('not_checked')} not checked` : ''}</b></span>
-        <span>rules detect · AI explains · you decide</span></h2>
-      <p className="small-note">Fixed thresholds for every company, from the reported years and the annual-report notes you approved.
+    <section className="blk" id="flags" tabIndex={-1} aria-labelledby="radar-h">
+      <h2 id="radar-h">Warning signs · {n('high')} high, {n('medium')} medium, {n('low')} low</h2>
+      <p className="why">Fixed thresholds for every company, from the reported years and the annual-report notes you approved.
         An explanation is words only: it never changes a number, and the rules reject one whose quote isn’t on its page or
         whose numbers the app didn’t compute.</p>
-      <ol className="radar">
-        {bySeverity(flags).map(f => {
-          const lit = f.severity === 'high' || f.severity === 'medium' || f.severity === 'low'
-          return (
-            <li key={f.key} id={`a-${f.key}`} tabIndex={-1} className={`rd s-${f.severity}`} aria-labelledby={`rd-${f.key}`}>
-              <div className="rd-head">
-                <span className={`sev ${f.severity}`}>{SEV[f.severity]}</span>
-                <h3 id={`rd-${f.key}`}>{f.title}</h3>
-                <span className="num rd-fact">{f.fact}</span>
-              </div>
-              <p className="rd-detail">{f.detail}</p>
-              {(() => {
-                const rule = <p className="rd-rule"><span className="kind rule">Rule</span>{f.rule}.{f.years.length > 0 && <span className="dim"> Years: {f.years.join(', ')}.</span>}</p>
-                return lit ? rule : <details className="rd-parts"><summary>The rule</summary>{rule}</details>
-              })()}
-              {f.parts && <details className="rd-parts"><summary>The eight ratios, and what is approximated</summary>
-                <div className="table-wrap" tabIndex={0} role="region" aria-label="M-score ratios"><table className="keys">
-                  <tbody>{M_PARTS.map(([k, label]) => <tr key={k}><th scope="row">{label} <span className="dim">{k}</span></th>
-                    <td className="num">{f.parts![k] != null ? f.parts![k].toFixed(2) : '–'}</td></tr>)}</tbody>
-                </table></div>
-                {f.approx && <ul className="small-note">{f.approx.map(a => <li key={a}>{a[0].toUpperCase() + a.slice(1)}.</li>)}</ul>}</details>}
-              {lit && <FlagExplain flag={f} company={parsed.company} filings={doc.filings} notes={doc.notes} reports={doc.reports.filter(isAnnual)}
-                proposals={doc.proposals} note={doc.flag_notes.find(x => x.key === f.key)} ai={ai} onProposals={onProposals} />}
-              {f.needs && <p><button type="button" className="btn" onClick={() => go('evidence', 'src-ar-head')}
-                aria-label={`Attach the ${f.needs} for ${f.title.toLowerCase()}`}>Attach the {f.needs}</button></p>}
-            </li>
-          )
-        })}
-      </ol>
+      {lit.length ? <ol className="radar">{lit.map(row)}</ol>
+        : <p className="val-empty">No rule is lit: nothing in the reported years crosses a threshold.</p>}
+      {clear.length > 0 && <details className="fold" id="clear">
+        <summary><span><b>{clear.length} checks clear ✓</b> · {clear.map(f => f.title).join(', ')}</span></summary>
+        <ol className="radar">{clear.map(row)}</ol>
+      </details>}
+      {waiting.length > 0 && <div className="waiting">
+        <p><b>{waiting.length} not checked yet.</b>{' '}
+          {waiting.some(f => f.needs) ? <>They need {waiting.some(f => f.needs === 'annual report') ? 'the annual report' : 'a filing'}.{' '}
+            <a className="btn" href="#src-ar-head">Attach the annual report</a></> : 'The export lacks the years they need.'}</p>
+        <ol className="radar">{waiting.map(row)}</ol>
+      </div>}
     </section>
   )
 }

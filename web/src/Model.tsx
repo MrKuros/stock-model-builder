@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Chart from './Chart'
 import DriverStrip from './DriverStrip'
-import Statements, { growth, month } from './Statements'
-import ValuationPanel from './Valuation'
+import { growth, month } from './Statements'
 import DraftPanel, { failing, latest, path, useDraft } from './Draft'
 import { Checks } from './Sources'
-import type { Go } from './App'
+import { PageHead, Toc } from './Shell'
+import { useHref } from './route'
 import {
-  DOC_KINDS, defaultPaths, fmt, flat, groupKeys, money, seed, SCENARIOS, SHIFT, shortYear, type Proposal,
+  DOC_KINDS, defaultPaths, fmt, flat, groupKeys, isAnnual, money, seed, SCENARIOS, SHIFT, shortYear, type Proposal,
   type Kind, type ModelDoc, type Parsed, type Paths, type Projection, type Row, type Scenario, type Ttm,
 } from './lib'
 
@@ -57,20 +57,18 @@ const METRICS: [string, string, (r: Row) => number | null][] = [
   ['fcf', 'Free cash flow', r => r.fcf],
   ['net_cash', 'Net cash', r => (r.cash ?? 0) + (r.investments ?? 0) - (r.borrowings ?? 0) - (r.lease ?? 0)],
 ]
-const HORIZONS = [3, 5, 7, 10]
-const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
 
 interface Props {
   parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null
-  anchor: string; go: Go
+  anchor: string; upgrades: Upgrade[]; onApply: () => void
 }
 
-export default function ModelView({ parsed, doc, setDoc, projection, anchor, go }: Props) {
-  const { company, years: histYears, ratios, defaults, drivers, layout } = parsed
-  const { n, active, scenarios, valuation } = doc
+/** Forecast: every input with where it came from, the selected one's evidence and editor, then the projection. */
+export default function ModelView({ parsed, doc, setDoc, projection, anchor, upgrades, onApply }: Props) {
+  const href = useHref()
+  const { company, years: histYears, ratios, defaults, drivers } = parsed
+  const { n, active, scenarios } = doc
   const a = scenarios[active]
-  const setN = (n: number) => setDoc(d => ({ ...d, n }))
-  const setActive = (active: Scenario) => setDoc(d => ({ ...d, active }))
   const setA = (f: (p: Paths) => Paths) =>
     setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [d.active]: f(d.scenarios[d.active]) } }))
   const seeded = useMemo(() => seed(defaultPaths(defaults, parsed.default_ends)), [defaults, parsed.default_ends])
@@ -149,34 +147,19 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
   // the selected input's AI proposal: one waiting for you in the latest draft, else the one its value came from
   const aiCard = latest(doc).find(p => p.field === selKey && p.status === 'proposed' && !p.from_history) ?? propOf(srcOf(selKey))
 
+  const waiting = latest(doc).some(p => p.status === 'proposed')
+  const nDocs = 1 + (doc.filings.length ? 1 : 0) + (doc.reports.some(isAnnual) ? 1 : 0) + (doc.reports.some(r => !isAnnual(r)) ? 1 : 0)
+  const resetActive = () => setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [active]: seeded[active] },
+    assumption_sources: { ...d.assumption_sources, [active]: {} } }))
+
   return (
     <>
-      <div className="m-head">
-        <div>
-          <p className="label">Model · <b>{active} case</b> · {projYears.length ? `${projYears[0]}–${projYears[n - 1].slice(-3)}` : `${n} years`} · Rs crore · black = reported · blue = projected · recalculating never calls AI</p>
-          <h1>Every input, where it came from</h1>
-        </div>
-        <div className="m-tools">
-          <div className="seg" role="radiogroup" aria-label="Scenario">
-            {SCENARIOS.map(s => (
-              <button key={s} type="button" role="radio" aria-checked={active === s} tabIndex={active === s ? 0 : -1}
-                onClick={() => setActive(s)} onKeyDown={e => groupKeys(e, [...SCENARIOS], active, setActive)}>{NAMES[s]}</button>
-            ))}
-          </div>
-          <div className="seg" role="radiogroup" aria-label="Years to project">
-            {HORIZONS.map(h => (
-              <button key={h} type="button" role="radio" aria-checked={n === h} tabIndex={n === h ? 0 : -1}
-                onClick={() => setN(h)} onKeyDown={e => groupKeys(e, HORIZONS, n, setN)}>{h} yrs</button>
-            ))}
-          </div>
-        </div>
-      </div>
-      <p className="small-note">
-        Edits change the <b>{active}</b> case. Bull and bear start from base with revenue growth ± 3 pp and EBITDA margin
-        ± 1.5 pp.{' '}<button type="button" className="link" onClick={copyBase}>Copy base to bull and bear</button>{' · '}
-        <button type="button" className="link" onClick={() => setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [active]: seeded[active] },
-          assumption_sources: { ...d.assumption_sources, [active]: {} } }))}>Reset {active}</button>
-      </p>
+      <PageHead label={<>Forecast · <b>{active} case</b> · {projYears.length ? `${projYears[0]}–${projYears[n - 1]}` : `${n} years`} · Rs crore</>}
+        title="Change the forecast"
+        purpose={<>Pick an input in the table to see its history and the rule behind it, then drag the blue line or type a value.
+          Edits change the <b>{active}</b> case (bear is cautious, base central, bull hopeful); every page recalculates. Recalculating never calls AI.</>}
+        next={<a className="btn" href="#draft">Draft from documents</a>} />
+      <Toc page="forecast" />
       <p className="status-line" aria-live="polite">
         {balanced && <span className="ok">Balance sheet balances in every projected year</span>}
         {offIdx >= 0 && (roundingOnly
@@ -184,11 +167,30 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
           : <span className="bad" role="alert">Balance check fails in {projYears[offIdx]} by Rs {money(off)} cr</span>)}
       </p>
 
-      <DraftPanel parsed={parsed} doc={doc} d={draft} />
+      {upgrades.length > 0 && (
+        <div className="src-upgrade" role="status">
+          <p className="small">The filings and approved notes moved these defaults:{' '}
+            {upgrades.map((u, i) => <span key={u.key}>{i > 0 && '; '}{u.label.toLowerCase()} now{' '}
+              <span className="pencil-num">{fmt(u.to, u.kind)}</span> (base uses {fmt(u.from, u.kind)})</span>)}.
+            Your assumptions haven’t changed.</p>
+          <button type="button" onClick={onApply}>Use the new defaults in base, bull and bear</button>
+        </div>
+      )}
 
-      <div className="mgrid">
+      <details className="fold" id="draft" open={waiting || undefined}>
+        <summary><span><b>Let the documents set the inputs</b> · AI reads your annual reports and call transcripts and
+          proposes every input with a quote; rules check it; you accept.</span>{waiting && <span className="tag prop">Waiting for you</span>}</summary>
+        <DraftPanel parsed={parsed} doc={doc} d={draft} />
+      </details>
+
+      <div className="mgrid" id="inputs">
         <section aria-labelledby="inputs-h">
-          <h2 id="inputs-h" className="sr">Assumptions</h2>
+          <div className="inputs-head">
+            <h2 id="inputs-h" className="m-h2">Inputs · {active} case</h2>
+            <p className="small">Bull and bear start from base with revenue growth ± 3 pp and EBITDA margin ± 1.5 pp.{' '}
+              <button type="button" className="link" onClick={copyBase}>Copy base to bull and bear</button>{' · '}
+              <button type="button" className="link" onClick={resetActive}>Reset {active} to the rule defaults</button></p>
+          </div>
           <div className="atab" role="list" aria-label={`Assumptions, ${active} case. Choose one to see its evidence and edit it.`}>
             <div className="arow head" aria-hidden="true"><span>Input</span><span>{shortYear(histYears[0])}–{shortYear(histYears[nHist - 1]).slice(2)} → used</span><span>Used</span><span>{histYears[nHist - 1]} · range</span><span>Source</span></div>
             {GROUPS.map(([group, keys]) => (
@@ -220,7 +222,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
         </section>
 
         <aside className="panel" aria-labelledby="panel-h">
-          <p className="label">Evidence for the selected input</p>
+          <p className="label">The selected input</p>
           <h2 id="panel-h" ref={panel} tabIndex={-1}>{byKey[selKey][1].replace(/ \(history incl\. exceptionals\)/, '')}{' '}
             <span className="num ours">{fmt(valueOf(selKey).start, kindOf(selKey))}</span></h2>
           <div className="card">
@@ -247,26 +249,18 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
           </div>
           {(flags.length > 0 || lit) && <div className="card flag">
             <div className="card-h"><span>Flag</span><span className="tag flag">{lit?.status === 'red' || flags.some(f => f.year === histYears[nHist - 1]) ? 'High' : 'Watch'}</span></div>
-            {flags.map(f => <p key={f.year} className="small">{f.note}. The default {flags.length ? 'may carry it; see Evidence to leave the year out or explain it.' : ''}</p>)}
+            {flags.map(f => <p key={f.year} className="small">{f.note}. The default may carry it; in Checks you can leave the year out or explain it.</p>)}
             {lit && <p className="small">{lit.fact}. {lit.rule}.</p>}
-            <button type="button" className="link small" onClick={() => go('evidence', flags.length ? 'oneoffs' : lit!.id)}>Open in Evidence</button>
+            <a className="go small" href={href('checks', flags.length ? 'unusual' : lit!.id)}>See it in Checks</a>
           </div>}
           <div className="card doclist">
-            <div className="card-h"><span>Documents</span></div>
-            <ul>
-              <li><span className="ok">✓</span> Screener export, {histYears[0]}–{histYears[nHist - 1]}</li>
-              <li><span className={doc.filings.length ? 'ok' : 'dim'}>{doc.filings.length ? '✓' : '○'}</span>{' '}
-                {doc.filings.length ? `${doc.filings.length} XBRL filing${doc.filings.length > 1 ? 's' : ''}` : 'No XBRL filing.'}{' '}
-                <button type="button" className="link small" onClick={() => go('evidence', 'src-head')}>Attach XBRL</button></li>
-              <li><span className={doc.reports.length ? 'ok' : 'dim'}>{doc.reports.length ? '✓' : '○'}</span>{' '}
-                {doc.reports.length ? doc.reports.map(r => `${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}`).join(', ') : 'No annual report, transcript or presentation.'}{' '}
-                <button type="button" className="link small" onClick={() => go('evidence', 'src-ar-head')}>Attach PDF</button></li>
-            </ul>
+            <p className="small"><b>{nDocs} of 4 documents</b> attached: the Screener export{doc.filings.length ? ', XBRL filings' : ''}{doc.reports.length ? `, ${doc.reports.map(r => `${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}`).join(', ')}` : ''}.{' '}
+              <a className="go" href={href('checks', 'documents')}>Add documents</a></p>
           </div>
         </aside>
       </div>
 
-      <section className="m-sec" aria-labelledby="proj-h" id="a-statements">
+      <section className="m-sec" aria-labelledby="proj-h" id="projection">
         <h2 id="proj-h" className="m-h2">Projection <span className="dim">{histYears[0]}–{histYears[nHist - 1]} reported · {projYears[0] ?? ''}{projYears.length ? `–${projYears[n - 1]}` : ''} {active} case</span></h2>
         {proj && <Readout hist={hist} proj={proj} histYear={histYears[nHist - 1]} projYear={projYears[n - 1]} n={n}
           ttm={parsed.ttm && Date.parse(parsed.ttm.end) > Date.parse(company.dates[nHist - 1]) ? parsed.ttm : null} />}
@@ -285,18 +279,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
             <Chart title={m[1]} years={years} values={rows.map(m[2])} nHist={nHist} others={others} />
           </div>
         </div>
-        <Statements layout={layout} years={years} rows={rows} nHist={nHist}
-          hide={sources?.basis === 'cogs' ? undefined : new Set(['cogs'])}
-          quarterly={company.quarters?.dates.length ? {
-            quarters: company.quarters, ttm: parsed.ttm ?? null, ttmPrev: parsed.ttm_prev ?? null,
-            fy: histYears[nHist - 1], last: hist[nHist - 1], prev: nHist > 1 ? hist[nHist - 2] : null,
-          } : null} />
-      </section>
-
-      <section className="m-sec" id="a-valuation" aria-label="Valuation">
-        <ValuationPanel inputs={valuation} defaults={parsed.valuation} v={proj ? projection!.valuation : null}
-          market={company.market} active={active} asOf={histYears[nHist - 1]} next={projYears[0]} growth={a.growth} n={n}
-          onChange={f => setDoc(d => ({ ...d, valuation: f(d.valuation) }))} />
+        <p className="small">Every line year by year: <a href={href('statements')}>the full statements</a>. What it is worth: <a href={href('valuation')}>Valuation</a>.</p>
       </section>
     </>
   )

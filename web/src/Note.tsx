@@ -2,7 +2,8 @@ import { useRef, useState, type ReactNode } from 'react'
 import Ruler from './Ruler'
 import { SEV, bySeverity } from './Evidence'
 import { FlagNoteView, useAi } from './Sources'
-import type { Go } from './App'
+import { FundStrip } from './Fundamentals'
+import { useHref } from './route'
 import {
   api, fmt, money, postJson, rs, when, type Cagr, type Impact, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
   type Path, type Projection, type RuleCheck, type Row, type ThesisNote, type ValInputs, type Valuation,
@@ -32,14 +33,19 @@ function Cite({ n, src, children, plain, uid }: { n: number; src: string; childr
     <span className="cite">
       <span className={plain ? undefined : 'num'}>{children}</span>
       <sup><button type="button" className="fnref" aria-describedby={id} title={src}
-        onClick={() => { const el = document.getElementById(`fn-${n}`); el?.scrollIntoView({ block: 'center' }); el?.focus() }}>
+        onClick={() => {
+          const el = document.getElementById(`fn-${n}`)
+          const d = el?.closest('details')
+          if (d) d.open = true // the sources sit in a disclosure at the foot of the page
+          el?.scrollIntoView({ block: 'center' }); el?.focus()
+        }}>
         {n}<span className="sr"> (note {n})</span></button></sup>
       <span className="tip" role="tooltip" id={id}>{src}</span>
     </span>
   )
 }
 
-interface Props { parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null; go: Go }
+interface Props { parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null }
 
 const refKey = (r: NoteRef) => (typeof r === 'string' ? r : JSON.stringify(r))
 /** What a ref stands for, as the note was written: the fact's text, or the file, page and quote. */
@@ -55,7 +61,7 @@ const nums = (t: string) => (t.match(/\d[\d,]*(?:\.\d+)?/g) ?? []).map(x => x.re
 /** AI prose with every number in mono; a number its refs back gets a footnote and its source on hover or focus.
  * ponytail: a number is tied to the first ref whose text has the same number as written; a rounded one gets no
  * footnote. The rules already checked every number against the facts and quotes; this only picks the footnote */
-function Prose({ text, refs, tn, refN, uid }: { text: string; refs: NoteRef[]; tn: ThesisNote; refN: Map<string, number>; uid: string }) {
+export function Prose({ text, refs, tn, refN, uid }: { text: string; refs: NoteRef[]; tn: ThesisNote; refN: Map<string, number>; uid: string }) {
   const parts = text.split(/((?<![\w.])\d[\d,]*(?:\.\d+)?(?:%|x\b)?)/)
   return <>{parts.map((p, i) => {
     if (i % 2 === 0 || /^(19|20)\d\d$/.test(p)) return p
@@ -69,7 +75,10 @@ function Prose({ text, refs, tn, refN, uid }: { text: string; refs: NoteRef[]; t
   })}</>
 }
 
-export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
+/** Overview: the verdict first, then the business in five numbers, price against value, the checks, the thesis and
+ * risks next to the key numbers, and where to go deeper. The how-it-is-valued detail lives on Valuation. */
+export default function Note({ parsed, doc, setDoc, projection }: Props) {
+  const href = useHref()
   const { company, years } = parsed
   const hist = parsed.hist ?? company.hist
   const name = subject(company.name)
@@ -98,15 +107,15 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
   const last = years[years.length - 1]
 
   // footnotes, numbered in reading order
-  const notes: { kind: string; text: ReactNode; quote?: string; to?: () => void }[] = []
-  const cite = (kind: string, text: ReactNode, quote?: string, to?: () => void) => { notes.push({ kind, text, quote, to }); return notes.length }
-  const nImplied = implied == null ? 0 : cite('Computed', <>Reverse DCF: the flat revenue growth, every projected year, at which base value equals the price; searched from −30% to +80%, other inputs as set.</>, undefined, () => go('evidence', 'verdict'))
-  const nValue = cite('Computed', <>DCF of free cash flow to firm, base, bear and bull cases; WACC {v ? pc(v.wacc) : '–'}, terminal growth {v ? pc(v.g) : '–'}, valued at the {last} year end.</>, undefined, () => go('model', 'valuation'))
+  const notes: { kind: string; text: ReactNode; quote?: string; to?: string }[] = []
+  const cite = (kind: string, text: ReactNode, quote?: string, to?: string) => { notes.push({ kind, text, quote, to }); return notes.length }
+  const nImplied = implied == null ? 0 : cite('Computed', <>Reverse DCF: the flat revenue growth, every projected year, at which base value equals the price; searched from −30% to +80%, other inputs as set.</>, undefined, href('checks', 'verdict'))
+  const nValue = cite('Computed', <>DCF of free cash flow to firm, base, bear and bull cases; WACC {v ? pc(v.wacc) : '–'}, terminal growth {v ? pc(v.g) : '–'}, valued at the {last} year end.</>, undefined, href('valuation'))
   // the written note's refs, in reading order: facts (computed) and quotes (files), each a footnote linking to its evidence
   const tn = doc.note
   const refN = new Map<string, number>()
-  const factTo = (k: string) => (k.startsWith('flag_') ? () => go('evidence', k.slice(5)) : k.startsWith('in_') ? () => go('model', k.slice(3))
-    : k.startsWith('oneoff_') ? () => go('evidence', 'oneoffs') : () => go('model', 'valuation'))
+  const factTo = (k: string) => (k.startsWith('flag_') ? href('checks', k.slice(5)) : k.startsWith('in_') ? href('forecast', k.slice(3))
+    : k.startsWith('oneoff_') ? href('checks', 'unusual') : href('valuation'))
   const showCagr = value != null && price != null && implied != null && bestN != null
   const nCagr = showCagr ? cite('Reported', <>Revenue (Screener export, Sales row): {runs.length} rolling {WORDS[hz] ?? hz}-year window{runs.length > 1 ? 's' : ''} from {years[0]}; fastest {bestN!.from}–{bestN!.to}.</>) : 0
   const stale = !!tn && projection?.inputs_hash != null && projection.inputs_hash !== tn.inputs_hash
@@ -117,24 +126,24 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
     const k = refKey(r), s = refSource(tn, r)
     if (refN.has(k) || !s) continue
     refN.set(k, cite(s.file ? `File p.${s.page}` : 'Computed', s.text, s.quote,
-      s.file ? () => go('evidence', 'src-ar-head') : factTo(k)))
+      s.file ? href('checks', 'src-ar-head') : factTo(k)))
   }
   const P = (text: string, refs: NoteRef[], uid: string) => (tn ? <Prose text={text} refs={refs} tn={tn} refN={refN} uid={uid} /> : null)
 
   // --- verdict ---
   let h1: ReactNode, stand: ReactNode = null
   // a dead end names its fix and links to it (App's anchor falls back to the element id, so focus lands on the input)
-  const fix = (to: string, label: string) => <> <button type="button" className="link" onClick={() => go('model', to)}>{label}</button></>
+  const fix = (to: string, label: string) => <> <a href={to === 'capex_pct' ? href('forecast', to) : href('valuation', to === 'valuation' ? '' : to)}>{label}</a></>
   if (value == null) {
-    const why = !v ? 'the model is still calculating, or the inputs gave an error (see Model).'
-      : v.error ?? sv?.error ?? (v.shares == null ? 'there is no share count. Type one under Model, Valuation.' : 'see Model, Valuation.')
+    const why = !v ? 'the model is still calculating, or the inputs gave an error (see the line at the top).'
+      : v.error ?? sv?.error ?? (v.shares == null ? 'there is no share count. Type one on the Valuation page.' : 'see the Valuation page.')
     const to = !v ? null : !v.error && v.shares == null ? 'v-shares' : !v.error && sv?.error?.startsWith('Final-year free cash flow') ? 'capex_pct' : 'valuation'
     h1 = <>No value yet.</>
     stand = <>Our base case has no value per share: {why}{to && fix(to, to === 'v-shares' ? 'Type the share count' : to === 'capex_pct' ? 'Open capex' : 'Open Valuation')} The
       rule checks and key numbers below still apply.</>
   } else if (price == null) {
     h1 = <>Our base value is <span className="ours">Rs {rs(value)}</span> a share.</>
-    stand = <>There’s no share price in this file, so nothing to compare it with. Type one under Model, Valuation.{fix('v-price', 'Type a price')}</>
+    stand = <>There’s no share price in this file, so nothing to compare it with.{fix('v-price', 'Type a price')}</>
   } else if (implied != null) {
     h1 = <>The price needs <Cite n={nImplied} src="Reverse DCF on our base case, computed by rules" plain><span className="mkt">{pc(implied)}</span></Cite> growth a year. {isDefault
       ? <>{name} is doing <span className="ours">{pc(ours)}</span>.</>
@@ -168,10 +177,10 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
 
   return (
     <>
-      <section className="verdict" aria-labelledby="verdict-h">
+      <section className="verdict" aria-labelledby="page-h">
         <div>
-          <p className="label">Verdict · <b>base case</b> · computed by rules</p>
-          <h1 id="verdict-h">{h1}</h1>
+          <p className="label">Overview · <b>base case</b> · what the price assumes against what the business does</p>
+          <h1 id="page-h" tabIndex={-1}>{h1}</h1>
           {stand && <p className="lede">{stand}</p>}
         </div>
         {(sv?.upside != null || cells.length > 0 || top) && <aside className="sure" aria-label="How sure">
@@ -194,15 +203,19 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
             <span className="label">Hinges on</span>
             <p>{be[top.key as keyof typeof be]?.value != null
               ? <>{top.label}. At <span className="num">{unit(top.key, be[top.key as keyof typeof be]!.value!)}</span> instead of our <span className="num">{unit(top.key, oursOf(top.key))}</span>, the price is fair.</>
-              : <>{top.label}: {stepText(top.key, top.step)} either way moves our value between <span className="num ours">Rs {rs(Math.min(top.down ?? top.up!, top.up ?? top.down!))}</span> and <span className="num ours">Rs {rs(Math.max(top.down ?? top.up!, top.up ?? top.down!))}</span>.</>}</p>
+              : <>{top.label}: {stepText(top.key, top.step)} either way moves our value between <span className="num ours">Rs {rs(Math.min(top.down ?? top.up!, top.up ?? top.down!))}</span> and <span className="num ours">Rs {rs(Math.max(top.down ?? top.up!, top.up ?? top.down!))}</span>.</>}{' '}
+              <a className="go" href={href('valuation', 'hinges')}>What moves value</a></p>
           </div>}
         </aside>}
       </section>
+
+      <FundStrip parsed={parsed} />
 
       {value != null && (
         <section className="instrument" aria-labelledby="ruler-h">
           <header>
             <h2 id="ruler-h" className="label">Price against value · <b>Rs a share</b>, and the growth each value needs</h2>
+            <a className="go" href={href('valuation')}>How we value it</a>
             <div className="legend" aria-hidden="true">
               <span><i className="lg-band" />Our range, bear to bull</span>
               <span><i className="lg-mkt" />Market price</span>
@@ -214,58 +227,46 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
           <p className="read">
             <span>Lower scale: five-year revenue growth each value needs, other inputs at base (margin {pc(avg(base.ebitda_margin))},
               WACC {pc(v!.wacc)}, terminal {pc(v!.g)}). Red hatching: growth faster than the best five years on record.</span>
-            <button type="button" className="link" onClick={() => go('evidence', 'verdict')}>How this is computed</button>
+            <a href={href('checks', 'verdict')}>How this is computed</a>
           </p>
         </section>
       )}
 
-      <Strip checks={checks} go={go} />
+      <Strip checks={checks} />
 
-      <div className="cols">
+      <div className="ov-cols">
         <div className="col">
           <Thesis doc={doc} setDoc={setDoc} tn={tn} stale={stale} P={P} refN={refN} />
-          <Risks parsed={parsed} doc={doc} go={go} tn={tn} P={P} />
+          <Risks parsed={parsed} doc={doc} tn={tn} P={P} />
         </div>
-
         <div className="col">
-          {nb && nb.impact.length > 0 && value != null && <Tornado impact={nb.impact.slice(0, 5)} base={value} price={price} oursOf={oursOf} />}
-          {price != null && nb && <BreakEvens be={be} price={price} oursOf={oursOf} c3={c3} hist={hist} v={v!} vi={doc.valuation} beta0={parsed.valuation.beta} />}
-        </div>
-
-        <div className="col side">
-          <KeyNumbers parsed={parsed} proj={projection?.scenarios.base[0] ?? null} next={projection?.years[0]} checks={checks} v={v} go={go} />
-          {value != null && v?.shares != null && sv?.pv_sum != null && (() => { const b = (x: number) => (Math.abs(value) >= 100 ? money(x) : rs(x)); return <section className="sec" aria-labelledby="bridge-h">
-            <h2 id="bridge-h" className="label sec-label"><span>Our value, built up · <b>Rs a share</b></span></h2>
-            <table className="keys">
-              <tbody>
-                <tr><th scope="row">Cash flows {projection!.years[0]}–{projection!.years[projection!.years.length - 1].slice(-3)}</th><td className="num">{b(sv.pv_sum / v.shares)}</td></tr>
-                <tr><th scope="row">Terminal value</th><td className="num">{b(sv.pv_tv! / v.shares)}</td></tr>
-                <tr><th scope="row">{v.cash + v.investments - v.borrowings >= 0 ? 'Net cash' : 'Net debt'}</th><td className="num">{b((v.cash + v.investments - v.borrowings) / v.shares)}</td></tr>
-                {(sv.minority ?? 0) > 0 && <tr><th scope="row">Minority interest</th><td className="num">{b(-sv.minority! / v.shares)}</td></tr>}
-                <tr className="tot"><th scope="row">Base value</th><td className="num ours">{b(value)}</td></tr>
-                {price != null && <tr><th scope="row">Price {price >= value ? 'adds' : 'is short by'}</th><td className="num mkt">{b(Math.abs(price - value))}</td></tr>}
-              </tbody>
-            </table>
-            <p className="small-note">{sv.tv_share != null && <>{pc(sv.tv_share)} of value is terminal. </>}
-              <button type="button" className="link" onClick={() => go('model', 'bridge')}>Open the bridge</button></p>
-          </section> })()}
+          <KeyNumbers parsed={parsed} proj={projection?.scenarios.base[0] ?? null} next={projection?.years[0]} checks={checks} v={v} />
         </div>
       </div>
 
-      {nb && value != null && price != null && <Change impact={nb.impact} base={value} price={price} oursOf={oursOf} v={v!} be={be} tn={tn} P={P} />}
+      <section className="sec deeper" aria-labelledby="next-h">
+        <h2 id="next-h" className="label sec-label"><span>Go deeper</span></h2>
+        <div className="onward">
+          <a href={href('forecast')}><b>Change the forecast</b><span>Growth {pc(avg(base.growth))}, margin {pc(avg(base.ebitda_margin))}: every input, where it came from, and a line to drag.</span></a>
+          <a href={href('valuation', 'gap')}><b>What would close the gap</b><span>{gapText(nb?.impact ?? [], value, price, oursOf)}</span></a>
+          <a href={href('checks', 'documents')}><b>Add documents</b><span>{(parsed.forensic ?? []).some(f => f.severity === 'not_checked' && f.needs)
+            ? `An annual report unlocks ${(parsed.forensic ?? []).filter(f => f.severity === 'not_checked' && f.needs).length} more checks and cited explanations.`
+            : 'Annual reports and call transcripts let the app draft inputs and explain flags, with quotes.'}</span></a>
+        </div>
+      </section>
 
-      <section className="notes" aria-labelledby="notes-h">
-        <h2 id="notes-h" className="label sec-label"><span>Notes · <b>sources for the numbers above</b></span></h2>
+      <details className="notes audit">
+        <summary>Sources for the numbers on this page ({notes.length})</summary>
         <ol>
           {notes.map((n, i) => (
             <li key={i} id={`fn-${i + 1}`} tabIndex={-1}>
               <span className={`kind ${n.kind === 'Computed' ? 'rule' : 'file'}`}>{n.kind}</span>{n.text}
               {n.quote && <q className="quote">{n.quote}</q>}
-              {n.to && <> <button type="button" className="link" onClick={n.to}>Open</button></>}
+              {n.to && <> <a href={n.to}>Open</a></>}
             </li>
           ))}
         </ol>
-      </section>
+      </details>
 
       <footer className="foot">
         <p>Analysis, not a recommendation. Built from a Screener.in export and the rules in this app; no management access
@@ -283,25 +284,37 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
 
 const sgn = (d: number) => (d === 0 ? 'as set' : `${d > 0 ? '+' : '−'}${+(Math.abs(d) * 100).toFixed(1)} pp`)
 
-/** Every rule check as a cell: red, amber, clear, then the ones waiting for a filing. Each opens its evidence. */
-function Strip({ checks, go }: { checks: RuleCheck[]; go: Go }) {
+/** Where a strip cell's evidence is on the Checks page. */
+const checkAnchor = (id: string) => (id.startsWith('oneoff-') ? 'unusual' : id)
+
+/** The rule checks: each lit one as its own cell, then one cell for the clear ones and one for those waiting on a
+ * filing. Every cell is a link to its evidence on Checks. */
+function Strip({ checks }: { checks: RuleCheck[] }) {
+  const href = useHref()
   if (!checks.length) return null
-  const count = (s: RuleCheck['status']) => checks.filter(c => c.status === s).length
-  const red = count('red'), amber = count('amber'), clear = count('clear'), filing = count('filing')
+  const lit = checks.filter(c => c.status === 'red' || c.status === 'amber')
+  const clear = checks.filter(c => c.status === 'clear'), filing = checks.filter(c => c.status === 'filing')
+  const red = lit.filter(c => c.status === 'red').length, amber = lit.length - red
   return (
     <section className="annun" aria-labelledby="flags-h">
-      <header>
-        <h2 id="flags-h" className="label">Rule checks · <b>{red} red · {amber} amber · {clear} clear{filing ? ` · ${filing} need a filing` : ''}</b></h2>
-        <p>Each cell opens its evidence. Rules light them; explanations come from the filings you attach.</p>
-      </header>
+      <div className="strip-head">
+        <h2 id="flags-h" className="label">Rule checks · <b>{red} red · {amber} amber · {clear.length} clear{filing.length ? ` · ${filing.length} need the annual report` : ''}</b></h2>
+        <a className="go" href={href('checks')}>All checks</a>
+      </div>
       <div className="cells">
-        {checks.map((c, i) => (
-          <button key={c.id} type="button" className={`cell ${c.status}${c.severity === 'low' ? ' low' : ''}`} style={{ animationDelay: `${i * 30}ms` }}
-            aria-label={`${SEVERITY[c.status]}${LOW(c)}: ${c.name}, ${c.fact}. Open its evidence.`} onClick={() => go('evidence', c.id)}>
+        {lit.map((c, i) => (
+          <a key={c.id} href={href('checks', checkAnchor(c.id))} className={`cell ${c.status}${c.severity === 'low' ? ' low' : ''}`} style={{ animationDelay: `${i * 30}ms` }}
+            aria-label={`${SEVERITY[c.status]}${LOW(c)}: ${c.name}, ${c.fact}. Open its evidence.`}>
             <span className="k">{c.name}</span>
             <span className="v">{c.fact}</span>
-          </button>
+          </a>
         ))}
+        {clear.length > 0 && <a className="cell clear" href={href('checks', 'clear')}>
+          <span className="k">{clear.length} check{clear.length > 1 ? 's' : ''} clear</span>
+          <span className="v">{clear.slice(0, 3).map(c => c.name).join('; ')}{clear.length > 3 ? '…' : ''}</span></a>}
+        {filing.length > 0 && <a className="cell filing" href={href('checks', 'src-ar-head')}>
+          <span className="k">{filing.length} not checked yet</span>
+          <span className="v">Attach the annual report →</span></a>}
       </div>
     </section>
   )
@@ -309,7 +322,8 @@ function Strip({ checks, go }: { checks: RuleCheck[]; go: Go }) {
 
 /** The forensic flags, worst first, one plain sentence each with any approved explanation (AI-written, cited); then
  * the unusual years and data issues. Each line opens its evidence. */
-function Risks({ parsed, doc, go, tn, P }: { parsed: Parsed; doc: ModelDoc; go: Go; tn: ThesisNote | null; P: Pr }) {
+function Risks({ parsed, doc, tn, P }: { parsed: Parsed; doc: ModelDoc; tn: ThesisNote | null; P: Pr }) {
+  const href = useHref()
   const recent = parsed.years.slice(-3)
   const oneoffs = parsed.oneoffs.filter(o => recent.includes(o.year))
   const issues = parsed.checks
@@ -327,8 +341,8 @@ function Risks({ parsed, doc, go, tn, P }: { parsed: Parsed; doc: ModelDoc; go: 
             <li key={f.key}>
               <p><span className={`sev ${f.severity}`}>{SEV[f.severity]}</span> {f.detail}</p>
               {n && <FlagNoteView note={n} />}
-              <button type="button" className="link small" onClick={() => go('evidence', f.key)}
-                aria-label={`${f.title}: ${n ? 'evidence' : 'evidence, and explain it'}`}>{n ? 'Evidence' : 'Evidence · explain it'}</button>
+              <a className="small" href={href('checks', f.key)}
+                aria-label={`${f.title}: ${n ? 'evidence' : 'evidence, and explain it'}`}>{n ? 'Evidence' : 'Evidence · explain it'}</a>
             </li>
           )
         })}
@@ -342,26 +356,26 @@ function Risks({ parsed, doc, go, tn, P }: { parsed: Parsed; doc: ModelDoc; go: 
                 <p className="serif">{n.summary}</p>
                 {n.quote && <p className="src-line"><span className="kind file">File</span>{n.file}, p.{n.page}: <q>{n.quote}</q></p>}
               </div>}
-              {!n && <button type="button" className="link small" onClick={() => go('evidence', 'oneoffs')}
-                aria-label={`Explain ${o.year} from the annual report`}>Explain it from the annual report</button>}
+              {!n && <a className="small" href={href('checks', 'unusual')}
+                aria-label={`Explain ${o.year} from the annual report`}>Explain it from the annual report</a>}
             </li>
           )
         })}
         {issues.length > 0 && <li><p>{issues.length} issue{issues.length > 1 ? 's' : ''} in the reported data, e.g. {issues[0]}.</p>
-          <button type="button" className="link small" onClick={() => go('evidence', 'data')}>See them all</button></li>}
+          <a className="small" href={href('checks', 'data')}>See them all</a></li>}
       </ul>
       {tn && <div className="ai-note">
         <span className="who">AI-written · checked against the model</span>
         <ul className="ai-risks">{tn.risks.map((r, i) => <li key={i} className="serif">{P(r.text, r.refs, `r${i}`)}</li>)}</ul>
       </div>}
       {waiting.length > 0 && <p className="small-note">Not checked yet: {waiting.map(f => f.title.toLowerCase()).join(', ')}.{' '}
-        <button type="button" className="link" onClick={() => go('evidence', 'src-ar-head')}>Attach the annual report</button></p>}
+        <a href={href('checks', 'src-ar-head')}>Attach the annual report</a></p>}
     </section>
   )
 }
 
 /** One input at a time, one step each way: grey bar = value falls, blue = value rises, from the base line. */
-function Tornado({ impact, base, price, oursOf }: { impact: Impact[]; base: number; price: number | null; oursOf: (k: string) => number }) {
+export function Tornado({ impact, base, price, oursOf }: { impact: Impact[]; base: number; price: number | null; oursOf: (k: string) => number }) {
   const vals = impact.flatMap(d => [d.down, d.up]).filter((x): x is number => x != null)
   const lo0 = Math.min(base, ...vals), hi0 = Math.max(base, ...vals)
   const pad = (hi0 - lo0 || 1) * 0.22 // room for the end labels, so they never clip
@@ -404,7 +418,7 @@ function Tornado({ impact, base, price, oursOf }: { impact: Impact[]; base: numb
   )
 }
 
-function BreakEvens({ be, price, oursOf, c3, hist, v, vi, beta0 }: {
+export function BreakEvens({ be, price, oursOf, c3, hist, v, vi, beta0 }: {
   be: NonNullable<Valuation['note']>['breakevens']; price: number; oursOf: (k: string) => number; c3: Cagr[]; hist: Row[]; v: Valuation; vi: ValInputs; beta0: number
 }) {
   const margins = hist.map(h => (h.revenue ? (h.ebitda ?? 0) / h.revenue : null)).filter((x): x is number => x != null)
@@ -449,9 +463,10 @@ function BreakEvens({ be, price, oursOf, c3, hist, v, vi, beta0 }: {
 }
 
 /** Last reported year against the 3 years before (rules), then our first projected year in blue. */
-function KeyNumbers({ parsed, proj, next, checks, v, go }: {
-  parsed: Parsed; proj: Row | null; next?: string; checks: RuleCheck[]; v: Valuation | null; go: Go
+function KeyNumbers({ parsed, proj, next, checks, v }: {
+  parsed: Parsed; proj: Row | null; next?: string; checks: RuleCheck[]; v: Valuation | null
 }) {
+  const href = useHref()
   const keys = parsed.key_numbers ?? []
   if (!keys.length) return null
   const hist = parsed.hist ?? parsed.company.hist, lastH = hist[hist.length - 1]
@@ -471,7 +486,9 @@ function KeyNumbers({ parsed, proj, next, checks, v, go }: {
     return c && (c.status === 'red' || c.status === 'amber') ? c : null
   }
   const show = (x: number | null, kind: string) => (x == null ? '–' : kind === 'x' ? `${x.toFixed(2)}×` : kind === 'days' ? `${Math.round(x)}` : fmt(x, 'pct'))
-  const DRIVER: Record<string, string> = { growth: 'growth', ebitda_margin: 'ebitda_margin', dso: 'dso' }
+  // each measure opens where it is set (an input) or where it is reported (a statement row)
+  const TO: Record<string, string> = { growth: href('forecast', 'growth'), ebitda_margin: href('forecast', 'ebitda_margin'), dso: href('forecast', 'dso'),
+    pat_growth: href('statements', 'pat'), roce: href('statements', 'roce', 'ratios'), cash_conversion: href('statements', 'cfo', 'cash-flow') }
   const pe = v?.scenarios.base.multiples
   return (
     <section className="sec" aria-labelledby="keys-h">
@@ -484,14 +501,14 @@ function KeyNumbers({ parsed, proj, next, checks, v, go }: {
             const f = flagged(k.key)
             return (
               <tr key={k.key}>
-                <th scope="row"><button type="button" className="link quiet" onClick={() => go('model', DRIVER[k.key] ?? 'statements')}>{k.label}</button></th>
+                <th scope="row"><a className="quiet" href={TO[k.key] ?? href('statements')}>{k.label}</a></th>
                 <td className="num">{f ? <span className="pen">{show(k.last, k.kind)}<svg aria-hidden="true" viewBox="0 0 100 40" preserveAspectRatio="none"><ellipse cx="50" cy="20" rx="47" ry="16" /></svg><span className="sr"> (flagged: {f.fact})</span></span> : show(k.last, k.kind)}</td>
                 <td className="num dim">{show(k.typical, k.kind)}</td>
                 {p && <td className="num ours">{show(nextOf[k.key] ?? null, k.kind)}</td>}
               </tr>
             )
           })}
-          {pe && pe.price_last.pe != null && <tr><th scope="row"><button type="button" className="link quiet" onClick={() => go('model', 'valuation')}>P/E at price</button></th>
+          {pe && pe.price_last.pe != null && <tr><th scope="row"><a className="quiet" href={href('valuation', 'multiples')}>P/E at price</a></th>
             <td className="num">{pe.price_last.pe.toFixed(1)}×</td><td className="num dim">{v?.multiples?.median.pe != null ? `${v.multiples.median.pe.toFixed(1)}×` : '–'}</td>
             {p && <td className="num ours">{pe.price_next.pe != null ? `${pe.price_next.pe.toFixed(1)}×` : '–'}</td>}</tr>}
         </tbody>
@@ -502,7 +519,7 @@ function KeyNumbers({ parsed, proj, next, checks, v, go }: {
 }
 
 /** Computed moves toward and away from the price, from the one-step runs and the break-evens. */
-function Change({ impact, base, price, oursOf, v, be, tn, P }: {
+export function Change({ impact, base, price, oursOf, v, be, tn, P }: {
   impact: Impact[]; base: number; price: number; oursOf: (k: string) => number; v: Valuation; be: NonNullable<Valuation['note']>['breakevens']
   tn: ThesisNote | null; P: Pr
 }) {
@@ -627,4 +644,36 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
       </>}
     </section>
   )
+}
+
+/** Base value per share built up: the explicit years, the terminal value, net cash, minorities; the price's gap. */
+export function Bridge({ v, value, price, years }: { v: Valuation; value: number; price: number | null; years: string[] }) {
+  const sv = v.scenarios.base
+  if (v.shares == null || sv.pv_sum == null) return null
+  const b = (x: number) => (Math.abs(value) >= 100 ? money(x) : rs(x))
+  return (
+    <section className="sec" aria-labelledby="bridge-h" id="a-bridge" tabIndex={-1}>
+      <h3 id="bridge-h" className="label sec-label"><span>Base value, built up · <b>Rs a share</b></span></h3>
+      <table className="keys">
+        <tbody>
+          <tr><th scope="row">Cash flows {years[0]}–{years[years.length - 1].slice(-3)}</th><td className="num">{b(sv.pv_sum / v.shares)}</td></tr>
+          <tr><th scope="row">After {years[years.length - 1]} (terminal value)</th><td className="num">{b(sv.pv_tv! / v.shares)}</td></tr>
+          <tr><th scope="row">{v.cash + v.investments - v.borrowings >= 0 ? 'Net cash' : 'Net debt'}</th><td className="num">{b((v.cash + v.investments - v.borrowings) / v.shares)}</td></tr>
+          {(sv.minority ?? 0) > 0 && <tr><th scope="row">Minority interest</th><td className="num">{b(-sv.minority! / v.shares)}</td></tr>}
+          <tr className="tot"><th scope="row">Base value</th><td className="num ours">{b(value)}</td></tr>
+          {price != null && <tr><th scope="row">Price {price >= value ? 'adds' : 'is short by'}</th><td className="num mkt">{b(Math.abs(price - value))}</td></tr>}
+        </tbody>
+      </table>
+      {sv.tv_share != null && <p className="small-note">{pc(sv.tv_share)} of value comes from after the forecast years (terminal value).</p>}
+    </section>
+  )
+}
+
+/** The two one-step moves that bring our value closest to the price, for the Overview's "close the gap" card. */
+function gapText(impact: Impact[], base: number | null, price: number | null, oursOf: (k: string) => number) {
+  if (base == null || price == null || !impact.length) return 'Each input moved one step: which ones bring our value toward the price.'
+  const moves = impact.flatMap(d => ([[d.down, -1], [d.up, 1]] as const).filter(m => m[0] != null).map(([val, s]) => ({
+    val: val as number, text: `${d.label} ${s > 0 ? 'up' : 'down'} ${stepText(d.key, d.step)} to ${unit(d.key, oursOf(d.key) + s * d.step)}`,
+  }))).filter(m => Math.abs(price - m.val) < Math.abs(price - base)).sort((a, b) => Math.abs(price - a.val) - Math.abs(price - b.val)).slice(0, 2)
+  return moves.length ? moves.map(m => `${m.text}: Rs ${rs(m.val)}`).join('. ') + '.' : 'No single step moves our value toward the price.'
 }

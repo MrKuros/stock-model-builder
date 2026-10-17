@@ -1,0 +1,16 @@
+{
+  "name": "Stock Model Builder",
+  "short_name": "Stock Models",
+  "description": "Research notes, fundamentals and three-statement forecasts for Indian listed companies, from a Screener export.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#e6e9e5",
+  "theme_color": "#e6e9e5",
+  "icons": [
+    { "src": "/icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" },
+    { "src": "/icon-192.png", "type": "image/png", "sizes": "192x192", "purpose": "any" },
+    { "src": "/icon-512.png", "type": "image/png", "sizes": "512x512", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "type": "image/png", "sizes": "512x512", "purpose": "maskable" }
+  ]
+}
