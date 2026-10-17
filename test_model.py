@@ -247,6 +247,7 @@ def main():
     assert projs["bull"][-1]["revenue"] > proj[-1]["revenue"] > projs["bear"][-1]["revenue"]
 
     valuation_check(co, projs, ex)
+    note_check(co, projs, ex)
     library_check(tmp / "models", co, seeded)
     upgrade_check(tmp, co, excel=bool(shutil.which("soffice")))
 
@@ -863,6 +864,54 @@ def valuation_check(co, projs, ex):
     assert neg["equity"] < 0 and neg["minority"] == 0, (neg["equity"], neg["minority"])
 
 
+def note_check(co, projs, ex):
+    """The research note's numbers (4.1): drivers_impact ranks and moves the right way, break-evens plug back to
+    the price, the growth scale rises with growth, rolling CAGRs, key numbers and rule checks on the synthetic file."""
+    v = model.valuation(projs, co["hist"], {"price": 1000.0}, ex["base"], co["market"], ex, note=True)
+    nb, base = v["note"], v["scenarios"]["base"]["per_share"]
+    assert model.valuation(projs, co["hist"], None, ex["base"], co["market"], ex)["note"] is None, "only when asked"
+    imp = {d["key"]: d for d in nb["impact"]}
+    swings = [d["swing"] for d in nb["impact"]]
+    assert swings == sorted(swings, reverse=True) and len(imp) >= 8, nb["impact"]
+    rises = ("ebitda_margin", "g", "dpo", "ol_pct", "growth", "dep_pct")  # up = more value (dep: tax shield)
+    for k, d in imp.items():
+        lo, hi = (d["down"], d["up"]) if k in rises else (d["up"], d["down"])
+        assert lo < base < hi, (k, d, base)
+    assert imp["wacc"]["down"] == v["scenarios"]["base"]["grid"][1][2] and imp["g"]["up"] == v["scenarios"]["base"]["grid"][2][3]
+    assert abs(imp["ebitda_margin"]["up"] - v["scenarios"]["base"]["grid_gm"][2][3]) < 1e-9, "same step as the grid"
+    assert "payout" not in imp and "oi_pct" not in imp, "no effect on a cash-flow-to-firm value"
+    # break-evens: plugged back in (flat, every year), the value is the price
+    be = nb["breakevens"]
+    assert be["growth"]["value"] == v["scenarios"]["base"]["implied_growth"]
+    per = lambda a, val=None: model.valuation({"base": model.project(co["hist"], a, 5)}, co["hist"], val or {"price": 1000.0},  # noqa: E731
+                                              ex["base"], co["market"])["scenarios"]["base"]["per_share"]
+    for k in ("growth", "ebitda_margin"):
+        assert be[k]["value"] is not None and abs(per(dict(ex["base"], **{k: be[k]["value"]})) / 1000 - 1) < 1e-3, (k, be[k])
+    assert abs(per(ex["base"], {"price": 1000.0, "wacc_override": be["wacc"]["value"]}) / 1000 - 1) < 1e-3, be["wacc"]
+    # the price is twice our value: a lower WACC gets there; no terminal growth up to WACC - 0.5 pp does
+    assert be["wacc"]["value"] < v["wacc"] and be["g"]["value"] is None and be["g"]["range"][1] < v["wacc"], be
+    far = model.valuation(projs, co["hist"], {"price": 1e6}, ex["base"], co["market"], ex, note=True)["note"]["breakevens"]
+    assert {k: x["value"] for k, x in far.items()} == dict.fromkeys(far), "nothing in range reaches Rs 10 lakh"
+    gs = [y for _, y in nb["growth_scale"]]
+    assert all(a < b for a, b in zip(gs, gs[1:])), gs  # base fades capex to 8%, so faster growth adds value here
+    labels = model.labels(co["dates"])
+    c3 = model.cagrs(co["hist"], labels, 3)
+    assert len(c3) == 7 and all(abs(c["value"] - 0.12) < 1e-5 for c in c3) and c3[0]["from"] == "FY2016", c3
+    keys = {k["key"]: k for k in model.key_numbers(co["hist"], labels)}
+    assert abs(keys["growth"]["last"] - 0.12) < 1e-5 and abs(keys["ebitda_margin"]["typical"] - 0.2) < 1e-5, keys
+    checks = model.rule_checks(co["hist"], labels, [], [])
+    # synthetic CFO is 0.29x profit (its cash flow rows are made up): red; the rest clear, notes need a report
+    assert [(c["id"], c["status"]) for c in checks] == [("cash", "red"), ("dso", "clear"), ("debt", "clear"),
+        ("cover", "clear"), ("contingent", "filing"), ("related", "filing")], checks
+    odd = [dict(h) for h in co["hist"]]
+    odd[-1]["receivables"] *= 2.0  # receivable days double: red
+    flags = [{"year": "FY2025", "metric": "tax_rate", "value": 0.45, "typical": 0.25}]
+    got = model.rule_checks(odd, labels, flags, ["x"], {"ar:contingent:FY2025": {"total": 1e5}})
+    assert [(c["id"], c["status"]) for c in got][:5] == [("oneoff-tax_rate-FY2025", "red"), ("cash", "red"),
+        ("dso", "red"), ("data", "amber"), ("contingent", "amber")], got
+    assert model._inr(267021) == "2,67,021" and model._inr(-124) == "(124)" and model._inr(89185912) == "8,91,85,912"
+
+
 def library_check(root, co, scenarios):
     """Local model library: round trip, one file per company per day, ids can't leave root."""
     import server  # noqa: PLC0415 (pulls in FastAPI; only this check needs it)
@@ -882,15 +931,15 @@ def library_check(root, co, scenarios):
     old = server.ModelDoc.model_validate({"version": 3, "company": {k: company[k] for k in ("name", "dates", "hist")},
                                           "scenarios": scenarios})  # saved before market data and valuation existed
     assert old.company.market.price is None and old.company.market.price_hist == [], old.company.market
-    assert old.version == 5 and old.valuation.model_dump() == model.VALUATION, old
+    assert old.version == 6 and old.valuation.model_dump() == model.VALUATION, old
     assert old.company.quarters is None and (old.filings, old.proposals, old.notes) == ([], [], {}), old
-    # version 4 (Phases 1-2): opens as 5 with empty filings / proposals / notes and no quarters
+    # version 4 (Phases 1-2): opens as 6 with empty filings / proposals / notes, no quarters, empty Phase 4 blocks
     v4 = {"version": 4, "company": {k: company[k] for k in ("name", "dates", "hist", "market")}, "n": 5,
           "active": "bull", "scenarios": scenarios, "excluded_years": ["FY2020"], "saved_at": "2026-10-15T09:00:00",
           "valuation": model.VALUATION}
     up = server.ModelDoc.model_validate(v4).model_dump(mode="json")
-    assert up == {**v4, "version": 5, "company": {**v4["company"], "quarters": None}, "filings": [], "proposals": [],
-                  "notes": {}, "reports": []}, up
+    assert up == {**v4, "version": 6, "company": {**v4["company"], "quarters": None}, "filings": [], "proposals": [],
+                  "notes": {}, "reports": [], "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None}, up
     # saved before 3.4: no COGS line in the company, no cogs_pct / dpo in the scenarios. They come back as 0 (days stay
     # on revenue, payables stay in other liabilities) and the model projects exactly as it did
     pre = {k: {"start": x, "end": None} for k, x in PINS["synthetic"]["defaults"].items()}
@@ -919,9 +968,12 @@ def library_check(root, co, scenarios):
     fails(lambda _root: tiny.dcf(*tiny.projection()), 422)
     server.delete_model("old-co/2026-10-14", root)
     val = dict(model.VALUATION, beta=1.2, kd=0.085, mid_year=False, wacc_override=0.12, price=99.5, shares=3.25)
-    data = {"version": 5, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
-            "excluded_years": ["FY2020"], "saved_at": None, "valuation": val, "filings": [], "proposals": [],
-            "notes": {}, "reports": []}
+    # version 5 (Phase 3) opens as 6 with empty Phase 4 blocks
+    v5 = {"version": 5, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
+          "excluded_years": ["FY2020"], "saved_at": None, "valuation": val, "filings": [], "proposals": [],
+          "notes": {}, "reports": []}
+    assert server.ModelDoc.model_validate(v5).model_dump(mode="json") == {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None}
+    data = {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None}
     assert server.restatements(co, root) is None, "nothing saved yet: no comparison"
     doc = server.ModelDoc.model_validate(data)
     mid, at = server.save_model(doc, root, now=datetime(2026, 10, 15, 12, 41, 5))
@@ -938,6 +990,10 @@ def library_check(root, co, scenarios):
         ("test-industries-ltd/2026-10-16", "bear"), ("test-industries-ltd/2026-10-15", "bull")], listed
     want = model.project(co["hist"], model.expand(scenarios["bear"], 7), 7)[-1]["revenue"]
     assert listed[0]["revenue"] == want and listed[0]["n"] == 7 and listed[0]["year"] == "FY2032E", listed[0]
+    # the landing's coverage row: value range, reverse DCF on base, flag count (typed price 99.5, 3.25 cr shares)
+    vals = listed[0]["values"]
+    assert listed[0]["price"] == 99.5 and vals["bull"] > vals["base"] > vals["bear"] and listed[0]["why"] is None, listed[0]
+    assert listed[0]["flags"] == 1 and listed[0]["reviewed_at"] is None, listed[0]  # synthetic cash conversion: red
     (root / "test-industries-ltd" / "2026-10-14.json").write_text("{broken")  # skipped, not fatal
     assert len(server.list_models(root)) == 2
     fails(server.load_model, 422, "test-industries-ltd/2026-10-14")
@@ -953,7 +1009,7 @@ def library_check(root, co, scenarios):
     assert server.slug("Tata Motors Ltd.") == "tata-motors-ltd" and server.slug("दूध").startswith("company-")
     assert server.slug("../..").startswith("company-")
     # malformed documents are refused
-    for bad in ({**data, "version": 2}, {**data, "version": 6}, {**data, "active": "worst"},
+    for bad in ({**data, "version": 2}, {**data, "version": 7}, {**data, "active": "worst"},
                 {**data, "valuation": dict(val, shares=0)}, {**data, "valuation": dict(val, g=float("nan"))},
                 {**data, "scenarios": {k: v for k, v in scenarios.items() if k != "bull"}}):
         try:

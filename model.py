@@ -916,6 +916,97 @@ def detect_oneoffs(hist, labels, min_years=4):
     return sorted(out, key=lambda o: labels.index(o["year"]))
 
 
+def _inr(v, dp=0):
+    """Indian digit grouping, negatives in brackets: 267021 -> "2,67,021", -124 -> "(124)"."""
+    t = f"{abs(v):.{dp}f}"
+    whole, _, frac = t.partition(".")
+    if len(whole) > 3:
+        whole = re.sub(r"(\d)(?=(\d\d)+$)", r"\1,", whole[:-3]) + "," + whole[-3:]
+    t = whole + ("." + frac if frac else "")
+    return f"({t})" if round(v, dp) < 0 else t
+
+
+def _median_before(xs, years=3):
+    """Median of the `years` values before the last one (None skipped); None with fewer than 2."""
+    prev = [x for x in xs[-years - 1:-1] if x is not None]
+    return statistics.median(prev) if len(prev) >= 2 else None
+
+
+def key_numbers(hist, labels):
+    """What the numbers say: each measure's last reported year against the median of the three years before it.
+    [{key, label, kind, year, last, typical}]; cash conversion = CFO / net profit (blank when profit <= 0)."""
+    r = ratios(hist)
+    series = (("growth", "Revenue growth", "pct", [x["growth"] for x in r]),
+              ("ebitda_margin", "EBITDA margin", "pct", [x["ebitda_margin"] for x in r]),
+              ("pat_growth", "Net profit growth", "pct",
+               [None, *(_div(h["pat"], p["pat"]) - 1 if p["pat"] > 0 and h["pat"] is not None else None
+                        for p, h in zip(hist, hist[1:]))]),
+              ("roce", "ROCE", "pct", [h.get("roce") for h in hist]),
+              ("cash_conversion", "Cash conversion (CFO / profit)", "x",
+               [h["cfo"] / h["pat"] if h.get("cfo") is not None and h["pat"] > 0 else None for h in hist]),
+              ("dso", "Receivable days", "days", [x["dso"] for x in r]))
+    return [{"key": k, "label": lab, "kind": kind, "year": labels[-1], "last": xs[-1], "typical": _median_before(xs)}
+            for k, lab, kind, xs in series]
+
+
+def rule_checks(hist, labels, oneoffs, issues, notes=None):
+    """The note's rule-check strip: [{id, name, status (red | amber | clear | filing), fact, rule}], red first.
+    Rules only; thresholds are deliberately plain (ponytail: fixed cut-offs, per-sector bands in 4.3)."""
+    out, last, y = [], hist[-1], labels[-1]
+    recent = labels[-3:]
+    for o in oneoffs:  # unusual years among the last three, red when it's the latest
+        if o["year"] in recent:
+            name = dict((k, w) for k, w, _, _ in ONEOFF)[o["metric"]]
+            out.append({"id": f"oneoff-{o['metric']}-{o['year']}", "name": name[0].upper() + name[1:],
+                        "status": "red" if o["year"] == y else "amber",
+                        "fact": f"{_pct(o['value'])} in {o['year']}, typically {_pct(o['typical'])}",
+                        "rule": "More than 2 sigma (1.4826 x MAD) from the company's own median, and past a floor"})
+    if issues:
+        out.append({"id": "data", "name": "Reported data", "status": "amber",
+                    "fact": f"{len(issues)} issue{'s' * (len(issues) > 1)} in the export",
+                    "rule": "Assets = liabilities, lines add to totals, PBT - tax = profit, 12-month years"})
+    w = [h for h in hist[-3:] if h.get("cfo") is not None]
+    pat = sum(h["pat"] for h in w)
+    if w and pat > 0:
+        cc = sum(h["cfo"] for h in w) / pat
+        out.append({"id": "cash", "name": "Cash conversion", "status": "red" if cc < 0.5 else "amber" if cc < 0.8 else "clear",
+                    "fact": f"CFO {cc:.2f}x profit, last {len(w)} years",
+                    "rule": "Operating cash flow / net profit, summed over the last 3 years: below 0.8 amber, 0.5 red"})
+    dso = [x["dso"] for x in ratios(hist)]
+    typ = _median_before(dso)
+    if dso[-1] is not None and typ:
+        up = dso[-1] - typ
+        out.append({"id": "dso", "name": "Receivable days",
+                    "status": "red" if up > 30 and dso[-1] > typ * 1.3 else "amber" if up > 7 and dso[-1] > typ * 1.1 else "clear",
+                    "fact": f"{dso[-1]:.0f} days in {y}, 3-yr median {typ:.0f}",
+                    "rule": "Receivables x 365 / revenue against the 3 years before: +10% and 7 days amber, +30% and 30 days red"})
+    nd = _debt(last) - last["cash"] - last["investments"]
+    nd_e = nd / last["ebitda"] if last["ebitda"] > 0 else None
+    out.append({"id": "debt", "name": "Net debt" if nd > 0 else "Net cash",
+                "status": "clear" if nd <= 0 else "red" if nd_e is None or nd_e > 3.5 else "amber" if nd_e > 2 else "clear",
+                "fact": f"Rs {_inr(abs(nd))} cr" + (f", {nd_e:.1f}x EBITDA" if nd > 0 and nd_e is not None else ""),
+                "rule": "Borrowings + leases - cash - investments; net debt over 2x EBITDA amber, 3.5x (or negative EBITDA) red"})
+    ebit = last["pbt"] + last["interest"]
+    if last["interest"] > 0:
+        cov = ebit / last["interest"]
+        out.append({"id": "cover", "name": "Interest cover", "status": "red" if cov < 1.5 else "amber" if cov < 3 else "clear",
+                    "fact": f"{cov:.1f}x in {y}", "rule": "EBIT / interest: below 3x amber, 1.5x red"})
+    net_worth = last["share_cap"] + last["reserves"]
+    for topic, name, base, what, cut in (("contingent", "Contingent liabilities", net_worth, "net worth", 0.10),
+                                          ("related", "Related parties", last["revenue"], "revenue", 0.10)):
+        k = max((k for k in (notes or {}) if k.startswith(f"ar:{topic}:")), default=None)
+        t = k and isinstance(notes[k], dict) and notes[k].get("total")
+        if isinstance(t, (int, float)) and math.isfinite(t) and base > 0:
+            out.append({"id": topic, "name": name, "status": "amber" if t / base > cut else "clear",
+                        "fact": f"Rs {_inr(t)} cr, {_pct(t / base)} of {what} ({k.split(':')[2]})",
+                        "rule": f"Approved annual-report note against {what}: above {cut:.0%} amber"})
+        else:
+            out.append({"id": topic, "name": name, "status": "filing", "fact": "Needs the annual report",
+                        "rule": "Attach the annual report and read its notes (Evidence)"})
+    order = {"red": 0, "amber": 1, "clear": 2, "filing": 3}
+    return sorted(out, key=lambda c: order[c["status"]])
+
+
 def expand(assumptions, n):
     """{key: {"start", "end"}} -> {key: [n floats]}. end None = flat; otherwise a straight line from start
     (first projected year) to end (last projected year). A bare float is treated as flat."""
@@ -1028,12 +1119,13 @@ def _dcf(fcff, period, w, g):
     return {"df": df, "pv": pv, "pv_sum": sum(pv), "tv": tv, "pv_tv": tv * df[-1], "ev": sum(pv) + tv * df[-1]}
 
 
-def valuation(projs, hist, val, base, market, inputs=None):
+def valuation(projs, hist, val, base, market, inputs=None, note=False):
     """DCF (free cash flow to firm) of each scenario, discounted from the last reported year end.
     projs: {scenario: project() rows}; val: VALUATION-shaped inputs; base: the base scenario's per-year inputs
     (expand()), for the default cost of debt and the WACC tax rate; market: the company's market data.
     inputs: {scenario: expand()} adds "grid_gm" per scenario (re-runs project() 25 times each) and
-    "implied_growth" (reverse DCF, about 50 more runs each). "multiples": P/E, EV/EBITDA and P/B at each reported
+    "implied_growth" (reverse DCF, about 50 more runs each), for the scenarios it names. note=True (with inputs
+    for base) adds "note": the base case's drivers_impact, breakevens and growth_scale (about 130 more runs). "multiples": P/E, EV/EBITDA and P/B at each reported
     year end; per scenario at today's price and at its value per share (see _multiples()).
     Mirrors the Valuation sheet in to_excel()."""
     v, last = {**VALUATION, **(val or {})}, hist[-1]
@@ -1084,7 +1176,7 @@ def valuation(projs, hist, val, base, market, inputs=None):
                   "tv_share": x["pv_tv"] / x["ev"] if x["ev"] and x["ev"] > 0 else None,
                   "grid": [[per_share((_dcf(fcff, period, wacc + dw, g + dg) or {}).get("ev")) for dg in GRID_G]
                            for dw in GRID_WACC]}
-        if inputs:
+        if inputs and s in inputs:
             out[s]["grid_gm"] = [[_shifted(hist, inputs[s], dgr, dm, period, wacc, g, per_share) for dm in GRID_MARGIN]
                                  for dgr in GRID_GROWTH]
             out[s]["implied_growth"] = _implied(hist, inputs[s], period, wacc, g, per_share, price)
@@ -1092,7 +1184,11 @@ def valuation(projs, hist, val, base, market, inputs=None):
         out[s]["multiples"] = {f"{k}_{t}": _multiples(p * shares if p is not None and shares else None, -bridge, r, nci)
                                for k, p in (("price", price), ("value", ps))
                                for t, r in (("last", last), ("next", rows[0]))}
-    return {"inputs": v, "price": price, "shares": shares, "ke": ke, "kd": kd, "tax": tax, "kd_after_tax": kd_at,
+    nb = None
+    if note and inputs and "base" in inputs and not error:
+        args = (hist, inputs["base"], period, wacc, g, per_share)
+        nb = {"impact": drivers_impact(*args), "breakevens": breakevens(*args, price), "growth_scale": growth_scale(*args)}
+    return {"note": nb, "inputs": v, "price": price, "shares": shares, "ke": ke, "kd": kd, "tax": tax, "kd_after_tax": kd_at,
             "e": e, "d": d, "we": we, "wacc": wacc, "wacc_build": wacc_build, "g": g, "period": period,
             "error": error, "nci": nci,
             "borrowings": d, "lease": last.get("lease") or 0.0, "cash": last["cash"], "investments": last["investments"],
@@ -1135,34 +1231,29 @@ def _hist_multiples(hist, market, shares, nci=0.0):
     return out
 
 
-def _shifted(hist, a, dgr, dm, period, wacc, g, per_share):
-    """Value per share with growth and EBITDA margin moved by dgr / dm in every projected year."""
-    a = {**a, "growth": [x + dgr for x in a["growth"]], "ebitda_margin": [x + dm for x in a["ebitda_margin"]]}
-    fcff = [r["fcff"] for r in project(hist, a, len(period))]
-    v = per_share((_dcf(fcff, period, wacc, g) or {}).get("ev"))
+def _value(hist, a, period, wacc, g, per_share):
+    """Value per share of one assumption set (a: expand()-shaped, or flat floats), None when there is none."""
+    v = per_share((_dcf([r["fcff"] for r in project(hist, a, len(period))], period, wacc, g) or {}).get("ev"))
     return v if v is not None and math.isfinite(v) else None
 
 
-def _implied(hist, a, period, wacc, g, per_share, price):
-    """Reverse DCF: the flat revenue growth (every projected year, other drivers as they are) at which value per
-    share equals the price. None without a price or per-share value, or when no growth in IMPLIED_RANGE gets there."""
-    def gap(x):
-        v = per_share((_dcf([r["fcff"] for r in project(hist, {**a, "growth": x}, len(period))], period, wacc, g)
-                       or {}).get("ev"))
-        return v - price if v is not None and math.isfinite(v) else None
-    if not price or gap(0.0) is None:
-        return None
-    # ponytail: value isn't always monotonic in growth (heavy capex makes growth burn cash), so scan 5 pp steps for
-    # sign changes and bisect the one nearest the scenario's own average growth; a root inside one step can be missed
-    lo, hi = IMPLIED_RANGE
-    xs = [lo + i * 0.05 for i in range(round((hi - lo) / 0.05) + 1)]
+def _shifted(hist, a, dgr, dm, period, wacc, g, per_share):
+    """Value per share with growth and EBITDA margin moved by dgr / dm in every projected year."""
+    a = {**a, "growth": [x + dgr for x in a["growth"]], "ebitda_margin": [x + dm for x in a["ebitda_margin"]]}
+    return _value(hist, a, period, wacc, g, per_share)
+
+
+def _solve(gap, xs, near):
+    """A root of gap() on the grid xs (gap None = no value there): scan for sign changes, bisect (to 1e-10) the
+    bracket nearest `near`. None when no bracket has one.
+    ponytail: value isn't always monotonic (heavy capex makes growth burn cash), so a root inside one step can be
+    missed; a finer grid if that ever matters"""
     ys = [gap(x) for x in xs]
     pairs = [(xs[i], xs[i + 1], ys[i]) for i in range(len(xs) - 1)
              if ys[i] is not None and ys[i + 1] is not None and (ys[i] == 0 or ys[i] * ys[i + 1] < 0)]
     if not pairs:
         return xs[-1] if ys[-1] == 0 else None
-    mean = sum(a["growth"]) / len(a["growth"])
-    lo, hi, ylo = min(pairs, key=lambda p: abs((p[0] + p[1]) / 2 - mean))
+    lo, hi, ylo = min(pairs, key=lambda p: abs((p[0] + p[1]) / 2 - near))
     while hi - lo > 1e-10:
         mid = (lo + hi) / 2
         ym = gap(mid)
@@ -1171,6 +1262,92 @@ def _implied(hist, a, period, wacc, g, per_share, price):
         else:
             lo, ylo = mid, ym
     return (lo + hi) / 2
+
+
+def _flat_gap(hist, a, key, period, wacc, g, per_share, price):
+    """gap(x): value per share with driver `key` at x in every projected year, less the price."""
+    def gap(x):
+        v = _value(hist, {**a, key: x}, period, wacc, g, per_share)
+        return None if v is None else v - price
+    return gap
+
+
+def _implied(hist, a, period, wacc, g, per_share, price):
+    """Reverse DCF: the flat revenue growth (every projected year, other drivers as they are) at which value per
+    share equals the price. None without a price or per-share value, or when no growth in IMPLIED_RANGE gets there."""
+    gap = _flat_gap(hist, a, "growth", period, wacc, g, per_share, price)
+    if not price or gap(0.0) is None:
+        return None
+    lo, hi = IMPLIED_RANGE
+    xs = [lo + i * 0.05 for i in range(round((hi - lo) / 0.05) + 1)]
+    return _solve(gap, xs, sum(a["growth"]) / len(a["growth"]))
+
+
+# ---------- the research note (4.1): what moves value, what the price needs, the growth scale ----------
+
+# (driver, label, step): each moved down and up by one step in every projected year, the rest at base. Growth and
+# margin use the inner steps of the growth x margin grid; WACC and terminal growth those of the WACC x g grid.
+# Payout, other income, interest and minorities don't move a cash-flow-to-firm value, so they aren't here.
+IMPACT = (("growth", "Revenue growth", GRID_GROWTH[3]), ("ebitda_margin", "EBITDA margin", GRID_MARGIN[3]),
+          ("wacc", "Discount rate (WACC)", GRID_WACC[3]), ("g", "Terminal growth", GRID_G[3]),
+          ("capex_pct", "Capex % revenue", 0.01), ("tax_rate", "Tax rate", 0.02), ("dso", "Receivable days", 10.0),
+          ("dio", "Inventory days", 10.0), ("dpo", "Payable days", 10.0), ("oca_pct", "Other current assets", 0.01),
+          ("ol_pct", "Other liabilities", 0.01), ("dep_pct", "Depreciation rate", 0.01))
+GROWTH_SCALE = [round(-0.10 + 0.02 * i, 2) for i in range(26)]  # flat revenue growth, -10% to +40%, for the ruler
+MARGINS = [round(-0.20 + 0.05 * i, 2) for i in range(21)]  # break-even EBITDA margin searched from -20% to 80%
+
+
+def drivers_impact(hist, a, period, wacc, g, per_share):
+    """Value per share with each IMPACT driver moved down / up one step, others at base, widest swing first.
+    a: expand()-shaped inputs of one scenario. Drivers that move nothing (no payables: payable days) are left out."""
+    fcff = [r["fcff"] for r in project(hist, a, len(period))]
+    at = lambda w, gg: (lambda ev: None if ev is None else per_share(ev))((_dcf(fcff, period, w, gg) or {}).get("ev"))  # noqa: E731
+    out = []
+    for key, label, step in IMPACT:
+        if key == "wacc":
+            lo, hi = at(wacc - step, g), at(wacc + step, g)
+        elif key == "g":
+            lo, hi = at(wacc, g - step), at(wacc, g + step)
+        else:
+            lo, hi = (_value(hist, {**a, key: [x + d for x in a[key]]}, period, wacc, g, per_share) for d in (-step, step))
+        if lo is None and hi is None or lo == hi:
+            continue
+        out.append({"key": key, "label": label, "step": step, "down": lo, "up": hi,
+                    "swing": abs(hi - lo) if lo is not None and hi is not None else None})
+    return sorted(out, key=lambda d: -(d["swing"] if d["swing"] is not None else -1))
+
+
+def breakevens(hist, a, period, wacc, g, per_share, price):
+    """The flat level of each driver at which value per share equals the price, everything else as it is (the
+    reverse DCF generalised): {key: {"value", "range"}}, value None when nothing in the range gets there."""
+    if not price:
+        return {}
+    fcff = [r["fcff"] for r in project(hist, a, len(period))]
+
+    def at(w, gg):
+        v = per_share((_dcf(fcff, period, w, gg) or {}).get("ev"))
+        return None if v is None or not math.isfinite(v) else v - price
+    ws = [round(g + MIN_SPREAD + 0.0025 * i, 6) for i in range(max(0, int((0.30 - g - MIN_SPREAD) / 0.0025) + 1))]
+    gs = [round(-0.05 + 0.0025 * i, 6) for i in range(max(0, int((min(0.08, wacc - MIN_SPREAD) + 0.05) / 0.0025) + 1))]
+    solve = lambda f, xs, near: _solve(f, xs, near) if len(xs) > 1 else None  # noqa: E731
+    return {"growth": {"value": _implied(hist, a, period, wacc, g, per_share, price), "range": list(IMPLIED_RANGE)},
+            "ebitda_margin": {"value": solve(_flat_gap(hist, a, "ebitda_margin", period, wacc, g, per_share, price),
+                                             MARGINS, sum(a["ebitda_margin"]) / len(a["ebitda_margin"])),
+                              "range": [MARGINS[0], MARGINS[-1]]},
+            "wacc": {"value": solve(lambda w: at(w, g), ws, wacc), "range": [ws[0], ws[-1]] if ws else None},
+            "g": {"value": solve(lambda x: at(wacc, x), gs, g), "range": [gs[0], gs[-1]] if gs else None}}
+
+
+def growth_scale(hist, a, period, wacc, g, per_share):
+    """[[flat revenue growth, value per share]] across GROWTH_SCALE, other inputs at base: the ruler's lower scale."""
+    return [[x, _value(hist, {**a, "growth": x}, period, wacc, g, per_share)] for x in GROWTH_SCALE]
+
+
+def cagrs(hist, labels, years):
+    """Every rolling `years`-year revenue CAGR: [{"from", "to", "value"}] (skips windows that start or end <= 0)."""
+    return [{"from": labels[i - years], "to": labels[i],
+             "value": (hist[i]["revenue"] / hist[i - years]["revenue"]) ** (1 / years) - 1}
+            for i in range(years, len(hist)) if hist[i]["revenue"] > 0 and hist[i - years]["revenue"] > 0]
 
 
 def projected_dates(co, n):

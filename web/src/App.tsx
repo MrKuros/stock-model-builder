@@ -1,54 +1,17 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import Chart from './Chart'
-import DriverStrip from './DriverStrip'
-import Statements, { growth, month } from './Statements'
-import Sources, { Explain, useAi, withNotes } from './Sources'
-import ValuationPanel from './Valuation'
+import { withNotes } from './Sources'
+import Note from './Note'
+import ModelView, { UPGRADED, type Upgrade } from './Model'
+import Evidence from './Evidence'
 import {
-  api, dec2, flat, flatAll, fmt, groupKeys, money, postJson, seed, SCENARIOS, when, clock,
-  type ModelDoc, type ModelSummary, type OneOff, type Market, type Opened, type Parsed, type Paths, type Projection, type Row,
-  type Kind, type OneOffNote, type Proposal, type Scenario, type Ttm,
+  api, flat, flatAll, fmt, groupKeys, money, postJson, rs, seed, when, clock,
+  type ModelDoc, type ModelSummary, type Opened, type Parsed, type Projection, type Proposal, type Scenario,
 } from './lib'
 
-const GROUPS: [string, string[]][] = [
-  ['Growth and margins', ['growth', 'ebitda_margin', 'oi_pct']],
-  ['Investment', ['capex_pct', 'dep_pct']],
-  ['Working capital', ['dso', 'cogs_pct', 'dio', 'dpo', 'oca_pct', 'ol_pct']],
-  ['Financing and tax', ['debt_change', 'int_rate', 'tax_rate', 'mi_pct', 'payout']],
-]
-const HINTS: Record<string, string> = {
-  growth: 'Change in sales vs the year before',
-  ebitda_margin: 'Operating profit before depreciation, share of sales',
-  oi_pct: 'Treasury and non-operating income, share of sales',
-  capex_pct: 'Spend on new fixed assets, share of sales',
-  dep_pct: 'Share of last year’s net block written off',
-  dso: 'Days of sales waiting to be collected',
-  cogs_pct: 'Materials, purchases and inventory change, share of sales. Sets the base for inventory and payable days',
-  dio: 'Days of sales held as stock',
-  dpo: 'Days of sales owed to suppliers',
-  oca_pct: 'Advances, deposits and other current assets',
-  ol_pct: 'Payables, provisions and other liabilities',
-  debt_change: 'Net new debt you plan each year. Shortfalls are borrowed automatically',
-  int_rate: 'Interest as share of last year’s borrowings and lease liabilities',
-  tax_rate: 'Tax as share of profit before tax',
-  mi_pct: 'Associates’ profit added, minority holders’ share taken out',
-  payout: 'Share of net profit paid as dividend',
-}
-// defaults an attached annual filing can move (payables, cash-flow capex); inventory days and COGS come from Export
-const UPGRADED = ['dpo', 'ol_pct', 'capex_pct']
-/** A default the filings moved, offered to all three scenarios in one click: base's value now, the new default. */
-export interface Upgrade { key: string; label: string; kind: Kind; from: number; to: number }
-const METRICS: [string, string, (r: Row) => number | null][] = [
-  ['revenue', 'Revenue', r => r.revenue],
-  ['ebitda', 'EBITDA', r => r.ebitda],
-  ['pat', 'Net profit', r => r.pat],
-  ['fcf', 'Free cash flow', r => r.fcf],
-  ['net_cash', 'Net cash', r => (r.cash ?? 0) + (r.investments ?? 0) - (r.borrowings ?? 0) - (r.lease ?? 0)],
-]
-const HORIZONS = [3, 5, 7, 10]
-const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
 const LAST = 'financial-model:last' // id of the last open model; the model itself lives in models/ on disk
+const THEME = 'financial-model:theme'
 const SAVE_DELAY = 1500
+const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
 
 function lastId(): string | null {
   try { return localStorage.getItem(LAST) } catch { return null }
@@ -61,10 +24,19 @@ function remember(id: string | null) {
   } catch { /* private mode */ }
 }
 
+/** Light / dark: the system's unless picked here; the pick is kept per browser (index.html applies it before paint). */
+function toggleTheme() {
+  const r = document.documentElement
+  const dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches
+  r.dataset.theme = dark ? 'light' : 'dark'
+  try { localStorage.setItem(THEME, r.dataset.theme) } catch { /* private mode */ }
+}
+
 // a re-import of a saved company keeps its filings, proposals, notes and reports (p.defaults already use them)
 const newDoc = (p: Parsed): ModelDoc => ({
-  version: 5, company: p.company, n: 5, active: 'base', scenarios: seed(flatAll(p.defaults)),
+  version: 6, company: p.company, n: 5, active: 'base', scenarios: seed(flatAll(p.defaults)),
   excluded_years: [], saved_at: null, valuation: p.valuation, filings: [], proposals: [], notes: {}, reports: [],
+  note: null, assumption_sources: {}, flag_notes: [], reviewed_at: null,
   ...p.restated?.carry,
 })
 
@@ -98,8 +70,7 @@ export default function App() {
     window.clearTimeout(timer.current)
     const d = pending.current
     pending.current = null
-    // keepalive: still goes out if the tab is closing; browsers refuse keepalive bodies over 64 KB (a doc is ~10-20 KB,
-    // each attached filing adds ~5-15 KB), so a bigger doc goes as a normal request
+    // keepalive: still goes out if the tab is closing; browsers refuse keepalive bodies over 64 KB
     if (d) send(d, JSON.stringify(d).length < 60_000)
     return inflight.current
   }
@@ -130,6 +101,7 @@ export default function App() {
     setSave({ at: doc?.saved_at ?? null, error: null })
     setParsed(parsed)
     setDoc(d)
+    if (!/^#(note|model|evidence)/.test(location.hash)) history.replaceState(null, '', '#note') // old models open into the note
   }
   const close = async () => {
     if ((await flush()) === false) return // stay: the "Not saved … Try again" alert is showing, nothing is lost
@@ -137,6 +109,7 @@ export default function App() {
     remember(null)
     setParsed(null)
     setDoc(null)
+    history.replaceState(null, '', location.pathname)
   }
 
   useEffect(() => {
@@ -145,7 +118,7 @@ export default function App() {
     api<Opened>(`/api/models/${id}`).then(open).catch(() => remember(null)).finally(() => setBooting(false))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (booting) return <main className="landing"><p className="muted" role="status">Opening your last model…</p></main>
+  if (booting) return <main className="wrap"><p className="muted pad" role="status">Opening your last model…</p></main>
   return parsed && doc
     ? <Workspace parsed={parsed} doc={doc} setDoc={f => setDoc(d => d && f(d))} onClose={close} save={save}
         onRetry={flush} setDefaults={defaults => setParsed(p => p && { ...p, defaults })}
@@ -153,16 +126,33 @@ export default function App() {
     : <Landing onOpen={open} />
 }
 
+const Brand = ({ onClick }: { onClick?: () => void }) => {
+  const mark = <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="14" width="6" height="14" fill="currentColor" />
+    <rect x="13" y="8" width="6" height="20" fill="currentColor" />
+    <rect x="22" y="3" width="6" height="25" fill="none" stroke="var(--ours)" strokeWidth="2.4" /></svg>
+  return onClick
+    ? <button type="button" className="brand" onClick={onClick} aria-label="Stock Model Builder: all companies">{mark}Stock Model Builder</button>
+    : <span className="brand">{mark}Stock Model Builder</span>
+}
+const ThemeButton = () => (
+  <button className="tbtn" type="button" onClick={toggleTheme} aria-label="Switch light or dark theme">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M8 1.8a6.2 6.2 0 0 1 0 12.4z" fill="currentColor" /></svg><span className="t-l">Theme</span>
+  </button>
+)
+
+/** Coverage: every saved model with its price against our value range, then the add-company panel. */
 function Landing({ onOpen }: { onOpen: (o: Opened) => void }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [over, setOver] = useState(false)
-  const [models, setModels] = useState<ModelSummary[]>([])
+  const [models, setModels] = useState<ModelSummary[] | null>(null)
   const input = useRef<HTMLInputElement>(null)
   const libHead = useRef<HTMLHeadingElement>(null)
 
   useEffect(() => {
-    api<ModelSummary[]>('/api/models').then(setModels).catch(e => setError(`Couldn’t list saved models: ${e.message}`))
+    api<ModelSummary[]>('/api/models').then(setModels)
+      .catch(e => { setModels([]); setError(`Couldn’t list saved models: ${e.message}`) })
   }, [])
 
   const run = async (label: string, req: () => Promise<Opened>) => {
@@ -183,74 +173,121 @@ function Landing({ onOpen }: { onOpen: (o: Opened) => void }) {
     try {
       await api(`/api/models/${m.id}`, { method: 'DELETE' })
       if (lastId() === m.id) remember(null)
-      setModels(ms => ms.filter(x => x.id !== m.id))
-      // the button that had focus is gone; with the last row the whole list goes, so land on the file picker
-      ;(models.length > 1 ? libHead : input).current?.focus()
+      setModels(ms => ms && ms.filter(x => x.id !== m.id))
+      ;((models?.length ?? 0) > 1 ? libHead : input).current?.focus() // the focused row is gone
     } catch (e) { setError((e as Error).message) }
   }
 
+  // newest version of each company leads; older days follow, dimmed
+  const seen = new Set<string>()
+  const rows = (models ?? []).map(m => ({ m, latest: !seen.has(m.company) && !!seen.add(m.company) }))
+  const latest = rows.filter(r => r.latest).map(r => r.m)
+  const below = latest.filter(m => m.price != null && m.values?.bear != null && m.price < m.values.bear).length
+  const above = latest.filter(m => m.price != null && m.values?.bull != null && m.price > m.values.bull).length
+  const count = (k: number, one: string) => `${k === 1 ? 'One company is' : `${k} companies are`} ${one}`
+  const headline = !latest.length ? 'Open a company to get a research note.'
+    : below ? `${count(below, 'priced below our bear case')}.`
+    : above ? `${count(above, 'priced above our bull case')}.`
+    : `${latest.length === 1 ? 'One company' : `${latest.length} companies`} covered, all priced inside our range.`
+
   return (
-    <main className="landing">
-      <p className="wordmark">Stock Model Builder</p>
-      <h1>Turn a company’s reported numbers into a forecast you can steer.</h1>
-      <p className="lede">
-        Reported years come in <span className="ink-word">ink</span>. You set the future in{' '}
-        <span className="pencil-word">pencil</span>, then take it away as a live Excel model.
-      </p>
+    <>
+      <a className="skip" href="#main">Skip to the companies</a>
+      <header className="top"><div className="top-in"><Brand /><span className="spacer" /><ThemeButton /></div></header>
+      <main id="main" className="wrap">
+        <div className="land-head">
+          <div>
+            <p className="label">Coverage · <b>computed by rules</b> · base case</p>
+            <h1>{models == null ? 'Your companies' : headline}</h1>
+            <p className="lede">Each note leads with what the price assumes against what the business does: the growth
+              the price needs, our value range, and the rule checks behind it. Analysis, not a recommendation.</p>
+          </div>
+          <div className="add">
+            <label className={`drop ${over ? 'is-over' : ''}`} aria-busy={!!busy}
+              onDragOver={e => { e.preventDefault(); setOver(true) }} onDragLeave={() => setOver(false)}
+              onDrop={e => { e.preventDefault(); setOver(false); upload(e.dataTransfer.files[0]) }}>
+              <input ref={input} type="file" accept=".xlsx" className="sr" disabled={!!busy}
+                onChange={e => { upload(e.target.files?.[0]); e.target.value = '' }} />
+              <strong>{busy ?? 'Add a company'}</strong>
+              {!busy && <span>Drop a Export.in export here, or <u>choose a file</u> (.xlsx)</span>}
+            </label>
+            <p className="small muted">On export.in open the company and click <b>Export to Excel</b> (free account).{' '}
+              <button type="button" className="link" disabled={!!busy}
+                onClick={() => run('Loading sample…', async () => ({ parsed: await api<Parsed>('/api/sample') }))}>
+                Try a sample company</button> (made-up numbers).</p>
+            {error && <p className="error" role="alert">{error}</p>}
+          </div>
+        </div>
 
-      <label
-        className={`drop ${over ? 'is-over' : ''}`}
-        aria-busy={!!busy}
-        onDragOver={e => { e.preventDefault(); setOver(true) }}
-        onDragLeave={() => setOver(false)}
-        onDrop={e => { e.preventDefault(); setOver(false); upload(e.dataTransfer.files[0]) }}
-      >
-        <input ref={input} type="file" accept=".xlsx" className="visually-hidden" disabled={!!busy}
-          onChange={e => { upload(e.target.files?.[0]); e.target.value = '' }} />
-        <span className="drop-title">{busy ?? 'Drop a Export.in export here'}</span>
-        {!busy && <span className="drop-sub">or <u>choose a file</u> (.xlsx)</span>}
-      </label>
-      {error && <p className="error" role="alert">{error}</p>}
-
-      {models.length > 0 && (
-        <section className="library" aria-labelledby="library-head">
-          <h2 id="library-head" ref={libHead} tabIndex={-1}>Recent models</h2>
-          <ul>
-            {models.map(m => (
-              <li key={m.id}>
-                <button type="button" className="lib-open" disabled={!!busy}
-                  onClick={() => run(`Opening ${m.company}…`, () => api<Opened>(`/api/models/${m.id}`))}>
-                  <span className="lib-name">{m.company}</span>
-                  <span className="lib-meta">
-                    {m.saved_at ? when(m.saved_at) : '–'} · {NAMES[m.active]} · {m.n} yrs
-                    {m.revenue != null && <> · revenue <span className="pencil-num">Rs {money(m.revenue)} cr</span> in {m.year}</>}
-                  </span>
-                </button>
-                <button type="button" className="link lib-del" disabled={!!busy} onClick={() => remove(m)}
-                  aria-label={`Delete ${m.company}, saved ${m.saved_at ? when(m.saved_at) : 'earlier'}`}>Delete</button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      <div className="how">
-        <h2>Getting the file</h2>
-        <ol>
-          <li>Open the company on <a href="https://www.export.in" target="_blank" rel="noreferrer">export.in</a>.</li>
-          <li>Click <b>Export to Excel</b>. A free account is needed.</li>
-          <li>Drop the downloaded file above.</li>
-        </ol>
-        <button type="button" className="link" disabled={!!busy}
-          onClick={() => run('Loading sample…', async () => ({ parsed: await api<Parsed>('/api/sample') }))}>
-          Explore with a sample company
-        </button>
-        <span className="muted"> (made-up numbers)</span>
-      </div>
-      <p className="scope muted">Works for manufacturing, services and other non-financial companies. Banks, NBFCs and insurers aren’t supported yet. Models save themselves to the <code>models</code> folder next to the app.</p>
-    </main>
+        {rows.length > 0 && (
+          <section aria-labelledby="library-head">
+            <h2 id="library-head" ref={libHead} tabIndex={-1} className="label sec-label">
+              <span>Companies · <b>price against our value range</b></span><span>newest first</span>
+            </h2>
+            <ul className="cov">
+              {rows.map(({ m, latest }) => (
+                <li key={m.id} className={`cov-row${latest ? '' : ' old'}`}>
+                  <button type="button" className="cov-open" disabled={!!busy}
+                    onClick={() => run(`Opening ${m.company}…`, () => api<Opened>(`/api/models/${m.id}`))}>
+                    <span className="co"><strong>{m.company}</strong>
+                      <span>{m.saved_at ? when(m.saved_at) : '–'} · {NAMES[m.active]} · {m.n} yrs
+                        {m.reviewed_at ? ' · reviewed' : ' · draft'}</span></span>
+                    <MiniRange m={m} />
+                    <span className="pf">{coverText(m)}</span>
+                    <span className="fl">{m.flags == null ? '' : m.flags ? `${m.flags} flag${m.flags > 1 ? 's' : ''}` : 'No flags'}</span>
+                  </button>
+                  <button type="button" className="link lib-del" disabled={!!busy} onClick={() => remove(m)}
+                    aria-label={`Delete ${m.company}, saved ${m.saved_at ? when(m.saved_at) : 'earlier'}`}>Delete</button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        <footer className="foot">
+          <p>Works for manufacturing, services and other non-financial companies; banks, NBFCs and insurers aren’t
+            supported. Models save themselves to the <code>models</code> folder next to the app. Analysis, not a
+            recommendation: no management access or channel checks.</p>
+        </footer>
+      </main>
+    </>
   )
 }
+
+function coverText(m: ModelSummary): ReactNode {
+  if (m.values?.base == null) return <span className="muted">No value yet: {m.why ?? 'open it to see why'}</span>
+  if (m.implied != null && m.growth != null)
+    return <>Priced for <span className="num mkt">{fmt(m.implied, 'pct')}</span> / ours <span className="num ours">{fmt(m.growth, 'pct')}</span></>
+  if (m.price == null) return <>Base <span className="num ours">Rs {rs(m.values.base)}</span>, no price</>
+  return <>Base <span className="num ours">Rs {rs(m.values.base)}</span>, no growth rate reaches the price</>
+}
+
+/** Price (ochre) against bear-bull (blue band) and base (blue tick) on one small scale. */
+function MiniRange({ m }: { m: ModelSummary }) {
+  const v = m.values
+  const pts = [m.price, v?.bear, v?.base, v?.bull].filter((x): x is number => x != null)
+  if (!v || v.base == null || pts.length < 2) return <span className="mini" aria-hidden="true" />
+  const lo = Math.min(...pts), hi = Math.max(...pts), pad = (hi - lo || 1) * 0.08
+  const x = (n: number) => `${((n - lo + pad) / (hi - lo + 2 * pad)) * 100}%`
+  const label = `Bear Rs ${v.bear == null ? '–' : rs(v.bear)}, base Rs ${rs(v.base)}, bull Rs ${v.bull == null ? '–' : rs(v.bull)}` +
+    (m.price != null ? `, price Rs ${rs(m.price)}` : '')
+  return (
+    <span className="mini" role="img" aria-label={label}>
+      <i className="ax" />
+      {v.bear != null && v.bull != null && <i className="bd" style={{ left: x(v.bear), width: `calc(${x(v.bull)} - ${x(v.bear)})` }} />}
+      <i className="bs" style={{ left: x(v.base) }} />
+      {m.price != null && <i className={`px${m.price > (lo + hi) / 2 ? ' r' : ''}`} style={{ left: x(m.price) }}><span>{rs(m.price)}</span></i>}
+    </span>
+  )
+}
+
+export type View = 'note' | 'model' | 'evidence'
+const VIEWS: [View, string, string][] = [['note', 'Note', 'N'], ['model', 'Model', 'M'], ['evidence', 'Evidence', 'E']]
+const readHash = (): [View, string] => {
+  const [v, a = ''] = location.hash.slice(1).split(':')
+  return [(VIEWS.some(x => x[0] === v) ? v : 'note') as View, a]
+}
+/** Go to a view (and an element in it): the hash keeps the tab across reloads and works with Back. */
+export type Go = (view: View, anchor?: string) => void
 
 interface WorkspaceProps {
   parsed: Parsed
@@ -263,33 +300,56 @@ interface WorkspaceProps {
   onRetry: () => Promise<string | false>
 }
 
-function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save, onRetry }: WorkspaceProps) {
-  const { company, years: histYears, ratios, defaults, checks, drivers, layout } = parsed
-  const { n, active, scenarios, valuation, filings, notes } = doc
-  const a = scenarios[active]
-  const setN = (n: number) => setDoc(d => ({ ...d, n }))
-  const setActive = (active: Scenario) => setDoc(d => ({ ...d, active }))
-  const setA = (f: (p: Paths) => Paths) =>
-    setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [d.active]: f(d.scenarios[d.active]) } }))
-  const seeded = useMemo(() => seed(flatAll(defaults)), [defaults]) // each scenario's own defaults
+function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onClose, save, onRetry }: WorkspaceProps) {
+  const { company, years: histYears, drivers } = parsed
+  const { n, scenarios, valuation, filings, notes } = doc
+  // any change to what the numbers come from puts the note back to draft
+  const setDoc = (f: (d: ModelDoc) => ModelDoc) => setDocRaw(d => {
+    const x = f(d)
+    const moved = x.scenarios !== d.scenarios || x.valuation !== d.valuation || x.n !== d.n || x.filings !== d.filings
+      || x.excluded_years !== d.excluded_years
+    return moved && x.reviewed_at ? { ...x, reviewed_at: null } : x
+  })
   const [projection, setProjection] = useState<Projection | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [metric, setMetric] = useState(METRICS[0][0])
-  const [showChecks, setShowChecks] = useState(false)
-  const [showOneoffs, setShowOneoffs] = useState(false)
-  const [showRestated, setShowRestated] = useState(false)
-  const [pending, setPending] = useState<string | null>(null) // year whose exclusion is being applied
-  const [defaultsNote, setDefaultsNote] = useState('')
   const [exporting, setExporting] = useState(false)
-  const [retried, setRetried] = useState<string | null>(null) // saved_at of a successful "Try again", announced once
+  const [retried, setRetried] = useState<string | null>(null)
+  const [[view, anchor], setRoute] = useState(readHash)
   const back = useRef<HTMLButtonElement>(null)
-  const retry = async () => {
-    const at = await onRetry()
-    if (at) { setRetried(at); back.current?.focus() } // the Try again button is gone
-  }
-  const hist = parsed.hist ?? company.hist // with the filings' payables, leases and cash-flow capex
+  const hist = parsed.hist ?? company.hist
   const nHist = hist.length
-  const sources = parsed.sources
+
+  useEffect(() => {
+    const on = () => setRoute(readHash())
+    window.addEventListener('hashchange', on)
+    return () => window.removeEventListener('hashchange', on)
+  }, [])
+  const go: Go = (v, a) => {
+    const h = `#${v}${a ? `:${a}` : ''}`
+    if (location.hash === h) setRoute([v, a ?? '']) // same link again: scroll to it again
+    else location.hash = h
+  }
+  // after a view switch, bring the anchored element (a strip cell's evidence row, a model input) into view
+  useEffect(() => {
+    if (!anchor) { window.scrollTo({ top: 0 }); return }
+    const t = window.setTimeout(() => {
+      const el = document.getElementById(`a-${anchor}`) ?? document.getElementById(anchor)
+      if (el) { el.scrollIntoView({ block: 'center' }); (el.matches('button, a, [tabindex]') ? el : el.querySelector<HTMLElement>('button, a, [tabindex]') ?? el).focus?.({ preventScroll: true }) }
+    }, 30)
+    return () => window.clearTimeout(t)
+  }, [view, anchor, projection != null])
+  // N / M / E switch views, unless typing
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return
+      const t = e.target as HTMLElement
+      if (t.closest('input, textarea, select, [contenteditable="true"], [role="slider"]')) return
+      const v = VIEWS.find(x => x[2] === e.key.toUpperCase())
+      if (v) { e.preventDefault(); go(v[0]) }
+    }
+    window.addEventListener('keydown', on)
+    return () => window.removeEventListener('keydown', on)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const ctl = new AbortController()
@@ -301,11 +361,10 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
 
   // A filing attached or removed changes the history (payables, leases, cash-flow capex) and so the defaults; like
   // excluding a year, it never changes the assumptions by itself. The upgraded defaults are offered in one click.
-  // an approved mapping re-reads a filing in place; an approved capex note changes that year's capex
-  const filingIds = JSON.stringify([filings.map(f => [f.id, f.facts]),
-    Object.entries(notes).filter(([k]) => k.startsWith('ar:capex:'))])
+  const filingIds = JSON.stringify([filings.map(f => [f.id, f.facts]), Object.entries(notes).filter(([k]) => k.startsWith('ar:'))])
   const seenIds = useRef(filingIds)
   const [upgrades, setUpgrades] = useState<Upgrade[]>([])
+  const byKey = Object.fromEntries(drivers.map(d => [d[0], d]))
   useEffect(() => {
     if (filingIds === seenIds.current) return
     seenIds.current = filingIds
@@ -313,7 +372,6 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
     api<Parsed>('/api/company', postJson({ company, excluded_years: doc.excluded_years, filings, notes }))
       .then(p => {
         setParsed(p)
-        // moved now, or offered before and not taken; and only where base still differs from the new default
         const keys = UPGRADED.filter(k => upgrades.some(u => u.key === k) || Math.abs((p.defaults[k] ?? 0) - (before[k] ?? 0)) > 1e-9)
         setUpgrades(keys.filter(k => p.defaults[k] != null && Math.abs((scenarios.base[k]?.start ?? 0) - p.defaults[k]) > 1e-9)
           .map(k => ({ key: k, label: byKey[k]?.[1] ?? k, kind: byKey[k]?.[2] ?? 'pct', from: scenarios.base[k]?.start ?? 0, to: p.defaults[k] })))
@@ -326,17 +384,29 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
       bear: { ...d.scenarios.bear, ...next } } }))
     setUpgrades([])
   }
+  const onProposals = (f: (ps: Proposal[]) => Proposal[]) =>
+    setDoc(d => { const proposals = f(d.proposals); return { ...d, proposals, notes: withNotes(d.notes, proposals) } })
 
-  const proj = projection?.scenarios[active].length === n ? projection.scenarios[active] : null // null while a new horizon loads
-  const projYears = proj ? projection!.years : []
-  const years = [...histYears, ...projYears]
-  const rows = proj ? [...hist, ...proj] : hist
-  const implied = proj ? projection!.valuation.scenarios[active].implied_growth ?? null : null // reverse DCF
+  const [pendingYear, setPendingYear] = useState<string | null>(null)
+  const [defaultsNote, setDefaultsNote] = useState('')
+  const toggleYear = async (year: string) => {
+    if (pendingYear) return
+    const ex = doc.excluded_years
+    const next = ex.includes(year) ? ex.filter(y => y !== year) : [...ex, year]
+    setPendingYear(year)
+    try {
+      const d = await api<Record<string, number>>('/api/defaults', postJson({ company, excluded_years: next, filings, notes }))
+      setDefaults(d)
+      setDoc(doc => ({ ...doc, excluded_years: next }))
+      setDefaultsNote(`Defaults ${next.length ? `now leave out ${histYears.filter(y => next.includes(y)).join(', ')}` : 'use every year again'}. ` +
+        'Your assumptions haven’t changed; Reset applies the new defaults to a scenario.')
+    } catch (e) { setError((e as Error).message) } finally { setPendingYear(null) }
+  }
 
   const exportXlsx = async () => {
     setExporting(true)
     try {
-      const res = await fetch('/api/export', postJson({ company, scenarios, active, n, valuation, filings, notes }))
+      const res = await fetch('/api/export', postJson({ company, scenarios, active: doc.active, n, valuation, filings, notes }))
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? 'Export failed. Try again.')
       const url = URL.createObjectURL(await res.blob())
       const link = Object.assign(document.createElement('a'), { href: url, download: `${company.name} model.xlsx` })
@@ -344,311 +414,84 @@ function Workspace({ parsed, doc, setDoc, setDefaults, setParsed, onClose, save,
       URL.revokeObjectURL(url)
     } catch (e) { setError((e as Error).message) } finally { setExporting(false) }
   }
-
-  const byKey = Object.fromEntries(drivers.map(d => [d[0], d]))
-  const onCogs = sources?.basis === 'cogs'
-  const nonZero = (k: string) => !!a[k] && (a[k].start !== 0 || (a[k].end ?? 0) !== 0)
-  // COGS % only does something when days run on COGS; payable days once a filing gives payables (or the user set some)
-  const shown = (k: string) => !sources || (k === 'cogs_pct' ? onCogs
-    : k === 'dpo' ? sources.used.payables.length > 0 || nonZero(k) : true)
-  const hintFor = (k: string) => (onCogs && k === 'dio' ? 'Days of cost of goods sold held as stock'
-    : onCogs && k === 'dpo' ? 'Days of cost of goods sold owed to suppliers'
-    : k === 'ol_pct' && sources?.used.payables.length ? 'Provisions, advances and other liabilities; trade payables are separate'
-    : HINTS[k] ?? '')
-  const balanced = proj?.every(r => Math.abs(r.chk_bs ?? 0) < 0.5 && Math.abs(r.chk_cash ?? 0) < 0.5)
-  // A check that fails must say so; a small gap in the first year only comes from rounding in the reported balance sheet
-  const offIdx = proj ? proj.findIndex(r => Math.abs(r.chk_bs ?? 0) >= 0.5 || Math.abs(r.chk_cash ?? 0) >= 0.5) : -1
-  const off = offIdx >= 0 ? Math.max(Math.abs(proj![offIdx].chk_bs ?? 0), Math.abs(proj![offIdx].chk_cash ?? 0)) : 0
-  const roundingOnly = offIdx === 0 && off <= 2 && proj!.slice(1).every(r => Math.abs(r.chk_bs ?? 0) < 0.5 && Math.abs(r.chk_cash ?? 0) < 0.5)
-  const borrowed = proj ? proj.reduce((s, r) => s + (r.revolver ?? 0), 0) : 0
-  const m = METRICS.find(x => x[0] === metric)!
-  const others = proj ? SCENARIOS.filter(s => s !== active).map(s => ({
-    name: s, values: [...hist.map(() => null), ...projection!.scenarios[s].map(m[2])],
-  })) : []
-  const copyBase = () => {
-    const next = seed(scenarios.base)
-    const edited = (['bull', 'bear'] as const).some(s => JSON.stringify(scenarios[s]) !== JSON.stringify(next[s]))
-    if (edited && !window.confirm('Replace your bull and bear assumptions with base ± 3 pp growth and ± 1.5 pp EBITDA margin?')) return
-    setDoc(d => ({ ...d, scenarios: next }))
+  const retry = async () => {
+    const at = await onRetry()
+    if (at) { setRetried(at); back.current?.focus() }
   }
 
-  const ai = useAi()
-  // approving a one-off explanation pins it in notes; recomputed from the proposals so the two never disagree
-  const onProposals = (f: (ps: Proposal[]) => Proposal[]) =>
-    setDoc(d => { const proposals = f(d.proposals); return { ...d, proposals, notes: withNotes(d.notes, proposals) } })
-  const restated = parsed.restated?.changes.length ? parsed.restated : null
-  const excluded = doc.excluded_years
-  const oneoffYears = Object.entries(parsed.oneoffs.reduce<Record<string, OneOff[]>>(
-    (g, o) => ({ ...g, [o.year]: [...(g[o.year] ?? []), o] }), {}))
-  // fetch first, then store the year and its defaults together, so the two never disagree
-  const toggleYear = async (year: string) => {
-    if (pending) return // one at a time; the checkbox stays focusable (aria-disabled) so keyboard focus isn't lost
-    const next = excluded.includes(year) ? excluded.filter(y => y !== year) : [...excluded, year]
-    setPending(year)
-    try {
-      const d = await api<Record<string, number>>('/api/defaults', postJson({ company, excluded_years: next, filings, notes }))
-      setDefaults(d)
-      setDoc(doc => ({ ...doc, excluded_years: next }))
-      setDefaultsNote(`Defaults ${next.length ? `now leave out ${histYears.filter(y => next.includes(y)).join(', ')}` : 'use every year again'}. ` +
-        'Your assumptions haven’t changed; Reset applies the new defaults to a scenario.')
-    } catch (e) { setError((e as Error).message) } finally { setPending(null) }
-  }
+  const proj = projection?.scenarios.base.length === n ? projection : null // null while a new horizon loads
+  const m = company.market
+  const price = valuation.price ?? m?.price ?? null
+  const shares = valuation.shares ?? m?.shares ?? null
+  const ai = Object.values(notes).some(x => (x as { ai?: boolean })?.ai) || doc.note != null
+  const tabs = useMemo(() => VIEWS, [])
 
   return (
-    <div className="workspace">
-      <div className="head-area">
+    <>
+      <a className="skip" href="#main">Skip to the {view}</a>
       <header className="top">
-        <div className="title">
-          <button ref={back} type="button" className="link back" onClick={onClose}>Open another file</button>
-          <h1>{company.name}</h1>
-          <p className="muted">
-            Rs crore · <span className="ink-word">{histYears[0]}–{histYears[nHist - 1]} reported</span>
-            {proj && <> · <span className="pencil-word">{projYears[0]}–{projYears[n - 1]} projected</span></>}
-            {save.at && !save.error && <> · <span className="saved">Saved {clock(save.at)}</span></>}
-          </p>
-          <MarketLine m={company.market} />
-        </div>
-        <div className="actions">
-          <div className="segmented" role="radiogroup" aria-label="Scenario">
-            {SCENARIOS.map(s => (
-              <button key={s} type="button" role="radio" aria-checked={active === s} tabIndex={active === s ? 0 : -1}
-                onClick={() => setActive(s)} onKeyDown={e => groupKeys(e, [...SCENARIOS], active, setActive)}>{NAMES[s]}</button>
-            ))}
-          </div>
-          <div className="segmented" role="radiogroup" aria-label="Years to project">
-            {HORIZONS.map(h => (
-              <button key={h} type="button" role="radio" aria-checked={n === h} tabIndex={n === h ? 0 : -1}
-                onClick={() => setN(h)} onKeyDown={e => groupKeys(e, HORIZONS, n, setN)}>{h} yrs</button>
-            ))}
-          </div>
-          <button type="button" className="primary" onClick={exportXlsx} disabled={!proj || exporting}>
-            {exporting ? 'Exporting…' : 'Export to Excel'}
+        <div className="top-in">
+          <Brand onClick={onClose} />
+          <span className="crumb" aria-hidden="true">/ <strong>{company.name}</strong></span>
+          <nav aria-label="Views of this company">
+            <div className="views" role="tablist" aria-label="View">
+              {tabs.map(([v, label, key]) => (
+                <button key={v} type="button" role="tab" id={`tab-${v}`} aria-selected={view === v} aria-controls="view"
+                  tabIndex={view === v ? 0 : -1} aria-keyshortcuts={key} onClick={() => go(v)}
+                  onKeyDown={e => groupKeys(e, tabs.map(t => t[0]), view, v => go(v))}>
+                  {label}<kbd aria-hidden="true">{key}</kbd>
+                </button>
+              ))}
+            </div>
+          </nav>
+          <span className="spacer" />
+          <ThemeButton />
+          <button type="button" className="tbtn" onClick={exportXlsx} disabled={!proj || exporting}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8m0 0L5 7m3 3 3-3M3 13h10" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg>
+            <span className="t-l">{exporting ? 'Exporting…' : 'Excel'}</span><span className="sr">{exporting ? '' : ' export'}</span>
           </button>
         </div>
       </header>
 
-      <div className="status" aria-live="polite">
-        {balanced && <span className="ok">Balance sheet balances in every projected year</span>}
-        {offIdx >= 0 && (roundingOnly
-          ? <span className="ok">Balance sheet balances; {projYears[0]} cash is off by Rs {money(off)} cr from rounding in the reported figures</span>
-          : <span className="bad" role="alert">Balance check fails in {projYears[offIdx]} by Rs {money(off)} cr</span>)}
-        {checks.length > 0 && (
-          <button type="button" className="warn" onClick={() => setShowChecks(s => !s)} aria-expanded={showChecks}>
-            {checks.length} issue{checks.length > 1 ? 's' : ''} in the reported data
-          </button>
-        )}
-        {oneoffYears.length > 0 && (
-          <button type="button" className="warn" onClick={() => setShowOneoffs(s => !s)} aria-expanded={showOneoffs}
-            aria-controls="oneoffs">
-            {oneoffYears.length} unusual year{oneoffYears.length > 1 ? 's' : ''}
-            {excluded.length > 0 && <> · {excluded.length} left out of defaults</>}
-          </button>
-        )}
-        {restated && (
-          <button type="button" className="warn" onClick={() => setShowRestated(s => !s)} aria-expanded={showRestated}
-            aria-controls="restated">
-            {restated.changes.length} reported figure{restated.changes.length > 1 ? 's' : ''} changed since your
-            model of {restated.saved_at ? when(restated.saved_at) : 'earlier'}
-          </button>
-        )}
-        {retried != null && retried === save.at && !save.error && <span className="ok">Saved</span>}
-        {error && <span className="bad" role="alert">{error}</span>}
-        {save.error && (
-          <span className="bad" role="alert">
-            Not saved: {save.error}{' '}
-            <button type="button" className="link" onClick={retry}>Try again</button>
-          </span>
-        )}
-      </div>
-      {showChecks && <ul className="check-list">{checks.map(c => <li key={c}>{c}</li>)}</ul>}
-      {showRestated && restated && (
-        <section id="restated" aria-label="Restated figures">
-          <ul className="check-list">
-            {restated.changes.map(c => (
-              <li key={`${c.year}-${c.line}`}>
-                {c.year} {c.line.toLowerCase()}: Rs {money(c.old)} cr → Rs {money(c.new)} cr ({fmt(c.new / c.old - 1, 'pct')})
-              </li>
-            ))}
-          </ul>
-          <p className="muted small">
-            This file’s reported years differ by more than 0.5% from the model you saved{restated.saved_at
-              ? ` on ${when(restated.saved_at)}` : ''}; the company may have restated them. This model uses the new
-            figures and keeps your filings, proposals and notes; versions saved on earlier days keep the old figures.
-          </p>
-        </section>
-      )}
-      {showOneoffs && (
-        <OneOffs id="oneoffs" years={oneoffYears} histYears={histYears} excluded={excluded} pending={pending}
-          note={defaultsNote} onToggle={toggleYear} explain={year => (
-            <Explain year={year} company={company} filings={filings} notes={doc.notes} ai={ai} proposals={doc.proposals}
-              report={doc.reports.find(r => r.year === year)} note={doc.notes[`oneoff:${year}`] as OneOffNote | undefined}
-              onProposals={onProposals} onReports={f => setDoc(d => ({ ...d, reports: f(d.reports) }))} />
-          )} />
-      )}
-
-      </div>
-
-      <aside className="drivers" aria-label="Assumptions">
-        <div className="drivers-head">
-          <h2>Assumptions <span className="scen-tag">{NAMES[active]}</span></h2>
-          <button type="button" className="link" onClick={() => setA(() => seeded[active])}>Reset {active}</button>
-        </div>
-        <p className="muted small">
-          Strips edit the <b>{active}</b> case. Bull and bear start from base with revenue growth ± 3 pp and EBITDA
-          margin ± 1.5 pp; everything else is the same.{' '}
-          <button type="button" className="link" onClick={copyBase}>Copy base to bull and bear</button>
+      <div className="wrap">
+        <p className="meta">
+          <span className="meta-co">{company.name}</span>
+          <span>Rs crore · reported {histYears[0]}–{histYears[nHist - 1]}</span>
+          {price != null
+            ? <span>Price <span className="num mkt">Rs {rs(price)}</span> {valuation.price != null ? '(typed)' : 'in the export'}</span>
+            : <span>No share price</span>}
+          {price != null && shares != null && <span>Market cap <span className="num">Rs {money(price * shares)} cr</span></span>}
+          {save.at && !save.error && <span>Saved {clock(save.at)}</span>}
         </p>
-        <p className="muted small">Dots are reported years. Drag the pencil line, use arrow keys, or type a value. Fade slopes it from the first projected year to the last.</p>
-        {GROUPS.map(([group, keys]) => (
-          <section key={group} className="group">
-            <h3>{group}</h3>
-            {keys.filter(k => byKey[k] && shown(k)).map(k => (
-              <DriverStrip
-                key={`${company.name}-${k}`}
-                id={k}
-                label={byKey[k][1]}
-                hint={hintFor(k)}
-                source={sources?.drivers[k]}
-                kind={byKey[k][2]}
-                history={ratios.map(r => r[k])}
-                value={a[k] ?? flat(seeded[active][k].start)} // a model saved before this driver existed
-                base={seeded[active][k].start}
-                baseLabel={k === 'debt_change' ? 'no new debt' : `default ${fmt(seeded[active][k].start, byKey[k][2])}`}
-                onChange={v => setA(prev => ({ ...prev, [k]: v }))}
-                ghost={k === 'growth' ? implied : null}
-              />
-            ))}
-          </section>
-        ))}
-      </aside>
-
-      <main className="main">
-        {proj && <Readout hist={hist} proj={proj} histYear={histYears[nHist - 1]} projYear={projYears[n - 1]} n={n}
-          ttm={parsed.ttm && Date.parse(parsed.ttm.end) > Date.parse(company.dates[nHist - 1]) ? parsed.ttm : null} />}
-        {proj && <Compare all={projection!.scenarios} active={active} projYear={projYears[n - 1]} />}
-        {borrowed >= 0.5 && (
-          <p className="banner">
-            Cash would run out, so the model borrows <b>Rs {money(borrowed)} cr</b> over {n} years to cover it.
-            Lower capex or payout, or set <b>Planned borrowing change per year</b> yourself.
-          </p>
-        )}
-        <section className="chart-card">
-          <div className="tabs" role="tablist" aria-label="Chart">
-            {METRICS.map(([k, label]) => (
-              <button key={k} id={`chart-tab-${k}`} type="button" role="tab" className="tab" aria-selected={metric === k}
-                aria-controls="chart-panel" tabIndex={metric === k ? 0 : -1} onClick={() => setMetric(k)}
-                onKeyDown={e => groupKeys(e, METRICS.map(x => x[0]), metric, setMetric)}>{label}</button>
-            ))}
-          </div>
-          <div id="chart-panel" role="tabpanel" aria-labelledby={`chart-tab-${metric}`}>
-            <Chart title={m[1]} years={years} values={rows.map(m[2])} nHist={nHist} others={others} />
-          </div>
-        </section>
-        <ValuationPanel inputs={valuation} defaults={parsed.valuation} v={proj ? projection!.valuation : null}
-          market={company.market} active={active} asOf={histYears[nHist - 1]} next={projYears[0]} growth={a.growth} n={n}
-          onChange={f => setDoc(d => ({ ...d, valuation: f(d.valuation) }))} />
-        <Sources company={company} filings={doc.filings} proposals={doc.proposals} sources={sources}
-          upgrades={upgrades} onApply={applyUpgrades} reports={doc.reports} years={histYears} notes={notes}
-          onReports={f => setDoc(d => ({ ...d, reports: f(d.reports) }))}
-          onFilings={f => setDoc(d => ({ ...d, filings: f(d.filings) }))} onProposals={onProposals} />
-      </main>
-      <div className="tables">
-        <Statements layout={layout} years={years} rows={rows} nHist={nHist}
-          hide={sources?.basis === 'cogs' ? undefined : new Set(['cogs'])}
-          quarterly={company.quarters?.dates.length ? {
-            quarters: company.quarters, ttm: parsed.ttm ?? null, ttmPrev: parsed.ttm_prev ?? null,
-            fy: histYears[nHist - 1], last: hist[nHist - 1], prev: nHist > 1 ? hist[nHist - 2] : null,
-          } : null} />
+        <div className="review" aria-label="Review status">
+          <span className={`rv-state${doc.reviewed_at ? ' done' : ''}`}>
+            {doc.reviewed_at ? <>● Reviewed {when(doc.reviewed_at)}</> : <>○ Draft, not reviewed by you</>}
+          </span>
+          <span className="chip">Numbers: rules, from your Export export{filings.length ? ', filings' : ''} and your inputs</span>
+          <span className="chip serif">Words: {ai ? 'AI-written, cited' : 'none by AI yet'}</span>
+          <button type="button" className="btn" aria-pressed={!!doc.reviewed_at}
+            onClick={() => setDocRaw(d => ({ ...d, reviewed_at: d.reviewed_at ? null : new Date().toISOString() }))}>
+            {doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed'}
+          </button>
+          <button ref={back} type="button" className="link small" onClick={onClose}>All companies</button>
+        </div>
+        <div className="status" aria-live="polite">
+          {retried != null && retried === save.at && !save.error && <span className="ok">Saved</span>}
+          {error && <span className="bad" role="alert">{error}</span>}
+          {save.error && <span className="bad" role="alert">Not saved: {save.error}{' '}
+            <button type="button" className="link" onClick={retry}>Try again</button></span>}
+        </div>
       </div>
-    </div>
-  )
-}
 
-/** Flagged years as sentences, each with a switch to leave that year out of the defaults. */
-function OneOffs({ id, years, histYears, excluded, pending, note, onToggle, explain }: {
-  id: string; years: [string, OneOff[]][]; histYears: string[]; excluded: string[]; pending: string | null
-  note: string; onToggle: (year: string) => void; explain: (year: string) => ReactNode
-}) {
-  const used = histYears.filter(y => !excluded.includes(y)).slice(-3) // mirrors default_assumptions(years=3)
-  return (
-    <section id={id} className="oneoffs" aria-label="Unusual years">
-      <p className="muted small">
-        Years far from this company’s own history (more than 2σ from its median). Defaults use the last three
-        reported years that aren’t left out; revenue growth always uses the last three.
-      </p>
-      <ul>
-        {years.map(([year, items]) => (
-          <li key={year}>
-            <span>{items.map(o => o.note).join('. ')}.</span>
-            <label className="exclude">
-              <input type="checkbox" checked={excluded.includes(year)} aria-disabled={pending != null}
-                aria-busy={pending === year} onChange={() => onToggle(year)} />
-              Exclude from defaults
-            </label>
-            {!used.includes(year) && !excluded.includes(year) && (
-              <span className="muted small"> Older than the years the defaults use, so excluding it changes nothing.</span>
-            )}
-            {explain(year)}
-          </li>
-        ))}
-      </ul>
-      <p className="oneoff-note" role="status">{note}</p>
-    </section>
-  )
-}
-
-const NBSP = '\u00a0' // keeps 'Rs 13,02,344 cr' on one line
-/** Reported market data from the export, in ink. Anything Export left out is skipped. */
-function MarketLine({ m }: { m?: Market }) {
-  // a parsed file always has one price_hist entry per year; an empty list = saved before prices were read
-  if (!m?.price_hist?.length) return <p className="market muted">Saved before share prices were read. Type the price and shares under Valuation.</p>
-  if (!m.price && !m.shares) return <p className="market muted">No share price in this file</p>
-  return (
-    <p className="market">
-      {m.price != null && <>Rs{NBSP}{dec2(m.price)} a share</>}
-      {m.price != null && m.shares != null && ' · '}
-      {m.shares != null && <>{dec2(m.shares)}{NBSP}cr shares</>}
-      {m.price != null && m.shares != null && <> · Market cap Rs{NBSP}{money(m.price * m.shares)}{NBSP}cr</>}
-    </p>
-  )
-}
-
-function Readout({ hist, proj, histYear, projYear, n, ttm }: {
-  hist: Row[]; proj: Row[]; histYear: string; projYear: string; n: number
-  ttm: Ttm | null // only when its quarters run past the last reported year
-}) {
-  const last = hist[hist.length - 1], end = proj[proj.length - 1]
-  const r0 = last.revenue ?? 0, r1 = end.revenue ?? 0
-  const cagr = r0 > 0 && r1 > 0 ? (r1 / r0) ** (1 / n) - 1 : null
-  const margin = (r: Row) => (r.revenue ? (r.pat ?? 0) / r.revenue : null)
-  const fcf = proj.reduce((s, r) => s + (r.fcf ?? 0), 0)
-  const netCash = (end.cash ?? 0) + (end.investments ?? 0) - (end.borrowings ?? 0) - (end.lease ?? 0)
-  const P = ({ children }: { children: React.ReactNode }) => <span className="pencil-num">{children}</span>
-  const ttmGrowth = growth(ttm?.values.sales, r0)
-
-  return (
-    <p className="readout">
-      Revenue goes from Rs {money(r0)} cr in {histYear} to <P>Rs {money(r1)} cr</P> in {projYear}
-      {cagr != null && <>, <P>{fmt(cagr, 'pct')}</P> a year</>}. Net margin moves from {fmt(margin(last), 'pct')} to{' '}
-      <P>{fmt(margin(end), 'pct')}</P>. Over {n} years the business {fcf >= 0 ? 'generates' : 'burns'}{' '}
-      <P>Rs {money(Math.abs(fcf))} cr</P> of free cash and ends with{' '}
-      <P>Rs {money(Math.abs(netCash))} cr</P> net {netCash >= 0 ? 'cash' : 'debt'}.
-      {ttmGrowth != null && <> In the twelve months to {month(ttm!.end)}, revenue was Rs {money(ttm!.values.sales)} cr,{' '}
-        {fmt(Math.abs(ttmGrowth), 'pct')} {ttmGrowth >= 0 ? 'above' : 'below'} {histYear}.</>}
-    </p>
-  )
-}
-
-/** One line: final-year revenue and net profit in each scenario, low case first. */
-function Compare({ all, active, projYear }: { all: Projection['scenarios']; active: Scenario; projYear: string }) {
-  const order: Scenario[] = ['bear', 'base', 'bull']
-  const list = (k: string) => order.map((s, i) => {
-    const v = money(all[s][all[s].length - 1][k])
-    return <span key={s}>{i > 0 && ' · '}{s} {s === active ? <b className="pencil-num">{v}</b> : v}</span>
-  })
-  return (
-    <p className="compare">
-      In {projYear}, revenue: {list('revenue')} cr. Net profit: {list('pat')} cr.
-    </p>
+      <main id="main" className="wrap" tabIndex={-1}>
+        <div role="tabpanel" id="view" aria-labelledby={`tab-${view}`}>
+        {view === 'note' && <Note parsed={parsed} doc={doc} projection={proj} go={go} />}
+        {view === 'model' && <ModelView parsed={parsed} doc={doc} setDoc={setDoc} projection={proj} anchor={anchor} go={go} />}
+        {view === 'evidence' && <Evidence parsed={parsed} doc={doc} setDoc={setDoc} projection={proj} go={go}
+          upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals} toggleYear={toggleYear}
+          pendingYear={pendingYear} defaultsNote={defaultsNote} />}
+        </div>
+      </main>
+    </>
   )
 }
