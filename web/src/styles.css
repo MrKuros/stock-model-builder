@@ -71,6 +71,7 @@ button:disabled { cursor: default; opacity: .55; }
 .kind.ai { color: var(--ink-3); border: 1px dashed var(--rule-2); }
 .tag.you { color: var(--ours); border: 1px solid var(--ours); }
 .tag.prop { color: var(--market); border: 1px solid var(--market); }
+.tag.ai { color: var(--ink-2); border: 1px dashed var(--ink-3); }
 .tag.flag { color: var(--flag); border: 1px solid var(--flag); }
 .small-note { margin-top: 8px; font-size: 12.5px; color: var(--ink-3); line-height: 1.45; }
 
@@ -718,3 +719,51 @@ table, .strip-value input, .vfield input, .check-list { font-variation-settings:
 .cols { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(300px, .85fr); }
 @media (max-width: 1180px) { .cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 @media (max-width: 860px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+
+/* 4.2 draft assumptions: one table of proposed against current, then the desk's proposal card in the side panel */
+.draft-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px 24px; flex-wrap: wrap; }
+.draft-head > div { flex: 1 1 520px; max-width: 78ch; }
+.draft-head .small-note { margin-top: 0; }
+.draft-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px; border-top: 1px solid var(--ink); padding-top: 10px; }
+.draft-wrap { margin: 0; }
+.draft-t { width: 100%; min-width: 860px; border-collapse: collapse; font: 13px/1.4 var(--ui); }
+.draft-t th, .draft-t td { white-space: normal; }
+.draft-t .dd { width: 15%; }
+.draft-t .dc { width: 13%; }
+.draft-t thead th { font: 600 10.5px/1.2 var(--ui); font-stretch: 80%; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--rule-2); }
+.draft-t td, .draft-t tbody th { text-align: left; vertical-align: top; padding: 9px 10px 9px 0; border-bottom: 1px solid var(--rule); }
+.draft-t tbody th { font-weight: 600; width: 15%; }
+.draft-t .dv { white-space: nowrap; width: 11%; }
+.draft-t .dv .num { display: block; }
+.draft-t .now { display: block; color: var(--ink-3); font-size: 12px; }
+.draft-t .ds { width: 22%; }
+.draft-t .ds .small, .draft-t .dstate { display: block; color: var(--ink-2); }
+.draft-t details summary { cursor: pointer; color: var(--ink-2); min-height: 24px; }
+.draft-t details .serif { font-size: 14.5px; line-height: 1.5; margin: 4px 0; }
+.draft-t tr.is-done { color: var(--ink-2); }
+.draft-t tr.is-bad th, .draft-t tr.is-bad .dv .num { text-decoration: line-through; text-decoration-color: var(--flag); }
+.draft-t .acts { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-top: 4px; }
+.draft-t input { width: 9ch; font: inherit; padding: 6px; border: 1px solid var(--rule-2); border-radius: 4px; background: var(--panel); color: var(--ink); }
+.draft-t input[aria-invalid="true"] { border-color: var(--flag); }
+.bad-t { color: var(--flag); }
+.ok-t { color: var(--clear); }
+.ai-card .ai-val { margin: 0 0 6px; }
+.ai-card .ai-val .num { font-size: 18px; }
+.ai-card .serif { font-size: 15px; line-height: 1.5; margin: 0 0 6px; }
+.draft-t tbody th { position: static; background: none; padding-left: 0; font: 600 14px/1.35 var(--ui); }
+.draft-t tbody tr:hover th, .draft-t tbody tr:hover td { background: none; }
+/* phones: each input becomes a block (roles in the markup keep the table semantics): name, then bear / base / bull
+   side by side with their labels, then source, checks and the decision */
+@media (max-width: 640px) {
+  .draft-wrap { overflow: visible; }
+  .draft-t { min-width: 0; }
+  .draft-t thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .draft-t, .draft-t tbody, .draft-t tr, .draft-t td, .draft-t tbody th { display: block; width: auto; }
+  .draft-t tr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; padding: 12px 0; border-bottom: 1px solid var(--rule); }
+  .draft-t td, .draft-t tbody th { border: 0; padding: 0; }
+  .draft-t tbody th, .draft-t .ds, .draft-t .dc, .draft-t .dd { grid-column: 1 / -1; }
+  .draft-t .dv, .draft-t .ds, .draft-t .dc, .draft-t .dd, .draft-t tbody th { width: auto; }
+  .draft-t .dv { white-space: normal; }
+  .draft-t .dv::before { content: attr(data-label); display: block; font: 600 10.5px/1.2 var(--ui); font-stretch: 80%; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+  .draft-t .acts button { min-height: 40px; }
+}

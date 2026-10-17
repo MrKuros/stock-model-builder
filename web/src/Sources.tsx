@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Upgrade } from './Model'
 import {
-  api, dec2, fmt, money, postJson, type ArNote, type ArValue, type Check, type Company, type Decided, type Filing,
+  api, dec2, DOC_KINDS, fmt, isAnnual, money, postJson, type ArNote, type DocKind, type ArValue, type Check, type Company, type Decided, type Filing,
   type FlagNote, type Forensic, type NotesPlan, type OneOffNote, type Proposal, type Report, type Sources as Used,
 } from './lib'
 
@@ -80,7 +80,7 @@ export const decideNote = (ps: Proposal[], p: Proposal, status: Proposal['status
 /** A new proposal joins the list; one with the same id already there (decided or not) is kept as it is. */
 const addProposal = (ps: Proposal[], p: Proposal) => (ps.some(x => x.id === p.id) ? ps : [...ps, p])
 
-function Checks({ checks }: { checks: Check[] }) {
+export function Checks({ checks }: { checks: Check[] }) {
   if (!checks.length) return null
   return (
     <ul className="src-checks">
@@ -318,20 +318,21 @@ export default function Sources({
       )}
 
       <section className="src-reports" aria-labelledby="src-ar-head">
-        <h3 id="src-ar-head" className="src-sub">Annual reports</h3>
+        <h3 id="src-ar-head" className="src-sub">Annual reports, call transcripts and presentations</h3>
         <p className="muted small">
-          A report’s notes: segment revenue, debt maturity, capex, contingent liabilities and related-party
+          An annual report’s notes: segment revenue, debt maturity, capex, contingent liabilities and related-party
           transactions. Rules pick a few pages per topic, AI reads them and quotes each figure, rules check the quotes
           and tie the sums to the statements, and you approve. An approved capex figure becomes that year’s capex.
+          Transcripts and presentations are read only when you draft assumptions (Model tab).
         </p>
         <AttachReport years={years} ai={ai} onReports={onReports} />
         {reports.length > 0 && (
-          <ul className="src-list" aria-label="Annual reports">
+          <ul className="src-list" aria-label="Attached documents">
             {[...reports].sort((a, b) => b.year.localeCompare(a.year)).map(r => (
               <li key={r.id} className="src-item">
                 <div className="src-head">
-                  <h4>{r.year} annual report</h4>
-                  <button type="button" className="link lib-del" aria-label={`Remove ${r.file}, ${r.year} annual report`}
+                  <h4>{r.year} {DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}</h4>
+                  <button type="button" className="link lib-del" aria-label={`Remove ${r.file}, ${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}`}
                     onClick={() => {
                       if (!window.confirm(`Remove ${r.file} from this model? Its proposals and approved notes stay.`)) return
                       onReports(rs => rs.filter(x => x.id !== r.id))
@@ -339,7 +340,7 @@ export default function Sources({
                     }}>Remove</button>
                 </div>
                 <p className="muted small src-meta">{r.file} · {r.pages} pages · read by pdftotext; only the pages rules pick go to the model</p>
-                {years.includes(r.year) && <ReadNotes report={r} company={company} filings={filings} ai={ai}
+                {years.includes(r.year) && isAnnual(r) && <ReadNotes report={r} company={company} filings={filings} ai={ai}
                   onProposals={onProposals} />}
               </li>
             ))}
@@ -487,11 +488,14 @@ function ArNoteView({ n, sources }: { n: ArNote; sources?: Used }) {
   )
 }
 
-/** Attach an annual-report PDF for one of the reported years (its page text stays on the server). */
+/** Attach a PDF (annual report, call transcript or investor presentation) for one of the reported years; its page text
+ * stays on the server. One of each kind per year: a second replaces the first. */
 function AttachReport({ years, ai, onReports }: {
   years: string[]; ai: AiStatus | null; onReports: (f: (rs: Report[]) => Report[]) => void
 }) {
   const [year, setYear] = useState(years[years.length - 1])
+  const [kind, setKind] = useState<DocKind>('annual')
+  const what = DOC_KINDS[kind].toLowerCase()
   const [busy, setBusy] = useState<string | null>(null)
   const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null)
   const attach = async (file: File | undefined) => {
@@ -501,17 +505,23 @@ function AttachReport({ years, ai, onReports }: {
     const body = new FormData()
     body.append('file', file)
     body.append('year', year)
+    body.append('kind', kind)
     try {
       const r = await api<Report>('/api/report', { method: 'POST', body })
-      onReports(rs => [...rs.filter(x => x.year !== year && x.id !== r.id), r])
-      setMsg({ text: `Attached ${r.file} (${r.pages} pages) as the ${year} annual report.` })
+      onReports(rs => [...rs.filter(x => !(x.year === year && (x.kind ?? 'annual') === kind) && x.id !== r.id), r])
+      setMsg({ text: `Attached ${r.file} (${r.pages} pages) as the ${year} ${what}.` })
     } catch (e) { setMsg({ text: (e as Error).message, bad: true }) } finally { setBusy(null) }
   }
   const off = !!busy || ai?.pdf === false
   return (
     <>
       <div className="prop-ask">
-        <label className="ar-year">Year{' '}
+        <label className="ar-year">Document{' '}
+          <select value={kind} onChange={e => setKind(e.target.value as DocKind)} disabled={!!busy}>
+            {Object.entries(DOC_KINDS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+        </label>
+        <label className="ar-year">{kind === 'annual' ? 'Year' : 'Latest year it follows'}{' '}
           <select value={year} onChange={e => setYear(e.target.value)} disabled={!!busy}>
             {[...years].reverse().map(y => <option key={y}>{y}</option>)}
           </select>
@@ -519,7 +529,7 @@ function AttachReport({ years, ai, onReports }: {
         <label className={`file-btn ${off ? 'is-off' : ''}`}>
           <input type="file" accept=".pdf,application/pdf" className="visually-hidden" disabled={off}
             onChange={e => { attach(e.target.files?.[0]); e.target.value = '' }} />
-          Attach the {year} annual report (PDF)
+          Attach the {year} {what} (PDF)
         </label>
         <span className="muted small" aria-busy={!!busy}>{busy ?? (ai?.pdf === false ? ai.pdf_message : '')}</span>
       </div>
@@ -624,7 +634,7 @@ export function Explain({ year, company, filings, notes, report, proposals, note
     body.append('year', year)
     try {
       const r = await api<Report>('/api/report', { method: 'POST', body })
-      onReports(rs => [...rs.filter(x => x.year !== year), r])
+      onReports(rs => [...rs.filter(x => !(x.year === year && isAnnual(x))), r])
       setMsg({ text: `Attached ${r.file} (${r.pages} pages) as the ${year} annual report.` })
     } catch (e) { setMsg({ text: (e as Error).message, bad: true }) } finally { setBusy(null) }
   }

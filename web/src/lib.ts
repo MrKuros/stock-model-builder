@@ -109,15 +109,22 @@ export interface Filing {
 }
 /** Something read by AI that could change a number: shown with its source and checks, used only once approved. */
 export interface Proposal {
-  id: string; kind: 'mapping' | 'oneoff_note' | 'ar_note' | 'flag_note'; field: string; value: unknown; unit: string | null
+  id: string; kind: 'mapping' | 'oneoff_note' | 'ar_note' | 'flag_note' | 'assumption'; field: string; value: unknown; unit: string | null
   period: string | null; source: { file: string | null; page?: number | null; quote?: string | null; tag?: string | null }
   reasoning: string; checks: Check[]; status: 'proposed' | 'approved' | 'rejected'; ai: boolean
   filing?: string // a mapping: the id of the filing whose unmapped tag it maps
   report?: string | null // a one-off or annual-report note: the report it was read from (null: from the numbers only)
   from_numbers?: boolean
   pages?: number[] // an annual-report note: the PDF pages rules picked and sent
-  reply?: unknown // an annual-report note: the model's reply as given, re-checked by rules on approval
+  reply?: unknown // an annual-report note or assumption: the model's reply as given, re-checked by rules on approval
+  from_history?: boolean // an assumption the documents don't speak to: the rule default, no AI number
+  outside?: string | null // an assumption outside the company's history: the reason given (checked against the quote)
+  round?: string // an assumption: when its draft was made; the review table shows the latest round
 }
+/** proposal.value of a drafted assumption: a {start, end} path per scenario, in the engine's units. */
+export type Drafted = Record<Scenario, Path>
+/** Where each scenario's driver came from: an accepted proposal's id, "history" (the rule default) or "manual". */
+export type AssumptionSources = Partial<Record<Scenario, Record<string, string>>>
 /** One value of an annual-report note, in Rs crore (converted by rules), with where it was read. */
 export interface ArRow { label: string; amount: number | null; raw: unknown; page: number; quote: string }
 /** An annual-report note's value (proposal.value for kind ar_note): rows, their sum, and what it's compared with. */
@@ -130,8 +137,12 @@ export interface ArValue {
 export interface ArNote extends ArValue { proposal: string; topic: string; year: string; file: string | null; ai: true }
 /** POST /api/notes/plan: the pages rules pick per topic and the exact prompt size, before anything is sent. */
 export interface NotesPlan { topics: Record<string, { title: string; pages: number[]; chars: number }>; chars: number }
-/** An attached annual-report PDF (POST /api/report); its page text stays on the server. */
-export interface Report { id: string; file: string; year: string; pages: number }
+/** An attached PDF (POST /api/report); its page text stays on the server. Notes, one-offs and flags read only annual
+ * reports; transcripts and presentations are read to draft assumptions (4.2). Missing kind = annual (saved before 4.2). */
+export type DocKind = 'annual' | 'transcript' | 'presentation'
+export interface Report { id: string; file: string; year: string; pages: number; kind?: DocKind }
+export const DOC_KINDS: Record<DocKind, string> = { annual: 'Annual report', transcript: 'Earnings-call transcript', presentation: 'Investor presentation' }
+export const isAnnual = (r: Report) => (r.kind ?? 'annual') === 'annual'
 /** An approved one-off explanation, notes[`oneoff:${year}`]: words only, AI-written, never a number. */
 export interface OneOffNote {
   proposal: string; summary: string; file: string | null; page: number | null; quote: string | null
@@ -156,7 +167,7 @@ export interface ModelDoc {
   reports: Report[]
   // Phase 4 blocks (version 6): written by 4.2-4.4; 4.1 shows their slots empty
   note: Record<string, unknown> | null
-  assumption_sources: Record<string, unknown>
+  assumption_sources: AssumptionSources // 4.2
   flag_notes: FlagNote[] // 4.3: approved explanations of forensic flags
   reviewed_at: string | null // "Mark as reviewed"; cleared when the model changes
 }
