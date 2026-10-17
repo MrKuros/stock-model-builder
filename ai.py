@@ -11,7 +11,7 @@ import tempfile
 import unicodedata
 from datetime import date
 
-from model import _cr  # Rs crore with Indian grouping (ai may use model; model never imports ai)
+from model import OPINIONS, _cr  # Rs crore with Indian grouping (ai may use model; model never imports ai)
 
 TIMEOUT = 180  # seconds per call
 NOT_SET = "Set LLM_CMD to a command that reads a prompt on stdin and prints the reply, then restart."
@@ -304,6 +304,11 @@ TOPICS = {
                "total share capital is printed, use it and say so in the label; if the report says no shares are "
                "pledged, give 0 and quote that sentence)",
                (("pledged", 4), ("encumbered", 4), ("promoter group", 3), ("shareholding pattern", 2), ("promoter", 1))),
+    # words and citations only (never fed to the engine): lets the note say "profit before exceptional items" with a quote
+    "exceptional": ("Exceptional items", "from the consolidated statement of profit and loss for the year: first the "
+                    "profit before exceptional items (and tax) as printed, then each exceptional item on its own line",
+                    (("exceptional items", 4), ("exceptional item", 4), ("before exceptional", 4),
+                     ("statement of profit and loss", 2), ("profit before tax", 1))),
     "auditor": ("Auditor's report", "from the independent auditor's report on the consolidated financial statements: "
                 "the audit firm, the kind of opinion and whether the auditor changed this year",
                 (("independent auditor", 4), ("basis for opinion", 4), ("qualified opinion", 4), ("true and fair view", 3),
@@ -381,9 +386,6 @@ def note_prompt(topic, year, end: date, pages):
             'if the pages don\'t show it, answer {"found": false}.\n'
             'Answer as a JSON object: {"found": true, "unit": "crore", "items": [{"label": "...", "amount": 123.4, '
             '"page": 12, "quote": "..."}]}.')
-
-
-OPINIONS = ("unmodified", "qualified", "adverse", "disclaimer")
 
 
 def note_shape(v, topic=None):
@@ -660,32 +662,47 @@ def explain_flag(flag, numbers, pages=None):
     return ask_json(prompt, _note_shape(bool(pages)))
 
 
-_MON = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
-# years, FY labels and dates ("31 March 2026", "March 31, 2026") aren't figures
-FY_RE = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MON}|\b{_MON}\s+\d{{1,2}}(?:st|nd|rd|th)?\b,?"
-                   r"|\b(?:fy\s?'?)?(?:19|20)\d\d(?:\s?-\s?\d\d(?:\d\d)?)?\b|\bfy\s?'?\d\d\b", re.I)
+_MON = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?"
+        r"|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b\.?")
+# years, FY labels and dates ("31 March 2026", "March 31, 2026") aren't figures; whole month names only, so "margins
+# 45%" or "declined 15%" are still checked; a bare 19xx/20xx is a year only without money around it ("Rs 2045 crore"
+# is checked). ponytail: "may 30" still reads as a date
+FY_RE = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MON}|\b{_MON}\s+\d{{1,2}}(?:st|nd|rd|th)?\b(?!\s*%),?"
+                   r"|\bfy\s?'?(?:19|20)?\d\d(?:\s?-\s?\d\d(?:\d\d)?)?\b"
+                   r"|(?<![₹\d.,])(?<!rs )(?<!rs\. )(?<!rs)\b(?:19|20)\d\d(?:\s?-\s?\d\d(?:\d\d)?)?\b(?![.,]\d)"
+                   r"(?!\s*(?:cr\b|crores?\b|lakhs?\b|mn\b|bn\b|%|x\b|times\b|per\b))", re.I)
 PROSE_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
+# a unit after a small whole number makes it a figure ("12%", "5x"), not a count ("5 years")
+UNIT_AFTER = re.compile(r"\s*(?:%|per\s?cent\b|pp\b|bps\b|x\b|times\b|crores?\b|cr\b|lakhs?\b|days\b)", re.I)
+# figures in words can't be matched to the app's numbers, so they're rejected
+NUM_WORDS = re.compile(r"\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|"
+                       r"sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|"
+                       r"hundred|thousand|lakh|double|half)\b[\s-]*(?:%|per\s?cent\b|percent\b|crores?\b)", re.I)
 
 
 def unmatched(summary, given, quote=None):
     """The numbers in `summary` that are neither in `given` nor in `quote`, at the precision written (numbers_check)."""
     pool = {n for t in (given, quote or "") for n in (amount(x) for x in PROSE_NUM.findall(FY_RE.sub(" ", t))) if n is not None}
-    pool |= {x * 100 for x in pool}
+    pool |= {x * 100 for x in pool if abs(x) < 1.5}  # fractions the app passes as 0.2913 ("29%")
     bad = []
-    for raw in PROSE_NUM.findall(FY_RE.sub(" ", re.sub(r"\b(?:pages?|p\.)\s*\d+", " ", summary, flags=re.I))):
+    text = FY_RE.sub(" ", re.sub(r"\b(?:pages?|p\.)\s*\d+", " ", summary, flags=re.I))
+    for m in PROSE_NUM.finditer(text):
+        raw = m.group(0)
         x = amount(raw)
-        if x is None or (x == int(x) and x <= 12):
+        if x is None or (x == int(x) and x <= 12 and not UNIT_AFTER.match(text, m.end())):
             continue  # ponytail: small counts pass unchecked; "10 years" can't be told from a computed 10
         dp = len(raw.split(".")[1]) if "." in raw else 0
+        # ponytail: matches the number, not its unit, so "Rs 3,450 crore" passes against a Rs 3,450 share price
         if not any(abs(round(abs(p), dp) - x) <= 10 ** -dp / 2 + 1e-9 for p in pool):
             bad.append(raw.rstrip(","))
-    return bad
+    return bad + [m.group(0) for m in NUM_WORDS.finditer(summary)]
 
 
 def numbers_check(summary, given, quote=None):
     """Rule: every number in AI prose is one the app gave it (its computed figures and flag text, `given`) or one in the
     cited quote, at the precision written ("29%" matches 0.2913 and 29.13; "1,234" matches 1,234.4). Years and
-    financial-year labels and page references ("page 185") pass; so do counts up to 12 ("5 years"). {name, pass, detail}."""
+    financial-year labels and page references ("page 185") pass; so do counts up to 12 without a unit ("5 years", not
+    "5%"); figures in words ("fifteen percent") fail. {name, pass, detail}."""
     bad = unmatched(summary, given, quote)
     return {"name": "Numbers match", "pass": not bad,
             "detail": "Every number in the text is one the app computed or one in the quote." if not bad
@@ -785,14 +802,23 @@ DIRECTION = {"growth": 1, "ebitda_margin": 1, "oi_pct": 1, "tax_rate": -1, "int_
 CAPEX_DEP = 0.8  # growing with capex under 80% of depreciation = the net block shrinks while sales rise
 
 
+def quote_holds(quote, values, kind):
+    """A value (engine units) printed in the quote, at the precision the quote writes it: 0.14 in "growth of 14 percent"."""
+    nums = [(amount(x), len(x.split(".")[1]) if "." in x else 0) for x in PROSE_NUM.findall(FY_RE.sub(" ", quote))]
+    shown = [v * 100 if kind == "pct" else v for v in values if v is not None]
+    return any(q is not None and abs(round(v, dp) - q) <= 10 ** -dp / 2 + 1e-9 for q, dp in nums for v in shown)
+
+
 def assumption_checks(key, kind, value, bad, source, outside, reasoning, ctx):
     """Rules on one AI-drafted driver. value {base, bull, bear: {start, end}} already in the engine's units, `bad` the
     ones that didn't parse ("bull end"); source {page, quote, pages (the cited document's page texts), sent (its pages that were sent)};
     ctx {range: (lo, hi) of the reported history, size (Rs crore), given (the app's numbers as text), project (base
-    set -> (first projected year, rows) or None)}. [{name, pass, detail}]."""
+    set -> (first projected year, rows) or None), defaults (the rule defaults, to tell a size the quote never gave)}.
+    [{name, pass, detail}]."""
     fmt = (lambda x: f"{x:.1%}") if kind == "pct" else (lambda x: f"{x:,.0f} days") if kind == "days" else (lambda x: f"{_cr(x)}")
     nums = [(s, e, value[s][e]) for s in ("base", "bull", "bear") for e in ("start", "end")]
     page, quote, pages, sent = source["page"], norm(source.get("quote") or ""), source["pages"], source["sent"]
+    raw_quote = source.get("quote") or ""
     on = bool(pages) and 1 <= page <= len(pages) and on_page(quote, pages[page - 1])
     long = len(quote.split()) >= MIN_QUOTE_WORDS
     cited = page in sent and on and long
@@ -823,10 +849,15 @@ def assumption_checks(key, kind, value, bad, source, outside, reasoning, ctx):
         slack = HIST_SLACK.get(kind, 0.0)
         far = [v for v in base if not rng[0] - slack <= v <= rng[1] + slack]
         why = (outside or "").strip()
-        checks.append({"name": "Against its history", "pass": True if not far else bool(why) and cited,
+        # outside history, the quote itself must print the figure: a cited mood ("demand is strong") can't back 60%.
+        # ponytail: worded guidance ("double-digit growth") or a range ("10-12%") can't justify it; type that value in
+        holds = quote_holds(raw_quote, base, kind)
+        checks.append({"name": "Against its history", "pass": True if not far else bool(why) and cited and holds,
                        "detail": f"Base inside the reported range {fmt(rng[0])} to {fmt(rng[1])}." if not far
                        else f"Base {fmt(far[0])} is outside the reported range {fmt(rng[0])} to {fmt(rng[1])}; "
-                       + (f"the cited reason: {why[:200]}" if why and cited else "no cited reason given, so it fails.")})
+                       + (f"the cited reason: {why[:200]}" if why and cited and holds
+                          else f"the quote doesn't state {fmt(far[0])}, so it fails." if why and cited
+                          else "no cited reason given, so it fails.")})
     d = DIRECTION.get(key)
     if d is None:
         checks.append({"name": "Bear ≤ base ≤ bull", "pass": None, "detail": "No clear better direction for this driver."})
@@ -837,7 +868,14 @@ def assumption_checks(key, kind, value, bad, source, outside, reasoning, ctx):
         checks.append({"name": "Bear ≤ base ≤ bull", "pass": ok,
                        "detail": ("Bear no better than base, bull no worse" + (" (lower is better here)." if d < 0 else "."))
                        if ok else "The cases are in the wrong order: bear is better than base, or base than bull."})
+    default = (ctx.get("defaults") or {}).get(key)
+    step = {"pct": 0.01, "days": 5.0}.get(kind)
+    if step and default is not None and not re.search(r"\d", raw_quote) and any(
+            v is not None and abs(v - default) > step + 1e-12 for v in (value["base"]["start"], value["base"]["end"])):
+        checks.append({"name": "Size from the source", "pass": None,
+                       "detail": "Direction only: the quote gives no number; the size of the change is the AI's."})
     checks.append(numbers_check(reasoning, ctx["given"], source.get("quote")))
+    checks.append(wording_check(reasoning, outside))
     proj = ctx.get("project")
     if key in ("capex_pct", "payout") and proj:
         year, rows = proj
@@ -860,8 +898,19 @@ def assumption_checks(key, kind, value, bad, source, outside, reasoning, ctx):
 
 # recommendation wording the note must never use (SEBI: analysis, not advice). ponytail: a word list, so "sell" in
 # "sell more steel" is rejected too; the retry names the word and the model rephrases
-FORBIDDEN = re.compile(r"\b(?:buy|sell|target price|price target|recommend\w*|accumulate|outperform\w*|underperform\w*"
-                       r"|overweight|underweight)\b", re.I)
+FORBIDDEN = re.compile(r"\b(?:buy(?!-?back)|sell(?!-side)|target price|price target|price objective|fair value target"
+                       r"|recommend\w*|accumulate|outperform\w*|underperform\w*|overweight|underweight"
+                       r"|(?:exit|add to|trim) (?:the|your) (?:stock|position)|hold rating|rated hold)\b", re.I)
+# absolute claims about a history that starts at the export's first year
+ABSOLUTE = re.compile(r"\b(?:never|always|ever)\b", re.I)
+
+
+def wording_check(*texts):
+    """Rule on any AI words a page shows: no recommendation wording (FORBIDDEN). {name, pass, detail}."""
+    m = next((m for t in texts if t for m in [FORBIDDEN.search(t)] if m), None)
+    return {"name": "No recommendation wording", "pass": not m,
+            "detail": "No buy, sell, target-price or recommend wording." if not m
+            else f'It says "{m.group(0)}": this is analysis, not a recommendation, so it is rejected.'}
 THESIS_LEN = {"headline": 160, "head": 90, "text": 650, "priced_in": 450, "risk": 350, "trigger": 300, "watch": 200}
 
 
@@ -885,6 +934,18 @@ def thesis_prompt(name, facts, cites):
             "point restating them: each point makes one judgement an analyst would make (growth, margins, cash, the "
             "balance sheet, what the value hinges on) and backs it with the facts.\n"
             "- Plain English, short sentences, no hype. Money in Rs crore with Indian grouping (1,64,177), as in the facts.\n"
+            "- The history starts at the first year in the facts. Compare the growth the price needs only with runs of the "
+            "same length, and never write never, always or ever: say since that year.\n"
+            "- If a fact says Export folds exceptional items into other income, judge profit growth on EBITDA, EBIT or a "
+            "cited figure before exceptional items, not on reported net profit.\n"
+            "- If the discount-rate fact says beta or the premium is the app default, say our value depends on that "
+            "choice, and don't call a WACC break-even within 3 points of ours far-fetched: WACC is a judgement, not a result.\n"
+            "- If the margin or growth the price needs lies inside the company's own history (the range and seen-before "
+            "facts), call it a bet on the cycle or a return to past results, not something the business has never done.\n"
+            "- If a citation's description or quote mentions a sale, slump sale, demerger, transfer to a joint venture or "
+            "deconsolidation, say in words which business leaves the base from next year and that our base still includes it.\n"
+            "- Rank risks by the rule checks: Red, then Amber, then the rest. Mention the auditor only if the opinion is "
+            "modified or the auditor changed.\n"
             '- "refs" lists the fact keys or citation ids behind the point, at least one each.\n\n'
             "Answer as a JSON object:\n"
             '{"headline": "one sentence under 160 characters: what the price assumes against what the business does",\n'
@@ -944,16 +1005,21 @@ def thesis_items(v):
 
 def thesis_checks(v, facts, cites, texts):
     """Rules on a note reply. A ref is a fact key, a citation id, or {file, page, quote}; texts(file, page) gives that
-    page's texts ([] = no such page, None = the document's text isn't on this machine). Every number must be a fact or
-    in a quote the item cites (items without refs: any citation's quote). [{name, pass, detail}]."""
+    page's texts ([] = no such page, None = the document's text isn't on this machine). Every number must be any fact,
+    or in a quote the item cites (items without refs: any citation's quote). ponytail: facts aren't scoped to the item's
+    refs; a point quoting the price beside its cited fact is fine. [{name, pass, detail}]."""
     given, every = "\n".join(facts.values()), " ".join(c["quote"] for c in cites.values())
-    bad = {k: [] for k in ("Numbers match", "Sources exist", "Quotes on page", "No recommendation wording", "Length")}
+    approved = {(c["file"], c["page"], c["quote"]) for c in cites.values()}
+    bad = {k: [] for k in ("Numbers match", "Sources exist", "Quotes on page", "No recommendation wording",
+                           "No never or always", "Length")}
     gone = set()
     for where, text, refs, lim in thesis_items(v):
         if len(text) > lim:
             bad["Length"].append(f"{where} is {len(text)} characters (limit {lim})")
         if m := FORBIDDEN.search(text):
             bad["No recommendation wording"].append(f'{where} says "{m.group(0)}"')
+        if m := ABSOLUTE.search(text):
+            bad["No never or always"].append(f'{where} says "{m.group(0)}"')
         quotes, head = [every] if refs is None else [], where.endswith("head")  # a head shares its point's refs
         for r in refs or []:
             if isinstance(r, str) and r in facts:
@@ -965,7 +1031,12 @@ def thesis_checks(v, facts, cites, texts):
                     bad["Sources exist"].append(f"{where}: {json.dumps(r)[:40]} is neither a fact key nor a citation")
                 continue
             t = texts(c["file"], c["page"])
-            if t is None:
+            if t is None:  # text gone: only a quote approved earlier (and checked then) still counts
+                if (c["file"], c["page"], c["quote"]) not in approved:
+                    if not head:
+                        bad["Quotes on page"].append(f"{where}: the text of {c['file']} isn't on this machine; only "
+                                                     "approved quotes can be cited")
+                    continue
                 gone.add(c["file"])
             elif not head and not on_page(c["quote"], t):
                 bad["Quotes on page"].append(f'{where}: the quote "{c["quote"][:50]}" isn\'t on page {c["page"]} of {c["file"]}')
@@ -978,11 +1049,13 @@ def thesis_checks(v, facts, cites, texts):
           "Sources exist": "Every reference is a computed fact or an approved citation.",
           "Quotes on page": "Every cited quote occurs on its page.",
           "No recommendation wording": "No buy, sell, target-price or recommend wording.",
+          "No never or always": "No never, always or ever: the history starts at the export's first year.",
           "Length": "Every part is within its length limit."}
-    why = {"Numbers match": " (neither computed by the app nor in a cited quote)", "Sources exist": "",
-           "Quotes on page": "", "No recommendation wording": "", "Length": ""}
-    out = [{"name": k, "pass": not xs, "detail": ok[k] if not xs else "; ".join(xs[:5]) + why[k] + "."} for k, xs in bad.items()]
+    why = {"Numbers match": " (neither computed by the app nor in a cited quote)",
+           "No never or always": " (the data starts at the export's first year; say since that year)"}
+    out = [{"name": k, "pass": not xs, "detail": ok[k] if not xs else "; ".join(xs[:5]) + why.get(k, "") + "."}
+           for k, xs in bad.items()]
     if gone and not bad["Quotes on page"]:
-        out[2] = {"name": "Quotes on page", "pass": None,
-                  "detail": f"The text of {', '.join(sorted(gone))} isn't on this machine any more; those quotes were checked when approved."}
+        out = [{"name": c["name"], "pass": None, "detail": f"The text of {', '.join(sorted(gone))} isn't on this machine "
+                "any more; those quotes were checked when approved."} if c["name"] == "Quotes on page" else c for c in out]
     return out

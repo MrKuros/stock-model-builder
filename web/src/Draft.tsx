@@ -189,7 +189,8 @@ function Row({ p, doc, kind, name, d }: { p: Proposal; doc: ModelDoc; kind: Kind
             {p.outside && <p className="small">Outside its history because: {p.outside}</p>}
           </details></>}</td>
       <td role="cell" className="dc">{p.from_history ? <span className="small dim">No AI number</span>
-        : <details><summary>{bad ? <span className="bad-t">✗ {firstBad?.name}</span> : <span className="ok-t">✓ {p.checks.filter(c => c.pass).length} passed</span>}</summary>
+        : <details><summary>{bad ? <span className="bad-t">✗ {firstBad?.name}</span> : <span className="ok-t">✓ {p.checks.filter(c => c.pass).length} passed</span>}{p.checks.some(c => c.name === 'Size from the source' && c.pass == null)
+          && <span className="small"> · size not in the source</span>}</summary>
           <Checks checks={p.checks} /></details>}</td>
       <td role="cell" className="dd">{edit
         ? <span className="acts"><button type="button" className="btn" onClick={save}>Save</button>

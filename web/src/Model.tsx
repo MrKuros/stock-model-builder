@@ -7,7 +7,7 @@ import DraftPanel, { failing, latest, path, useDraft } from './Draft'
 import { Checks } from './Sources'
 import type { Go } from './App'
 import {
-  DOC_KINDS, fmt, flat, flatAll, groupKeys, money, seed, SCENARIOS, shortYear, type Proposal,
+  DOC_KINDS, defaultPaths, fmt, flat, groupKeys, money, seed, SCENARIOS, SHIFT, shortYear, type Proposal,
   type Kind, type ModelDoc, type Parsed, type Paths, type Projection, type Row, type Scenario, type Ttm,
 } from './lib'
 
@@ -73,7 +73,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
   const setActive = (active: Scenario) => setDoc(d => ({ ...d, active }))
   const setA = (f: (p: Paths) => Paths) =>
     setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [d.active]: f(d.scenarios[d.active]) } }))
-  const seeded = useMemo(() => seed(flatAll(defaults)), [defaults])
+  const seeded = useMemo(() => seed(defaultPaths(defaults, parsed.default_ends)), [defaults, parsed.default_ends])
   const [metric, setMetric] = useState(METRICS[0][0])
   const byKey = Object.fromEntries(drivers.map(d => [d[0], d]))
   const [sel, setSel] = useState(() => (byKey[anchor] ? anchor : 'growth'))
@@ -136,7 +136,10 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
   const flagOf = (k: string) => parsed.oneoffs.filter(o => o.metric === k && recent.includes(o.year))
   const checkOf = (k: string) => (parsed.rule_checks ?? []).find(c => c.id === k && (c.status === 'red' || c.status === 'amber'))
   const valueOf = (k: string) => a[k] ?? flat(seeded[active][k].start)
-  const isYou = (k: string) => { const p = valueOf(k), d = seeded[active][k]; return p.end != null || Math.abs(p.start - (d?.start ?? 0)) > 1e-9 }
+  const isYou = (k: string) => {
+    const p = valueOf(k), d = seeded[active][k]
+    return Math.abs(p.start - (d?.start ?? 0)) > 1e-9 || (p.end == null) !== (d?.end == null) || (p.end != null && Math.abs(p.end - d!.end!) > 1e-9)
+  }
   const range = (k: string) => { const xs = ratios.map(r => r[k]).filter((x): x is number => x != null && Number.isFinite(x)); return xs.length ? [Math.min(...xs), Math.max(...xs)] : null }
   const used = histYears.filter(y => !doc.excluded_years.includes(y)).slice(-3) // mirrors default_assumptions(years=3)
   const kindOf = (k: string) => byKey[k][2] as Kind
@@ -238,7 +241,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
                 const i = histYears.indexOf(y)
                 return <span key={y}>{y} {selKey === 'growth' ? money(hist[i].revenue) : fmt(ratios[i][selKey], kindOf(selKey))}</span>
               })}
-              <span className="ours">= {fmt(seeded[active][selKey].start, kindOf(selKey))}{active !== 'base' && (selKey === 'growth' || selKey === 'ebitda_margin') ? ` (${active}: base ${selKey === 'growth' ? '± 3' : '± 1.5'} pp)` : ''}</span>
+              <span className="ours">= {fmt(seeded[active][selKey].start, kindOf(selKey))}{active !== 'base' && SHIFT[selKey] ? ` (${active}: base ± ${+(SHIFT[selKey] * 100).toFixed(2)} pp)` : ''}{seeded[active][selKey].end != null ? `, fading to ${fmt(seeded[active][selKey].end!, kindOf(selKey))} (a fast grower)` : ''}</span>
             </p>}
             <p className="small dim">{selKey === 'growth' ? 'Revenue, Rs crore' : 'Each year as reported'}, from the Export export{doc.excluded_years.length ? `; left out: ${doc.excluded_years.join(', ')}` : ''}.</p>
           </div>

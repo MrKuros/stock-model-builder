@@ -39,7 +39,7 @@ export function useAi() {
 /** Annual-report note topics (ai.TOPICS), in reading order. */
 export const TOPICS: Record<string, string> = {
   segments: 'Segment revenue', maturity: 'Debt maturity', capex: 'Capex', contingent: 'Contingent liabilities',
-  related: 'Related-party transactions', pledge: 'Promoter pledge', auditor: 'Auditor’s report',
+  related: 'Related-party transactions', pledge: 'Promoter pledge', exceptional: 'Exceptional items', auditor: 'Auditor’s report',
 }
 
 /** doc.flag_notes from the approved flag_note proposals: one per flag (decideNote keeps one approved). */
@@ -47,9 +47,11 @@ export const withFlagNotes = (ps: Proposal[]): FlagNote[] => ps.filter(p => p.ki
   .map(p => ({ key: p.field, year: p.period ?? '', proposal: p.id, summary: String(p.value), file: p.source.file,
     page: p.source.page ?? null, quote: p.source.quote ?? null, from_numbers: !!p.from_numbers, ai: true }))
 
-/** An annual-report note's headline value: money in Rs crore, a pledge in %, the auditor's opinion in words. */
+/** An annual-report note's headline value: money in Rs crore, a pledge in %, the auditor's opinion in words, exceptional items by their first line. */
 export const arHeadline = (topic: string, v: ArValue) => (topic === 'pledge' ? `${fmt(v.total / 100, 'pct')} pledged`
-  : topic === 'auditor' ? `${v.opinion ?? '–'} opinion, ${v.auditor ?? '–'}${v.changed ? ', changed' : ''}` : `Rs ${money(v.total)} cr`)
+  : topic === 'auditor' ? `${v.opinion ?? '–'} opinion, ${v.auditor ?? '–'}${v.changed ? ', changed' : ''}`
+  : topic === 'exceptional' ? `${v.rows[0]?.label ?? '–'} Rs ${v.rows[0]?.amount != null ? money(v.rows[0].amount) : '–'} cr` // a profit and its charges: no sum
+  : `Rs ${money(v.total)} cr`)
 
 /** notes with the one-off and annual-report entries rebuilt from the approved proposals (one per year, or per topic
  * and year). The server reads "ar:capex:<year>" for the capex history, so the two must never disagree. */
@@ -318,7 +320,7 @@ export default function Sources({
       )}
 
       <section className="src-reports" aria-labelledby="src-ar-head">
-        <h3 id="src-ar-head" className="src-sub">Annual reports, call transcripts and presentations</h3>
+        <h3 id="src-ar-head" className="src-sub" tabIndex={-1}>Annual reports, call transcripts and presentations</h3>
         <p className="muted small">
           An annual report’s notes: segment revenue, debt maturity, capex, contingent liabilities and related-party
           transactions. Rules pick a few pages per topic, AI reads them and quotes each figure, rules check the quotes

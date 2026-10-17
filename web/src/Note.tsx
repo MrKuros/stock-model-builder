@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import Ruler from './Ruler'
 import { SEV, bySeverity } from './Evidence'
 import { FlagNoteView, useAi } from './Sources'
@@ -12,7 +12,11 @@ import {
 export const avg = (p: Path | undefined) => (p ? (p.start + (p.end ?? p.start)) / 2 : 0)
 export const shortName = (n: string) => n.replace(/\s+(ltd\.?|limited)$/i, '').trim()
 /** The name as a sentence subject: long legal names read as "the company" (the export carries no ticker). */
-const subject = (n: string) => (shortName(n).length <= 18 ? shortName(n) : 'It')
+const COMPANY = 'The company'
+const subject = (n: string) => (shortName(n).length <= 18 ? shortName(n) : COMPANY)
+/** Possessive: "Tata Motors’", "TCS’s" (plural-form names take the apostrophe alone). */
+const poss = (n: string) => (/[a-z]s$/.test(n) ? `${n}’` : `${n}’s`)
+const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen']
 const pc = (v: number) => fmt(v, 'pct')
 const DAYS = new Set(['dso', 'dio', 'dpo'])
 const unit = (key: string, v: number) => (DAYS.has(key) ? `${Math.round(v)} days` : pc(v))
@@ -69,7 +73,7 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
   const { company, years } = parsed
   const hist = parsed.hist ?? company.hist
   const name = subject(company.name)
-  const nameIn = name === 'It' ? 'it' : name
+  const nameIn = name === COMPANY ? 'the company' : name
   const v = projection?.valuation ?? null
   const sv = v?.scenarios.base
   const value = sv?.per_share ?? null
@@ -80,6 +84,13 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
   const c3 = parsed.cagrs?.['3'] ?? [], c5 = parsed.cagrs?.['5'] ?? []
   const best = (cs: Cagr[]) => (cs.length ? cs.reduce((a, b) => (b.value > a.value ? b : a)) : null)
   const best3 = best(c3), best5 = best(c5)
+  // the price needs a flat rate for n years: compare it with runs of the same length (or the longest the data has)
+  const hz = Math.min(doc.n, hist.length - 1)
+  const runs: Cagr[] = hist.flatMap((h, i) => {
+    const a = i >= hz ? hist[i - hz].revenue : null, b = h.revenue
+    return a != null && b != null && a > 0 && b > 0 ? [{ from: years[i - hz], to: years[i], value: (b / a) ** (1 / hz) - 1 }] : []
+  })
+  const bestN = best(runs)
   const implied = sv?.implied_growth ?? null
   const bear = v?.scenarios.bear.per_share ?? null, bull = v?.scenarios.bull.per_share ?? null
   const nb = v?.note ?? null
@@ -96,7 +107,11 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
   const refN = new Map<string, number>()
   const factTo = (k: string) => (k.startsWith('flag_') ? () => go('evidence', k.slice(5)) : k.startsWith('in_') ? () => go('model', k.slice(3))
     : k.startsWith('oneoff_') ? () => go('evidence', 'oneoffs') : () => go('model', 'valuation'))
-  const nCagr = best3 ? cite('Reported', <>Revenue (Export export, Sales row): {c3.length} rolling three-year window{c3.length > 1 ? 's' : ''} from {years[0]}; fastest {best3.from}–{best3.to}.</>) : 0
+  const showCagr = value != null && price != null && implied != null && bestN != null
+  const nCagr = showCagr ? cite('Reported', <>Revenue (Export export, Sales row): {runs.length} rolling {WORDS[hz] ?? hz}-year window{runs.length > 1 ? 's' : ''} from {years[0]}; fastest {bestN!.from}–{bestN!.to}.</>) : 0
+  const stale = !!tn && projection?.inputs_hash != null && projection.inputs_hash !== tn.inputs_hash
+  // the written note's facts that the verdict already cites share its footnote (while the words match the inputs)
+  if (tn && !stale) { if (nImplied) refN.set('implied_growth', nImplied); if (nCagr) refN.set(`best${hz}`, nCagr) }
 
   if (tn) for (const r of [...tn.thesis.flatMap(p => p.refs), ...tn.risks.flatMap(p => p.refs)]) {
     const k = refKey(r), s = refSource(tn, r)
@@ -105,18 +120,21 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
       s.file ? () => go('evidence', 'src-ar-head') : factTo(k)))
   }
   const P = (text: string, refs: NoteRef[], uid: string) => (tn ? <Prose text={text} refs={refs} tn={tn} refN={refN} uid={uid} /> : null)
-  const stale = !!tn && projection?.inputs_hash != null && projection.inputs_hash !== tn.inputs_hash
 
   // --- verdict ---
   let h1: ReactNode, stand: ReactNode = null
+  // a dead end names its fix and links to it (App's anchor falls back to the element id, so focus lands on the input)
+  const fix = (to: string, label: string) => <> <button type="button" className="link" onClick={() => go('model', to)}>{label}</button></>
   if (value == null) {
     const why = !v ? 'the model is still calculating, or the inputs gave an error (see Model).'
       : v.error ?? sv?.error ?? (v.shares == null ? 'there is no share count. Type one under Model, Valuation.' : 'see Model, Valuation.')
+    const to = !v ? null : !v.error && v.shares == null ? 'v-shares' : !v.error && sv?.error?.startsWith('Final-year free cash flow') ? 'capex_pct' : 'valuation'
     h1 = <>No value yet.</>
-    stand = <>Our base case has no value per share: {why} The rule checks and key numbers below still apply.</>
+    stand = <>Our base case has no value per share: {why}{to && fix(to, to === 'v-shares' ? 'Type the share count' : to === 'capex_pct' ? 'Open capex' : 'Open Valuation')} The
+      rule checks and key numbers below still apply.</>
   } else if (price == null) {
     h1 = <>Our base value is <span className="ours">Rs {rs(value)}</span> a share.</>
-    stand = <>There’s no share price in this file, so nothing to compare it with. Type one under Model, Valuation.</>
+    stand = <>There’s no share price in this file, so nothing to compare it with. Type one under Model, Valuation.{fix('v-price', 'Type a price')}</>
   } else if (implied != null) {
     h1 = <>The price needs <Cite n={nImplied} src="Reverse DCF on our base case, computed by rules" plain><span className="mkt">{pc(implied)}</span></Cite> growth a year. {isDefault
       ? <>{name} is doing <span className="ours">{pc(ours)}</span>.</>
@@ -132,8 +150,9 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
       share, bear to bull. At <span className="num mkt">Rs {rs(price)}</span> {where}.{' '}
       {implied == null
         ? <>No flat revenue growth between −30% and +80% a year gets our base case to the price.</>
-        : best3 && <>{name === 'It' ? 'Its' : `${name}’s`} fastest three years since {years[0]}, <Cite n={nCagr} src={`Revenue CAGR ${best3.from}–${best3.to}, from the Export export`}>{pc(best3.value)}</Cite> a
-          year in {best3.from}–{best3.to.slice(-2)}, {best3.value >= implied ? 'would get there' : 'would not get there'}.</>}</>
+        : bestN && <>{poss(name)} fastest {WORDS[hz] ?? hz} years since {years[0]}, <Cite n={nCagr} src={`Revenue CAGR ${bestN.from}–${bestN.to}, from the Export export`}>{pc(bestN.value)}</Cite> a
+          year in {bestN.from}–{bestN.to.slice(-2)}, {bestN.value >= implied ? 'would get there' : 'would not get there'}{hz < doc.n
+            ? <> (the longest run in the data; the price needs {WORDS[doc.n] ?? doc.n} years)</> : null}.</>}</>
   }
 
   // how sure: the 50 sensitivity cells against the price
@@ -210,7 +229,7 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
 
         <div className="col">
           {nb && nb.impact.length > 0 && value != null && <Tornado impact={nb.impact.slice(0, 5)} base={value} price={price} oursOf={oursOf} />}
-          {price != null && nb && <BreakEvens be={be} price={price} oursOf={oursOf} c3={c3} hist={hist} v={v!} vi={doc.valuation} />}
+          {price != null && nb && <BreakEvens be={be} price={price} oursOf={oursOf} c3={c3} hist={hist} v={v!} vi={doc.valuation} beta0={parsed.valuation.beta} />}
         </div>
 
         <div className="col side">
@@ -228,7 +247,7 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
               </tbody>
             </table>
             <p className="small-note">{sv.tv_share != null && <>{pc(sv.tv_share)} of value is terminal. </>}
-              <button type="button" className="link" onClick={() => go('model', 'valuation')}>Open the bridge</button></p>
+              <button type="button" className="link" onClick={() => go('model', 'bridge')}>Open the bridge</button></p>
           </section> })()}
         </div>
       </div>
@@ -252,7 +271,7 @@ export default function Note({ parsed, doc, setDoc, projection, go }: Props) {
         <p>Analysis, not a recommendation. Built from a Export.in export and the rules in this app; no management access
           or channel checks.</p>
         <div className="key3" aria-label="How to read this note">
-          <span className="s1">{value != null ? rs(value) : 'Mono'} computed by rules</span>
+          <span className="s1">{value != null ? <>{rs(value)} computed by rules</> : <>Numbers in mono: computed by rules</>}</span>
           <span className="s2">Written words, AI, cited</span>
           <span className="mkt">Market price</span>
           <span className="ours">Our model</span>
@@ -385,8 +404,8 @@ function Tornado({ impact, base, price, oursOf }: { impact: Impact[]; base: numb
   )
 }
 
-function BreakEvens({ be, price, oursOf, c3, hist, v, vi }: {
-  be: NonNullable<Valuation['note']>['breakevens']; price: number; oursOf: (k: string) => number; c3: Cagr[]; hist: Row[]; v: Valuation; vi: ValInputs
+function BreakEvens({ be, price, oursOf, c3, hist, v, vi, beta0 }: {
+  be: NonNullable<Valuation['note']>['breakevens']; price: number; oursOf: (k: string) => number; c3: Cagr[]; hist: Row[]; v: Valuation; vi: ValInputs; beta0: number
 }) {
   const margins = hist.map(h => (h.revenue ? (h.ebitda ?? 0) / h.revenue : null)).filter((x): x is number => x != null)
   const band: Record<string, [number, number, string] | null> = {
@@ -407,7 +426,7 @@ function BreakEvens({ be, price, oursOf, c3, hist, v, vi }: {
           const lo = lo0 - pad, hi = hi0 + pad
           const x = (n: number) => `${((n - lo) / (hi - lo)) * 100}%`
           const cap = k === 'wacc'
-            ? <>Ours {pc(ours)}{vi.wacc_override != null ? ' (typed)' : <>: cost of equity {pc(v.ke)} = {pc(vi.rf)} risk-free + {vi.beta} beta × {pc(vi.erp)} premium, blended with debt</>}</>
+            ? <>Ours {pc(ours)}{vi.wacc_override != null ? ' (typed)' : <>: cost of equity {pc(v.ke)} = {pc(vi.rf)} risk-free + {vi.beta} beta × {pc(vi.erp)} premium, blended with debt{vi.beta === beta0 ? ' (beta is the app default, not estimated for this company)' : ''}</>}</>
             : k === 'g' ? <>Ours {pc(ours)}</>
             : <>Ours {pc(ours)}{h && <> · {h[2]} <span className="num">{pc(h[0])}–{pc(h[1])}</span></>}</>
           const label = `${NAMES[k]}: needed ${need == null ? 'none in range' : pc(need)}; ours ${pc(ours)}${h ? `; ${h[2]} ${pc(h[0])} to ${pc(h[1])}` : ''}.`
@@ -531,12 +550,23 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
   const ai = useAi()
   const [busy, setBusy] = useState(false)
   const [fail, setFail] = useState<{ text: string; checks?: ThesisNote['checks'] } | null>(null)
+  const [done, setDone] = useState(false)
+  const head = useRef<HTMLHeadingElement>(null)
   const write = async () => {
     setBusy(true)
     setFail(null)
+    setDone(false)
     try {
       const r = await api<ThesisNote>('/api/note/write', postJson(doc))
-      if (r.status === 'written') setDoc(d => ({ ...d, note: r, reviewed_at: null })) // new words: back to draft
+      if (r.status === 'written') {
+        setDoc(d => ({ ...d, note: r, reviewed_at: null })) // new words: back to draft
+        setDone(true)
+        // the "Write the note" button unmounts: put focus on the heading, unless you moved on during the wait
+        window.setTimeout(() => {
+          const a = document.activeElement
+          if (!a || a === document.body || head.current?.closest('section')?.contains(a)) head.current?.focus()
+        })
+      }
       else setFail({ text: 'The note failed the rule checks twice, so it wasn’t saved.', checks: r.checks.filter(c => c.pass === false) })
     } catch (e) { setFail({ text: (e as Error).message }) } finally { setBusy(false) }
   }
@@ -551,10 +581,11 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
   const nCites = tn ? Object.keys(tn.cites).length : 0
   return (
     <section className="sec thesis" aria-labelledby="thesis-h">
-      <h2 id="thesis-h" className="label sec-label"><span>Thesis · <b>3 points</b></span>
+      <h2 id="thesis-h" ref={head} tabIndex={-1} className="label sec-label"><span>Thesis · <b>3 points</b></span>
         <span className={`who${stale ? ' stale' : ''}`}>{!tn ? 'Not written yet' : stale ? 'Written for earlier inputs' : 'AI-written · cited'}</span></h2>
       <div aria-live="polite">
         {busy && <p className="small-note">Writing the note from the numbers on this page. This takes a minute or two.</p>}
+        {done && !busy && <p className="sr">Note written and checked against the model.</p>}
         {fail && <div className="fail" role="alert"><p>{fail.text}</p>
           {fail.checks?.length ? <ul>{fail.checks.map(c => <li key={c.name}><strong>{c.name}:</strong> {c.detail}</li>)}</ul> : null}</div>}
       </div>
