@@ -298,6 +298,17 @@ TOPICS = {
                 "each with the party (or group of parties) and the nature, e.g. 'Holding company: dividend paid'",
                 (("related party", 3), ("related parties", 3), ("key management personnel", 2),
                  ("transactions with", 1))),
+    # 4.3 forensic radar: a share, not money, and words with quotes
+    "pledge": ("Promoter pledge", "the share of the promoter and promoter group's shares pledged or otherwise "
+               "encumbered at the year end, as a percentage of their own holding: one item (if only a percentage of "
+               "total share capital is printed, use it and say so in the label; if the report says no shares are "
+               "pledged, give 0 and quote that sentence)",
+               (("pledged", 4), ("encumbered", 4), ("promoter group", 3), ("shareholding pattern", 2), ("promoter", 1))),
+    "auditor": ("Auditor's report", "from the independent auditor's report on the consolidated financial statements: "
+                "the audit firm, the kind of opinion and whether the auditor changed this year",
+                (("independent auditor", 4), ("basis for opinion", 4), ("qualified opinion", 4), ("true and fair view", 3),
+                 ("statutory auditor", 3), ("firm's registration", 3), ("firm registration", 3), ("chartered accountants", 2),
+                 ("key audit matters", 2), ("auditor", 1))),
 }
 TOPIC_PAGES = 3  # ponytail: the 3 best pages per topic, cut to 8k characters; a missed note means attach + read again
 UNITS = {"crore": 1.0, "lakh": 0.01, "million": 0.1, "billion": 100.0, "thousand": 1e-4, "rupees": 1e-7}
@@ -325,40 +336,79 @@ def pick_topic_pages(pages, topic, end: date):
         hits = sum(min(t.count(w), 5) * wt for w, wt in words)
         group = 3 * ("consolidated" in t) - 3 * ("standalone financial statements" in t or "standalone statement" in t)
         scored.append((hits + group + min(len(yr.findall(t)), 3), -i))
-    return [-i + 1 for _, i in sorted(scored, reverse=True)[:TOPIC_PAGES]]
+    best = [-i + 1 for _, i in sorted(scored, reverse=True)]
+    if topic == "auditor":  # the opinion and the firm sit on different pages: keep a slot for the signature page
+        sign = [n for n in best if re.search(r"firm'?s? registration", norm(pages[n - 1][0]))][:1]
+        return [*[n for n in best if n not in sign][:TOPIC_PAGES - len(sign)], *sign]
+    return best[:TOPIC_PAGES]
 
 
-def page_text(page):
-    """What the model reads of a page: the -layout text (table rows stay on one line), runs of spaces cut to two."""
-    return re.sub(r"[ \t]{3,}", "  ", page[1])[:MAX_PAGE_CHARS]
+PROSE_TOPICS = {"auditor"}  # read in reading order: -layout interleaves a two-column auditor's report mid-sentence
+
+
+def page_text(page, topic=None):
+    """What the model reads of a page: the -layout text (table rows stay on one line), runs of spaces cut to two; a
+    prose topic gets the reading-order text instead."""
+    return re.sub(r"[ \t]{3,}", "  ", page[0 if topic in PROSE_TOPICS else 1])[:MAX_PAGE_CHARS]
 
 
 def note_prompt(topic, year, end: date, pages):
     """The prompt for one topic, `pages` [(page number, text)]. Also used, without a call, to show its size."""
     title, what, _ = TOPICS[topic]
     text = "\n\n".join(f"=== PAGE {n} ===\n{t}" for n, t in pages)
+    if topic == "auditor":
+        return (f"Pages from an Indian listed company's annual report for {year} (the year to {end:%d %B %Y}); only "
+                f"these were read:\n{text}\n\n"
+                "From the independent auditor's report on the consolidated financial statements (the standalone one if "
+                "there is no consolidated one), give: the audit firm's name as printed; the opinion, one of "
+                '"unmodified" (a clean true-and-fair opinion), "qualified", "adverse" or "disclaimer"; and whether the '
+                "pages say the auditor changed this year (appointed for the first time, resigned or rotated in): true or "
+                "false. Back each with a quote copied character for character from its page (3 to 40 words): an item "
+                'labelled "Opinion" (the words that state the opinion: "give a true and fair view" for a clean one, the '
+                'qualification, adverse or disclaimer words otherwise), one labelled "Auditor" (where the firm is named) and, if it '
+                'changed, one labelled "Change". If the pages don\'t show the auditor\'s report, answer {"found": false}.\n'
+                'Answer as a JSON object: {"found": true, "auditor": "...", "opinion": "unmodified", "changed": false, '
+                '"items": [{"label": "Opinion", "page": 12, "quote": "..."}]}.')
     return (f"Pages from an Indian listed company's annual report for {year} (the year to {end:%d %B %Y}); only "
             f"these were read:\n{text}\n\n"
             f"Extract {what}. Use the consolidated figures when the report has both, and the column for the year to "
             f"{end:%d %B %Y}, not the previous year. For every item give the amount exactly as printed (a number, "
             "in the report's unit), the page number it is on, and a quote copied character for character from that "
-            "page that contains the amount (the table row or sentence, 3 to 40 words). Give the unit the amounts are "
-            'in: "crore", "lakh", "million", "billion", "thousand" or "rupees". Never convert, add up or estimate; '
+            "page that contains the amount (the table row or sentence, 3 to 40 words). "
+            + ('The amount is a percentage (12.5 for 12.5%); give the unit "percent". ' if topic == "pledge" else
+               'Give the unit the amounts are in: "crore", "lakh", "million", "billion", "thousand" or "rupees". ')
+            + "Never convert, add up or estimate; "
             'if the pages don\'t show it, answer {"found": false}.\n'
             'Answer as a JSON object: {"found": true, "unit": "crore", "items": [{"label": "...", "amount": 123.4, '
             '"page": 12, "quote": "..."}]}.')
 
 
-def note_shape(v):
+OPINIONS = ("unmodified", "qualified", "adverse", "disclaimer")
+
+
+def note_shape(v, topic=None):
     if not isinstance(v, dict) or not isinstance(v.get("found", True), bool):
-        return 'expected {"found": true, "unit": ..., "items": [...]} or {"found": false}'
+        return 'expected {"found": true, ...} or {"found": false}'
     if v.get("found") is False:
         return None
-    if v.get("unit") not in UNITS:
-        return f'"unit" must be one of {", ".join(UNITS)}'
     items = v.get("items")
     if not isinstance(items, list) or not items or len(items) > 20:
         return '"items" must be a list of 1 to 20 items'
+    if topic == "auditor":
+        # ponytail: Indian reports say "unqualified"; a missing "changed" is no claim of a change (checked as a note)
+        if isinstance(v.get("opinion"), str):
+            v["opinion"] = {"unqualified": "unmodified", "clean": "unmodified"}.get(v["opinion"].strip().lower(), v["opinion"].strip().lower())
+        if v.get("changed") is None:
+            v["changed"] = False
+        if not (isinstance(v.get("auditor"), str) and v["auditor"].strip() and v.get("opinion") in OPINIONS
+                and isinstance(v.get("changed"), bool)):
+            return f'"auditor" must be the firm, "opinion" one of {", ".join(OPINIONS)}, "changed" true or false'
+        if not all(isinstance(x, dict) and isinstance(x.get("label"), str) and isinstance(x.get("page"), int)
+                   and isinstance(x.get("quote"), str) for x in items):
+            return 'each item must be {"label": string, "page": number, "quote": string}'
+        return None
+    if v.get("unit") not in (("percent",) if topic == "pledge" else UNITS):
+        return '"unit" must be "percent"' if topic == "pledge" else f'"unit" must be one of {", ".join(UNITS)}'
     for x in items:
         if not (isinstance(x, dict) and isinstance(x.get("label"), str) and isinstance(x.get("page"), int)
                 and isinstance(x.get("quote"), str) and isinstance(x.get("amount"), (int, float, str))):
@@ -367,8 +417,9 @@ def note_shape(v):
 
 
 def extract_note(topic, year, end: date, pages):
-    """{found, unit, items: [{label, amount, page, quote}]} for the topic from `pages` [(page number, text)]."""
-    return ask_json(note_prompt(topic, year, end, pages), note_shape)
+    """{found, unit, items: [{label, amount, page, quote}]} for the topic from `pages` [(page number, text)]; the
+    auditor topic answers {found, auditor, opinion, changed, items: [{label, page, quote}]}."""
+    return ask_json(note_prompt(topic, year, end, pages), lambda v: note_shape(v, topic))
 
 
 def amount(v):
@@ -423,6 +474,8 @@ def note_checks(topic, reply, pages, sent, end: date, against=None):
     """Rules on an extracted note: every item's page was sent, its quote is on that page, its amount parses and is in
     its quote, the unit is printed on a cited page, the report is for the year, and the sum ties to one of `against`
     [(label, Rs crore)] where the topic has a tie (TIE). Returns (rows in Rs crore, total, checks)."""
+    if topic == "auditor":
+        return auditor_checks(reply, pages, sent, end)
     unit, items = reply["unit"], reply["items"]
     rows, bad_page, bad_quote, short, bad_num, bad_col, col_known = [], [], [], [], [], [], 0
     for x in items:
@@ -434,7 +487,9 @@ def note_checks(topic, reply, pages, sent, end: date, against=None):
             bad_quote.append(x["label"])
         elif len(quote.split()) < MIN_NOTE_WORDS:
             short.append(x["label"])
-        if v is None or not in_quote(v, x["quote"]):
+        # a pledge of 0 is quoted as words ("no shares are pledged"), not as a number
+        nil = topic == "pledge" and v == 0 and re.search(r"\b(?:nil|none|no|not)\b", quote)
+        if v is None or not (nil or in_quote(v, x["quote"])) or (topic == "pledge" and not 0 <= v <= 100):
             bad_num.append(x["label"])
         elif topic == "capex":
             # ponytail: Ind AS statements print the current year's column first; a layout that doesn't would fail here
@@ -444,14 +499,17 @@ def note_checks(topic, reply, pages, sent, end: date, against=None):
                 bad_col.append(x["label"])
         if v is not None and topic != "segments":
             v = abs(v)  # capex, debt due, claims and transactions are sizes; a cash outflow prints in brackets
-        rows.append({"label": x["label"].strip()[:120], "amount": None if v is None else v * UNITS[unit], "raw": x["amount"],
+        rows.append({"label": x["label"].strip()[:120], "amount": None if v is None else v * UNITS.get(unit, 1.0), "raw": x["amount"],
                      "page": page, "quote": x["quote"].strip()[:400]})
     cited = sorted({x["page"] for x in items if 1 <= x["page"] <= len(pages)})
     text = {p: norm(pages[p - 1][0]) for p in cited}
     heads = {p: {HEAD_UNIT[h[:2]] for h in UNIT_HEAD.findall(text[p])} for p in cited}
     said = set().union(*heads.values())
     # rules settle the unit: a table heading on a cited page wins; with none, the claimed unit must be printed there
-    if said:
+    if unit == "percent":
+        unit_seen = any("%" in t or "percent" in t for t in text.values())
+        why = "" if unit_seen else " But no cited page prints a percentage."
+    elif said:
         unit_seen = said == {unit}
         why = ("" if unit_seen else f" But cited pages say {' and '.join(sorted(said))} in their headings." if len(said) > 1
                else f" But page {next(p for p in cited if heads[p])} says Rs in {next(iter(said))}.")
@@ -463,7 +521,8 @@ def note_checks(topic, reply, pages, sent, end: date, against=None):
         why = "" if unit_seen else f" But no cited page says {unit}."
     n_items = len(items)
     what = lambda bad: ", ".join(bad[:4]) + (f" and {len(bad) - 4} more" if len(bad) > 4 else "")  # noqa: E731
-    total = sum(r["amount"] for r in rows if r["amount"] is not None)
+    vals = [r["amount"] for r in rows if r["amount"] is not None]
+    total = (max(vals, default=0.0) if unit == "percent" else sum(vals))  # a pledge is one share, not a sum
     checks = [
         {"name": "Pages were read", "pass": not bad_page,
          "detail": f"Every item cites one of the pages sent ({', '.join(map(str, sent))})." if not bad_page
@@ -475,9 +534,11 @@ def note_checks(topic, reply, pages, sent, end: date, against=None):
              + ([f"The quote for {what(short)} is under {MIN_NOTE_WORDS} words."] if short else [])) + " So the note is rejected."},
         {"name": "Numbers are in their quotes", "pass": not bad_num,
          "detail": ("The amount parses and appears in its quote." if n_items == 1 else f"All {n_items} amounts parse and appear in their quotes.") if not bad_num
-         else f"The amount for {what(bad_num)} doesn't parse or isn't in its quote."},
+         else f"The amount for {what(bad_num)} doesn't parse or isn't in its quote"
+         + (", or isn't between 0 and 100." if topic == "pledge" else ".")},
         {"name": "Unit", "pass": unit_seen,
-         "detail": f"Amounts in {unit}, converted to Rs crore by rules (x {UNITS[unit]:g})." + why},
+         "detail": ("A percentage of promoter shares, kept as printed." if unit == "percent"
+                    else f"Amounts in {unit}, converted to Rs crore by rules (x {UNITS[unit]:g}).") + why},
         year_check(pages, end),
     ]
     if topic == "capex":
@@ -497,3 +558,130 @@ def note_checks(topic, reply, pages, sent, end: date, against=None):
             checks.append({"name": "Ties to the statements", "pass": abs(gap) <= tol,
                            "detail": f"Sum {_cr(total)} vs {k} {_cr(v)}: {gap:+.1%} (within {tol:.0%} needed)."})
     return rows, total, checks
+
+
+# what each opinion looks like in the auditor's own words (norm() text); an unmodified one must not read "except for"
+OPINION_WORDS = {"unmodified": r"true and fair view", "qualified": r"qualified opinion|except for the (?:effects?|possible)",
+                 "adverse": r"adverse opinion|do not give a true and fair view", "disclaimer": r"disclaimer of opinion|do not express an opinion"}
+CHANGE_WORDS = r"\bappoint|\bresign|\brotat|\bceased?\b|\bvacat|\breplac"
+
+
+def auditor_checks(reply, pages, sent, end: date):
+    """Rules on the auditor's-report note: pages sent, quotes on their pages, the opinion is what the quotes say, the
+    firm is named on a cited page, a claimed change is quoted, the report is for the year. (rows, 0.0, checks)."""
+    items, op = reply["items"], reply["opinion"]
+    rows = [{"label": x["label"].strip()[:120], "amount": None, "raw": None, "page": x["page"],
+             "quote": x["quote"].strip()[:400]} for x in items]
+    ok = lambda x: 1 <= x["page"] <= len(pages) and on_page(norm(x["quote"]), pages[x["page"] - 1])  # noqa: E731
+    bad_page = [x["label"] for x in items if x["page"] not in sent]
+    bad_quote = [x["label"] for x in items if not ok(x) or len(norm(x["quote"]).split()) < MIN_NOTE_WORDS]
+    quotes = [norm(x["quote"]) for x in items if ok(x)]
+    said = any(re.search(OPINION_WORDS[op], q) for q in quotes) and not (
+        op == "unmodified" and any(re.search(OPINION_WORDS["qualified"], q) for q in quotes))
+    firm = re.sub(r"[^a-z0-9& ]", " ", norm(reply["auditor"])).split()
+    cited = [norm(pages[x["page"] - 1][0]) + " " + norm(pages[x["page"] - 1][1]) for x in items if 1 <= x["page"] <= len(pages)]
+    named = bool(firm) and any(all(w in re.sub(r"[^a-z0-9& ]", " ", t).split() for w in firm) for t in cited)
+    changed = reply["changed"]
+    quoted = any(re.search(CHANGE_WORDS, q) for q in quotes)
+    checks = [
+        {"name": "Pages were read", "pass": not bad_page,
+         "detail": f"Every quote cites one of the pages sent ({', '.join(map(str, sent))})." if not bad_page
+         else f"{', '.join(bad_page)} cite a page that wasn't sent."},
+        {"name": "Quotes are on their pages", "pass": not bad_quote,
+         "detail": "Every quote occurs on its page." if not bad_quote
+         else f"The quote for {', '.join(bad_quote)} isn't on its page (or is under {MIN_NOTE_WORDS} words), so the note is rejected."},
+        {"name": "Opinion matches the quotes", "pass": said,
+         "detail": f"A quote reads as {'an' if op[0] in 'aeiou' else 'a'} {op} opinion." if said
+         else f"No quote reads as {'an' if op[0] in 'aeiou' else 'a'} {op} opinion."},
+        {"name": "Firm is named", "pass": named,
+         "detail": f"{reply['auditor'].strip()[:80]} is printed on a cited page." if named
+         else f"{reply['auditor'].strip()[:80]} isn't printed on any cited page."},
+        {"name": "Change of auditor", "pass": quoted if changed else None,
+         "detail": ("A quote names the appointment or resignation." if quoted else "A change is claimed, but no quote shows it.")
+         if changed else "No change claimed; rules can't prove a negative, so this is a note."},
+        year_check(pages, end),
+    ]
+    return rows, 0.0, checks
+
+
+# ---------- forensic flags explained in words (4.3): rules found the flag; the LLM only says why, with a quote ----------
+
+# words that point at the page explaining each forensic flag (model.forensic keys); a page needs one of them
+FLAG_WORDS = {"cash": ("cash generated from operations", "working capital", "trade receivables", "cash flow from operating"),
+              "dso": ("trade receivables", "receivables", "credit period", "unbilled", "collection"),
+              "dio": ("inventories", "inventory", "stock", "raw materials"),
+              "cwip": ("capital work-in-progress", "capital work in progress", "capex", "commissioning", "expansion"),
+              "other_income": ("other income", "interest income", "dividend income", "fair value", "exceptional"),
+              "tax": ("tax expense", "deferred tax", "effective tax", "tax rate", "minimum alternate tax", "new tax regime"),
+              "debt": ("borrowings", "debt", "term loan", "debentures", "repayment"),
+              "cover": ("finance costs", "interest", "borrowings"),
+              "nwc": ("working capital", "trade receivables", "inventories", "advances"),
+              "mscore": ("trade receivables", "revenue recognition", "depreciation", "accruals"),
+              "contingent": ("contingent liabilities", "claims not acknowledged"),
+              "related": ("related party", "related parties"),
+              "pledge": ("pledged", "encumbered", "promoter"),
+              "auditor": ("auditor", "audit", "opinion")}
+FLAG_WORDS["cash5"] = FLAG_WORDS["cash"]
+
+
+def pick_flag_pages(pages, key, end: date):
+    """Up to 4 pages for a forensic flag, best first: the flag's words (capped 5 hits each), exceptional items, then the
+    year. A page needs a word hit, not just the year."""
+    words = [*COMMON_WORDS, *((w, 2) for w in FLAG_WORDS.get(key, ()))]
+    yr, scored = year_re(end), []
+    for i, (raw, _) in enumerate(pages):
+        t = norm(raw)
+        hits = sum(min(t.count(w), 5) * wt for w, wt in words)
+        if hits:
+            scored.append((hits + min(len(yr.findall(t)), 5), -i))
+    return [-i + 1 for _, i in sorted(scored, reverse=True)[:MAX_PAGES]]
+
+
+def explain_flag(flag, numbers, pages=None):
+    """Words only: why a forensic rule lit, from the annual report's `pages` [(page number, text)] with a quote, or
+    from the numbers alone. {summary, page, quote} or {summary}."""
+    prompt = (f"A rule check on an Indian listed company's reported figures lit up:\n- {flag['title']}: {flag['detail']}\n"
+              f"- Rule: {flag['rule']}\n\nIts reported figures (Rs crore):\n{numbers}\n\n")
+    rule = ("Every number you write must appear above or inside your quote, written exactly as it appears there (so quote "
+            "the table row or sentence that holds the figures you use, and leave out figures from other rows); don't work "
+            "out new ones. Don't say whether to buy or sell.")
+    if pages:
+        text = "\n\n".join(f"=== PAGE {n} ===\n{t[:MAX_PAGE_CHARS]}" for n, t in pages)
+        prompt += (f"Pages from its annual report (only these were read):\n{text}\n\n"
+                   "Using only these pages, say in at most two sentences (under 80 words) what explains the flag, or "
+                   "that the pages don't. Give the page number and a quote of 5 to 80 words copied character for "
+                   "character from that page as evidence; it may run across consecutive table rows, as printed. "
+                   f"{rule}\n"
+                   'Answer as a JSON object: {"summary": "...", "page": number, "quote": "..."}.')
+    else:
+        prompt += ("No filing was read. From these numbers alone, say in at most two sentences (under 80 words) what "
+                   f"most likely explains the flag, and say it is a reading of the numbers, not a reported fact. {rule}\n"
+                   'Answer as a JSON object: {"summary": "..."}.')
+    return ask_json(prompt, _note_shape(bool(pages)))
+
+
+_MON = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+# years, FY labels and dates ("31 March 2026", "March 31, 2026") aren't figures
+FY_RE = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MON}|\b{_MON}\s+\d{{1,2}}(?:st|nd|rd|th)?\b,?"
+                   r"|\b(?:fy\s?'?)?(?:19|20)\d\d(?:\s?-\s?\d\d(?:\d\d)?)?\b|\bfy\s?'?\d\d\b", re.I)
+PROSE_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def numbers_check(summary, given, quote=None):
+    """Rule: every number in AI prose is one the app gave it (its computed figures and flag text, `given`) or one in the
+    cited quote, at the precision written ("29%" matches 0.2913 and 29.13; "1,234" matches 1,234.4). Years and
+    financial-year labels and page references ("page 185") pass; so do counts up to 12 ("5 years"). {name, pass, detail}."""
+    pool = {n for t in (given, quote or "") for n in (amount(x) for x in PROSE_NUM.findall(FY_RE.sub(" ", t))) if n is not None}
+    pool |= {x * 100 for x in pool}
+    bad = []
+    for raw in PROSE_NUM.findall(FY_RE.sub(" ", re.sub(r"\b(?:pages?|p\.)\s*\d+", " ", summary, flags=re.I))):
+        x = amount(raw)
+        if x is None or (x == int(x) and x <= 12):
+            continue  # ponytail: small counts pass unchecked; "10 years" can't be told from a computed 10
+        dp = len(raw.split(".")[1]) if "." in raw else 0
+        if not any(abs(round(abs(p), dp) - x) <= 10 ** -dp / 2 + 1e-9 for p in pool):
+            bad.append(raw)
+    return {"name": "Numbers match", "pass": not bad,
+            "detail": "Every number in the text is one the app computed or one in the quote." if not bad
+            else f"{', '.join(bad[:4])} {'is' if len(bad) == 1 else 'are'} neither computed by the app nor in the quote, "
+                 "so the explanation is rejected."}

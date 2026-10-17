@@ -900,16 +900,105 @@ def note_check(co, projs, ex):
     keys = {k["key"]: k for k in model.key_numbers(co["hist"], labels)}
     assert abs(keys["growth"]["last"] - 0.12) < 1e-5 and abs(keys["ebitda_margin"]["typical"] - 0.2) < 1e-5, keys
     checks = model.rule_checks(co["hist"], labels, [], [])
-    # synthetic CFO is 0.29x profit (its cash flow rows are made up): red; the rest clear, notes need a report
-    assert [(c["id"], c["status"]) for c in checks] == [("cash", "red"), ("dso", "clear"), ("debt", "clear"),
-        ("cover", "clear"), ("contingent", "filing"), ("related", "filing")], checks
+    # synthetic CFO is 0.29x profit (its cash flow rows are made up): red over 3 and 5 years, and it lifts the
+    # M-score (accruals); the rest clear, the annual-report checks wait for a filing
+    assert [(c["id"], c["status"]) for c in checks] == [("cash", "red"), ("cash5", "red"), ("mscore", "amber"),
+        ("dso", "clear"), ("dio", "clear"), ("cwip", "clear"), ("other_income", "clear"), ("tax", "clear"), ("debt", "clear"),
+        ("cover", "clear"), ("nwc", "clear"), ("contingent", "filing"), ("related", "filing"), ("pledge", "filing"),
+        ("auditor", "filing")], checks
     odd = [dict(h) for h in co["hist"]]
     odd[-1]["receivables"] *= 2.0  # receivable days double: red
     flags = [{"year": "FY2025", "metric": "tax_rate", "value": 0.45, "typical": 0.25}]
     got = model.rule_checks(odd, labels, flags, ["x"], {"ar:contingent:FY2025": {"total": 1e5}})
-    assert [(c["id"], c["status"]) for c in got][:5] == [("oneoff-tax_rate-FY2025", "red"), ("cash", "red"),
-        ("dso", "red"), ("data", "amber"), ("contingent", "amber")], got
+    assert [(c["id"], c["status"]) for c in got][:6] == [("oneoff-tax_rate-FY2025", "red"), ("cash", "red"),
+        ("cash5", "red"), ("dso", "red"), ("contingent", "red"), ("data", "amber")], got
+    forensic_check(co)
     assert model._inr(267021) == "2,67,021" and model._inr(-124) == "(124)" and model._inr(89185912) == "8,91,85,912"
+
+
+def forensic_check(co):
+    """4.3: every forensic rule trips on synthetic data built to trip it, at the severity its thresholds say, and stays
+    quiet on a clean copy; the annual-report checks run only from approved notes."""
+    labels = model.labels(co["dates"])
+    clean = [dict(h, cfo=h["pat"]) for h in co["hist"]]  # cash = profit: nothing to flag
+    notes_keys = ("contingent", "related", "pledge", "auditor")
+
+    def sev(hist, notes=None):
+        return {f["key"]: f["severity"] for f in model.forensic(hist, labels, notes)}
+
+    base = sev(clean)
+    assert all(v == "ok" for k, v in base.items() if k not in notes_keys), base
+    radar = model.forensic(clean, labels)
+    assert all(f["severity"] == "not_checked" and f["needs"] == "annual report" for f in radar if f["key"] in notes_keys)
+    assert [f["key"] for f in radar] == ["cash", "cash5", "dso", "dio", "cwip", "other_income", "tax", "debt", "cover",
+                                         "nwc", "mscore", *notes_keys], radar
+    assert set(radar[0]) >= {"key", "title", "severity", "value", "threshold", "years", "detail"}, radar[0]
+
+    def trip(key, edit, want, notes=None):
+        h = [dict(x) for x in clean]
+        edit(h)
+        got = sev(h, notes)[key]
+        assert got == want, (key, want, got, next(f for f in model.forensic(h, labels, notes) if f["key"] == key))
+
+    def last(**kw):
+        return lambda h: h[-1].update({k: v(h[-1]) if callable(v) else v for k, v in kw.items()})
+
+    def years(n, **kw):
+        return lambda h: [x.update({k: v(x) for k, v in kw.items()}) for x in h[-n:]]
+
+    trip("cash", years(3, cfo=lambda x: 0.4 * x["pat"]), "high")
+    trip("cash", years(3, cfo=lambda x: 0.7 * x["pat"]), "medium")
+    trip("cash5", years(5, cfo=lambda x: 0.7 * x["pat"]), "medium")
+    trip("cash", years(3, pat=lambda x: -10.0), "not_checked")  # losses: the ratio means nothing
+    trip("dso", last(receivables=lambda x: 2.0 * x["receivables"]), "high")  # 44 -> 88 days
+    trip("dso", last(receivables=lambda x: 1.6 * x["receivables"]), "medium")  # +60% but only 26 days: not high
+    trip("dso", last(receivables=lambda x: 1.15 * x["receivables"]), "low")
+    trip("dso", last(receivables=lambda x: 1.08 * x["receivables"]), "ok")
+    trip("dio", last(inventory=lambda x: 2.0 * x["inventory"]), "high")
+    trip("dio", years(10, inventory=lambda x: 0.0), "ok")  # a services firm: nothing to stretch
+    trip("cwip", last(cwip=lambda x: 0.7 * x["net_block"]), "high")
+    trip("cwip", last(cwip=lambda x: 0.4 * x["net_block"]), "medium")
+    trip("cwip", years(4, cwip=lambda x: 0.4 * x["net_block"]), "ok")  # large but not rising: nothing piling up
+    trip("other_income", years(3, other_income=lambda x: 0.6 * x["pbt"]), "high")
+    trip("other_income", years(3, other_income=lambda x: 0.35 * x["pbt"]), "medium")
+    trip("tax", last(tax=lambda x: 0.48 * x["pbt"]), "high")  # 25% -> 48%: 23 pp
+    trip("tax", last(tax=lambda x: 0.37 * x["pbt"]), "medium")
+    trip("tax", years(5, pbt=lambda x: -1.0), "not_checked")
+    trip("debt", last(borrowings=lambda x: x["cash"] + x["investments"] + 4 * x["ebitda"]), "high")  # 4x EBITDA
+    trip("debt", years(4, borrowings=lambda x: x["cash"] + x["investments"] + 2.5 * x["ebitda"]), "medium")  # level, no pace
+    trip("debt", last(borrowings=600.0), "high")  # 200 -> 600 in 3 years (44% a year) vs EBITDA 12%, net debt 0.4x
+    trip("debt", last(borrowings=600.0, cash=900.0), "ok")  # same pace, but net cash
+    trip("cover", last(interest=lambda x: x["pbt"]), "medium")  # EBIT 2x interest
+    trip("cover", last(interest=lambda x: 3 * x["pbt"]), "high")
+    trip("nwc", last(other_ca=lambda x: x["other_ca"] + 0.2 * x["revenue"]), "high")
+    trip("nwc", last(other_ca=lambda x: x["other_ca"] + 0.1 * x["revenue"]), "medium")
+    trip("mscore", last(cfo=0.0), "medium")  # all profit as accruals: TATA 0.22 lifts M from -2.37 to about -1.3
+    trip("mscore", last(cfo=None), "not_checked")
+    m = next(f for f in model.forensic([dict(x) for x in clean[:-1]] + [dict(clean[-1], cfo=0.0)], labels) if f["key"] == "mscore")
+    assert m["value"] > -1.78 and any("AQI" in a for a in m["approx"]) and any("SGAI" in a for a in m["approx"]) and m["parts"]["TATA"] > 0.2, m
+    nw = clean[-1]["share_cap"] + clean[-1]["reserves"]
+    trip("contingent", lambda h: None, "high", {"ar:contingent:FY2025": {"total": 0.3 * nw}})
+    trip("contingent", lambda h: None, "medium", {"ar:contingent:FY2025": {"total": 0.15 * nw}})
+    trip("contingent", lambda h: None, "ok", {"ar:contingent:FY2025": {"total": 0.05 * nw}})
+    rev = clean[-1]["revenue"]
+    rel = {"ar:related:FY2025": {"total": 2 * rev, "rows": [{"label": "Holding company: dividend paid", "amount": 2 * rev},
+                                                             {"label": "Holding company: royalty", "amount": 0.02 * rev}]}}
+    trip("related", lambda h: None, "ok", rel)  # dividends left out: paid pro rata to everyone
+    trip("related", lambda h: None, "medium", {"ar:related:FY2025": {"total": 0.12 * rev, "rows": [
+        {"label": "Group company: purchases", "amount": 0.12 * rev}]}})
+    for pct, want in ((60, "high"), (30, "medium"), (5, "low"), (0, "ok")):
+        trip("pledge", lambda h: None, want, {"ar:pledge:FY2025": {"total": pct}})
+    aud = lambda op, changed=False, firm="A & Co LLP": {"auditor": firm, "opinion": op, "changed": changed}  # noqa: E731
+    for note, want in ((aud("adverse"), "high"), (aud("disclaimer"), "high"), (aud("qualified"), "medium"),
+                       (aud("unmodified", True), "low"), (aud("unmodified"), "ok")):
+        trip("auditor", lambda h: None, want, {"ar:auditor:FY2025": note})
+    trip("auditor", lambda h: None, "low", {"ar:auditor:FY2024": aud("unmodified", firm="B & Co"),
+                                            "ar:auditor:FY2025": aud("unmodified")})  # the firm changed between years
+    # the strip shows lit checks as red (high) / amber (medium, low); data-only gaps (losses) stay off it
+    h = [dict(x) for x in clean]
+    years(3, pat=lambda x: -10.0)(h)
+    ids = [c["id"] for c in model.rule_checks(h, labels, [], [])]
+    assert "cash" not in ids and "pledge" in ids, ids
 
 
 def library_check(root, co, scenarios):
@@ -993,7 +1082,7 @@ def library_check(root, co, scenarios):
     # the landing's coverage row: value range, reverse DCF on base, flag count (typed price 99.5, 3.25 cr shares)
     vals = listed[0]["values"]
     assert listed[0]["price"] == 99.5 and vals["bull"] > vals["base"] > vals["bear"] and listed[0]["why"] is None, listed[0]
-    assert listed[0]["flags"] == 1 and listed[0]["reviewed_at"] is None, listed[0]  # synthetic cash conversion: red
+    assert listed[0]["flags"] == 3 and listed[0]["reviewed_at"] is None, listed[0]  # cash conversion 3 and 5 yrs, M-score
     (root / "test-industries-ltd" / "2026-10-14.json").write_text("{broken")  # skipped, not fatal
     assert len(server.list_models(root)) == 2
     fails(server.load_model, 422, "test-industries-ltd/2026-10-14")
@@ -1055,6 +1144,7 @@ def library_check(root, co, scenarios):
     ai_check(server, root, co, data)
     oneoff_check(server, root, data)
     ar_notes_check(server, root, co, data)
+    flag_check(server, root, data)
     reimport_check(server, root, co, data)
 
 
@@ -1401,6 +1491,12 @@ def ar_notes_check(server, root, co, data):
         ["Contingent liabilities as at March 31, 2025 (Rs in crore)",
          "Claims against the Company not acknowledged as debts 12.50", "Income tax demands under appeal 7.25"],
         ["Related party transactions 2024-25 (Rs in lakh)", "Holding company royalty paid 1,250.00"],
+        ["Shareholding of promoter and promoter group as at March 31, 2025", "Promoter holding 72.05% of share capital",
+         "Shares pledged or otherwise encumbered: Nil"],
+        ["Independent Auditor's Report to the Members, on the consolidated financial statements 2024-25",
+         "Qualified Opinion. In our opinion, except for the effects of the matter described in the",
+         "Basis for Qualified Opinion section, the statements give a true and fair view.",
+         "For A B Shah & Co LLP, Chartered Accountants"],
     ])
     item = lambda label, amount, page, quote: {"label": label, "amount": amount, "page": page, "quote": quote}  # noqa: E731
     segs = {"found": True, "unit": "crore", "items": [
@@ -1415,7 +1511,7 @@ def ar_notes_check(server, root, co, data):
         # before anything is sent: the pages per topic and the exact prompt size, no LLM needed
         plan = client.post("/api/notes/plan", json=body).json()
         assert {t: x["pages"] for t, x in plan["topics"].items()} == {
-            "segments": [2], "maturity": [3], "capex": [4], "contingent": [5], "related": [6]}, plan
+            "segments": [2], "maturity": [3], "capex": [4], "contingent": [5], "related": [6], "pledge": [7], "auditor": [8]}, plan
         pages = ai.pdf_pages(pdf)
         end = datetime(2025, 3, 31).date()
         want = len(ai.note_prompt("segments", "FY2025", end, [(2, ai.page_text(pages[1]))]))
@@ -1483,6 +1579,26 @@ def ar_notes_check(server, root, co, data):
         p_cap = ext("capex").json()
         assert p_cap["status"] == "proposed" and p_cap["checks"][-1]["pass"] is None and calls() == n, p_cap["checks"]
         assert p_cap["value"]["total"] == p_cap["value"]["rows"][0]["amount"] == 88.25, "an outflow in brackets is a size"
+        # 4.3 topics: a pledge is a percentage ("Nil" quotes 0), the auditor's report is words checked against quotes
+        fake_llm(root / "llm", {"found": True, "unit": "percent", "items": [
+            item("Promoter shares pledged", 0, 7, "Shares pledged or otherwise encumbered: Nil")]})
+        q = ext("pledge").json()
+        assert q["status"] == "proposed" and q["value"]["total"] == 0 and q["unit"] == "% of promoter shares", q
+        fake_llm(root / "llm", {"found": True, "unit": "percent", "items": [
+            item("Promoter shares pledged", 140, 7, "Promoter holding 72.05% of share capital")]})
+        assert failed(ext("pledge").json()) == {"Numbers are in their quotes"}, "140 isn't in the quote, nor 0-100"
+        aud = {"found": True, "auditor": "A B Shah & Co LLP", "opinion": "qualified", "changed": False, "items": [
+            {"label": "Opinion", "page": 8, "quote": "except for the effects of the matter described in the Basis for Qualified Opinion"},
+            {"label": "Auditor", "page": 8, "quote": "For A B Shah & Co LLP, Chartered Accountants"}]}
+        fake_llm(root / "llm", aud)
+        p_aud = ext("auditor").json()
+        assert p_aud["status"] == "proposed" and p_aud["value"]["opinion"] == "qualified" and p_aud["unit"] is None, p_aud
+        assert next(c for c in p_aud["checks"] if c["name"] == "Change of auditor")["pass"] is None, p_aud["checks"]
+        for bad, names in ((dict(aud, opinion="unmodified"), {"Opinion matches the quotes"}),
+                           (dict(aud, auditor="Big Four LLP"), {"Firm is named"}),
+                           (dict(aud, changed=True), {"Change of auditor"})):
+            fake_llm(root / "llm", bad)
+            assert failed(ext("auditor").json()) == names, names
         fake_llm(root / "llm", {"found": False})
         r = ext("contingent")
         assert r.status_code == 422 and "found no contingent liabilities" in r.json()["detail"], r.text
@@ -1493,6 +1609,13 @@ def ar_notes_check(server, root, co, data):
         try:
             r = client.post("/api/notes/approve", json={**body, "proposal": p})
             assert r.status_code == 200 and r.json()["status"] == "approved" and r.json()["id"] == p["id"], r.text
+            r = client.post("/api/notes/approve", json={**body, "proposal": p_aud})
+            assert r.status_code == 200 and r.json()["value"]["auditor"] == "A B Shah & Co LLP", r.text
+            # an approved auditor note lights the radar on the next /api/company: qualified = medium (amber)
+            got = client.post("/api/company", json={"company": data["company"], "notes": {
+                "ar:auditor:FY2025": {**p_aud["value"], "proposal": p_aud["id"], "topic": "auditor", "year": "FY2025"}}}).json()
+            assert next(f for f in got["forensic"] if f["key"] == "auditor")["severity"] == "medium", got["forensic"]
+            assert next(c for c in got["rule_checks"] if c["id"] == "auditor")["status"] == "amber"
             tampered = dict(p, reply=dict(segs, items=[dict(segs["items"][0], quote="made up text here"), segs["items"][1]]))
             assert client.post("/api/notes/approve", json={**body, "proposal": tampered}).status_code == 422
             assert client.post("/api/notes/approve", json={**body, "proposal": {"kind": "mapping"}}).status_code == 422
@@ -1518,6 +1641,75 @@ def ar_notes_check(server, root, co, data):
             ai.llm = llm
         assert ai.amount("1,64,177") == 164177.0 and ai.amount("(34)") == -34.0 and ai.amount("n/a") is None
         assert ai.in_quote(164177.0, "Total 1,64,177") and not ai.in_quote(16417.0, "Total 1,64,177")
+    finally:
+        server.MODELS = models
+        os.environ.pop("LLM_CMD", None)
+        if env is not None:
+            os.environ["LLM_CMD"] = env
+        shutil.rmtree(root / server.REPORTS, ignore_errors=True)
+
+
+def flag_check(server, root, data):
+    """4.3: a lit forensic flag explained in words (fake LLM_CMD). From the numbers only it is labelled; with a report,
+    rules pick the pages and check the quote; a number the app didn't compute rejects it; an unlit flag is a 422.
+    Recalculating, exporting, refreshing and saving with flag notes never call the LLM."""
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    client, models, env = TestClient(server.app), server.MODELS, os.environ.pop("LLM_CMD", None)
+    server.MODELS = root
+    body = {"company": data["company"], "key": "cash"}  # synthetic CFO is 0.29x profit: high
+    post = lambda b: client.post("/api/flags/explain", json=b)  # noqa: E731
+    failed = lambda p: {c["name"] for c in p["checks"] if c["pass"] is False}  # noqa: E731
+    try:
+        assert post(body).status_code == 503, "no LLM_CMD: a calm 503"
+        calls = fake_llm(root / "llm", {"summary": "Operating cash flow was 0.29x net profit over FY2023–FY2025. "
+                                                    "Profit isn't turning into cash."})
+        r = post(dict(body, key="cover"))
+        assert r.status_code == 422 and "isn't flagged" in r.json()["detail"] and calls() == 0, r.text
+        p = post(body).json()
+        assert (p["kind"], p["field"], p["status"], p["from_numbers"], p["period"]) == ("flag_note", "cash", "proposed", True, "FY2025"), p
+        assert [c["name"] for c in p["checks"]] == ["Source", "Numbers match"] and p["checks"][1]["pass"], p["checks"]
+        prompt = (root / "llm" / "prompt-0.txt").read_text()
+        assert "Cash conversion, 3 yrs" in prompt and "buy or sell" in prompt and "No filing was read" in prompt, prompt
+        fake_llm(root / "llm", {"summary": "Cash fell Rs 4,321 crore short of profit."})
+        q = post(body).json()
+        assert q["status"] == "rejected" and failed(q) == {"Numbers match"} and "4,321" in q["checks"][-1]["detail"], q
+        # dates, years and page references aren't figures; a figure from outside the quote is
+        assert ai.numbers_check("At March 31, 2026 (FY2026, 2025-26), page 185 shows 4,301", "", "overdue 4,301")["pass"]
+        assert not ai.numbers_check("It rose from 714 to 4,301", "", "overdue 4,301")["pass"]
+        assert ai.numbers_check("29.1% of profit", "0.2913", None)["pass"], "a ratio may be written as a percentage"
+        v = {"found": True, "auditor": "X LLP", "opinion": "Unqualified", "changed": None, "items": [{"label": "Opinion", "page": 1, "quote": "q"}]}
+        assert ai.note_shape(v, "auditor") is None and (v["opinion"], v["changed"]) == ("unmodified", False), v
+        if not ai.pdf_available():
+            print("pdftotext missing: skipped the cited flag explanation")
+            return
+        pdf = tiny_pdf([["Annual Report 2024-25"], ["Directors' report 2024-25. Cash generated from operations fell",
+                                                     "as trade receivables from a large customer were delayed."],
+                        ["Financial year 2024-25 at a glance"], ["Notes 2024-25"]])
+        rep = client.post("/api/report", files={"file": ("ar.pdf", pdf)}, data={"year": "FY2025"}).json()
+        quote = "trade receivables from a large customer were delayed"
+        fake_llm(root / "llm", {"summary": "A large customer paid late, so receivables rose.", "page": 2, "quote": quote})
+        p2 = post(dict(body, report=rep)).json()
+        assert p2["status"] == "proposed" and p2["source"]["page"] == 2 and not failed(p2), p2["checks"]
+        assert "=== PAGE 2 ===" in (root / "llm" / "prompt-0.txt").read_text()
+        fake_llm(root / "llm", {"summary": "A large customer paid late.", "page": 2, "quote": "receivables were written off"})
+        assert "Quote is on the page" in failed(post(dict(body, report=rep)).json())
+        llm, ai.llm = ai.llm, None  # from here on, any LLM call fails loudly
+        try:
+            req = {k: data[k] for k in ("company", "scenarios", "n", "valuation")}
+            assert client.post("/api/project", json=req).status_code == 200
+            assert client.post("/api/export", json=req).status_code == 200
+            assert client.post("/api/company", json={"company": data["company"]}).status_code == 200
+            fn = {"key": "cash", "year": "FY2025", "proposal": p2["id"], "summary": p2["value"], "file": "ar.pdf", "page": 2,
+                  "quote": quote, "from_numbers": False, "ai": True}
+            doc = dict(data, reports=[rep], proposals=[dict(p2, status="approved"), q], flag_notes=[fn])
+            mid, _ = server.save_model(server.ModelDoc.model_validate(doc), root, now=datetime(2026, 10, 17, 9, 0))
+            back = server.load_model(mid, root).model_dump(mode="json")
+            assert back["flag_notes"] == [fn] and [x["kind"] for x in back["proposals"]] == ["flag_note"] * 2, back
+            server.delete_model(mid, root)
+        finally:
+            ai.llm = llm
     finally:
         server.MODELS = models
         os.environ.pop("LLM_CMD", None)

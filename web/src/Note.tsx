@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react'
 import Ruler from './Ruler'
+import { SEV, bySeverity } from './Evidence'
+import { FlagNoteView } from './Sources'
 import type { Go } from './App'
 import {
   fmt, money, rs, type Cagr, type Impact, type ModelDoc, type OneOffNote, type Parsed, type Path, type Projection,
@@ -16,6 +18,7 @@ const DAYS = new Set(['dso', 'dio', 'dpo'])
 const unit = (key: string, v: number) => (DAYS.has(key) ? `${Math.round(v)} days` : pc(v))
 const stepText = (key: string, s: number) => (DAYS.has(key) ? `${s} days` : `${+(s * 100).toFixed(1)} pp`)
 const SEVERITY: Record<RuleCheck['status'], string> = { red: 'Red flag', amber: 'Amber flag', clear: 'Clear', filing: 'Needs a filing' }
+const LOW = (c: RuleCheck) => (c.severity === 'low' ? ' (low)' : '')
 const NAMES = { growth: 'Revenue growth', ebitda_margin: 'EBITDA margin', wacc: 'Discount rate (WACC)', g: 'Terminal growth' } as const
 
 /** A cited number: dotted underline, a footnote mark that jumps to the Notes list, the source on hover or focus. */
@@ -238,8 +241,8 @@ function Strip({ checks, go }: { checks: RuleCheck[]; go: Go }) {
       </header>
       <div className="cells">
         {checks.map((c, i) => (
-          <button key={c.id} type="button" className={`cell ${c.status}`} style={{ animationDelay: `${i * 30}ms` }}
-            aria-label={`${SEVERITY[c.status]}: ${c.name}, ${c.fact}. Open its evidence.`} onClick={() => go('evidence', c.id)}>
+          <button key={c.id} type="button" className={`cell ${c.status}${c.severity === 'low' ? ' low' : ''}`} style={{ animationDelay: `${i * 30}ms` }}
+            aria-label={`${SEVERITY[c.status]}${LOW(c)}: ${c.name}, ${c.fact}. Open its evidence.`} onClick={() => go('evidence', c.id)}>
             <span className="k">{c.name}</span>
             <span className="v">{c.fact}</span>
           </button>
@@ -249,33 +252,51 @@ function Strip({ checks, go }: { checks: RuleCheck[]; go: Go }) {
   )
 }
 
-/** For now: the one-off flags (with any approved explanation, AI-written and cited) and data-check failures. */
+/** The forensic flags, worst first, one plain sentence each with any approved explanation (AI-written, cited); then
+ * the unusual years and data issues. Each line opens its evidence. */
 function Risks({ parsed, doc, go }: { parsed: Parsed; doc: ModelDoc; go: Go }) {
   const recent = parsed.years.slice(-3)
-  const flags = parsed.oneoffs.filter(o => recent.includes(o.year))
+  const oneoffs = parsed.oneoffs.filter(o => recent.includes(o.year))
   const issues = parsed.checks
+  const radar = parsed.forensic ?? []
+  const lit = bySeverity(radar).filter(f => f.severity === 'high' || f.severity === 'medium' || f.severity === 'low')
+  const waiting = radar.filter(f => f.needs && f.severity === 'not_checked')
   return (
     <section className="sec" aria-labelledby="risks-h">
-      <h2 id="risks-h" className="label sec-label"><span>Risks · <b>found by rules</b></span><span>last three years</span></h2>
-      {!flags.length && !issues.length && <p className="small-note">No unusual years and no data issues in the last three reported years.</p>}
+      <h2 id="risks-h" className="label sec-label"><span>Risks · <b>found by rules</b></span><span>worst first</span></h2>
+      {!lit.length && !oneoffs.length && !issues.length && <p className="small-note">No forensic rule lit, no unusual years and no data issues in the last three reported years.</p>}
       <ul className="risks">
-        {flags.map(o => {
+        {lit.map(f => {
+          const n = doc.flag_notes.find(x => x.key === f.key)
+          return (
+            <li key={f.key}>
+              <p><span className={`sev ${f.severity}`}>{SEV[f.severity]}</span> {f.detail}</p>
+              {n && <FlagNoteView note={n} />}
+              <button type="button" className="link small" onClick={() => go('evidence', f.key)}
+                aria-label={`${f.title}: ${n ? 'evidence' : 'evidence, and explain it'}`}>{n ? 'Evidence' : 'Evidence · explain it'}</button>
+            </li>
+          )
+        })}
+        {oneoffs.map(o => {
           const n = doc.notes[`oneoff:${o.year}`] as OneOffNote | undefined
           return (
             <li key={`${o.year}-${o.metric}`}>
-              <p>{o.note}.</p>
+              <p><span className="sev year">Unusual year</span> {o.note}.</p>
               {n && <div className="ai-note">
                 <span className="who">AI-written · {n.from_numbers ? 'from the numbers only' : 'cited'}</span>
                 <p className="serif">{n.summary}</p>
                 {n.quote && <p className="src-line"><span className="kind file">File</span>{n.file}, p.{n.page}: <q>{n.quote}</q></p>}
               </div>}
-              {!n && <button type="button" className="link small" onClick={() => go('evidence', 'oneoffs')}>Explain it from the annual report</button>}
+              {!n && <button type="button" className="link small" onClick={() => go('evidence', 'oneoffs')}
+                aria-label={`Explain ${o.year} from the annual report`}>Explain it from the annual report</button>}
             </li>
           )
         })}
         {issues.length > 0 && <li><p>{issues.length} issue{issues.length > 1 ? 's' : ''} in the reported data, e.g. {issues[0]}.</p>
           <button type="button" className="link small" onClick={() => go('evidence', 'data')}>See them all</button></li>}
       </ul>
+      {waiting.length > 0 && <p className="small-note">Not checked yet: {waiting.map(f => f.title.toLowerCase()).join(', ')}.{' '}
+        <button type="button" className="link" onClick={() => go('evidence', 'src-ar-head')}>Attach the annual report</button></p>}
     </section>
   )
 }

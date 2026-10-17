@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Upgrade } from './Model'
 import {
   api, dec2, fmt, money, postJson, type ArNote, type ArValue, type Check, type Company, type Decided, type Filing,
-  type NotesPlan, type OneOffNote, type Proposal, type Report, type Sources as Used,
+  type FlagNote, type Forensic, type NotesPlan, type OneOffNote, type Proposal, type Report, type Sources as Used,
 } from './lib'
 
 const KIND: Record<Filing['kind'], string> = { quarter: 'Quarter', half: 'Half year', annual: 'Year', other: 'Period' }
@@ -39,8 +39,17 @@ export function useAi() {
 /** Annual-report note topics (ai.TOPICS), in reading order. */
 export const TOPICS: Record<string, string> = {
   segments: 'Segment revenue', maturity: 'Debt maturity', capex: 'Capex', contingent: 'Contingent liabilities',
-  related: 'Related-party transactions',
+  related: 'Related-party transactions', pledge: 'Promoter pledge', auditor: 'Auditor’s report',
 }
+
+/** doc.flag_notes from the approved flag_note proposals: one per flag (decideNote keeps one approved). */
+export const withFlagNotes = (ps: Proposal[]): FlagNote[] => ps.filter(p => p.kind === 'flag_note' && p.status === 'approved')
+  .map(p => ({ key: p.field, year: p.period ?? '', proposal: p.id, summary: String(p.value), file: p.source.file,
+    page: p.source.page ?? null, quote: p.source.quote ?? null, from_numbers: !!p.from_numbers, ai: true }))
+
+/** An annual-report note's headline value: money in Rs crore, a pledge in %, the auditor's opinion in words. */
+export const arHeadline = (topic: string, v: ArValue) => (topic === 'pledge' ? `${fmt(v.total / 100, 'pct')} pledged`
+  : topic === 'auditor' ? `${v.opinion ?? '–'} opinion, ${v.auditor ?? '–'}${v.changed ? ', changed' : ''}` : `Rs ${money(v.total)} cr`)
 
 /** notes with the one-off and annual-report entries rebuilt from the approved proposals (one per year, or per topic
  * and year). The server reads "ar:capex:<year>" for the capex history, so the two must never disagree. */
@@ -361,21 +370,23 @@ export default function Sources({
 const PROP_STATUS: Record<Proposal['status'], string> = { proposed: 'Waiting for you', approved: 'Approved', rejected: 'Rejected' }
 
 /** One proposal: what was read, where from, the rule checks, and the decision. */
-export function ProposalItem({ p, busy, onDecide, as: H = 'h4' }: {
+export function ProposalItem({ p, busy, onDecide, as: H = 'h4', title }: {
   p: Proposal; busy: boolean; onDecide: (p: Proposal, s: Proposal['status']) => void; as?: 'h4' | 'h5'
+  title?: string // a flag note: the flag's name
 }) {
-  const note = p.kind === 'oneoff_note'
+  const flag = p.kind === 'flag_note'
+  const note = p.kind === 'oneoff_note' || flag
   const ar = p.kind === 'ar_note' ? p.value as ArValue : null
   // the source, value and status make each button's name unique among same-year proposals kept for the record
-  const what = (note ? `the explanation of ${p.period}, ${p.from_numbers ? 'from the numbers'
-    : `from ${p.source.file} page ${p.source.page}`}` : ar ? `${TOPICS[p.field] ?? p.field} ${p.period}, Rs ${money(ar.total)} cr, ${p.source.file}`
+  const what = (note ? `the explanation of ${flag ? `the ${title ?? p.field} flag` : p.period}, ${p.from_numbers ? 'from the numbers'
+    : `from ${p.source.file} page ${p.source.page}`}` : ar ? `${TOPICS[p.field] ?? p.field} ${p.period}, ${arHeadline(p.field, ar)}, ${p.source.file}`
     : `${p.source.tag ?? label(p.field)} as ${label(p.field)}, ${p.source.file}`)
     + (p.status === 'proposed' ? '' : `, ${PROP_STATUS[p.status].toLowerCase()}`)
   return (
     <li className={`src-item prop is-${p.status}`}>
       <div className="src-head">
-        <H>{note ? <>Why {p.period} was unusual</> : ar ? <>{TOPICS[p.field] ?? p.field} · {p.period}:{' '}
-          <span className="prop-value">Rs {money(ar.total)} cr</span></> : <>{label(p.field)}{p.period && <> · {/^\d{4}-\d\d-\d\d$/.test(p.period)
+        <H>{flag ? <>Why the {(title ?? p.field).toLowerCase()} flag lit</> : note ? <>Why {p.period} was unusual</> : ar ? <>{TOPICS[p.field] ?? p.field} · {p.period}:{' '}
+          <span className="prop-value">{arHeadline(p.field, ar)}</span></> : <>{label(p.field)}{p.period && <> · {/^\d{4}-\d\d-\d\d$/.test(p.period)
           ? day(p.period) : p.period}</>}: <span className="prop-value">{show(p)}</span></>}</H>
         <span className="prop-status">{PROP_STATUS[p.status]}</span>
       </div>
@@ -386,7 +397,7 @@ export function ProposalItem({ p, busy, onDecide, as: H = 'h4' }: {
         {p.source.tag && <>, tag {p.source.tag}</>}
       </p>
       {note && <p className="prop-summary">{String(p.value)}</p>}
-      {ar ? <ArRows v={ar} caption={`${TOPICS[p.field] ?? p.field}, ${p.period}, as read`} />
+      {ar ? <ArRows v={ar} pct={p.field === 'pledge'} caption={`${TOPICS[p.field] ?? p.field}, ${p.period}, as read`} />
         : p.source.quote && <blockquote className="prop-quote">“{p.source.quote}”</blockquote>}
       {p.reasoning && <p className="small">{note ? <span className="muted">Flagged: </span>
         : p.ai && !ar && <span className="muted">AI’s reasoning: </span>}{p.reasoning}</p>}
@@ -403,14 +414,15 @@ export function ProposalItem({ p, busy, onDecide, as: H = 'h4' }: {
 }
 
 /** The values of an annual-report note as read: label, Rs crore, PDF page and the quote it was checked against. */
-function ArRows({ v, caption }: { v: ArValue; caption: string }) {
+function ArRows({ v, caption, pct }: { v: ArValue; caption: string; pct?: boolean }) {
+  const words = v.rows.every(r => r.amount == null) // the auditor's report: quotes only
   return (
     <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={caption}>
       <table className="src-table ar-table">
         <caption className="visually-hidden">{caption}</caption>
-        <thead><tr><th scope="col">Item</th><th scope="col">Rs crore</th><th scope="col">Page</th><th scope="col">Quote</th></tr></thead>
+        <thead><tr><th scope="col">Item</th>{!words && <th scope="col">{pct ? '%' : 'Rs crore'}</th>}<th scope="col">Page</th><th scope="col">Quote</th></tr></thead>
         <tbody>{v.rows.map((r, i) => (
-          <tr key={i}><th scope="row">{r.label}</th><td>{money(r.amount)}</td><td>{r.page}</td>
+          <tr key={i}><th scope="row">{r.label}</th>{!words && <td>{pct ? dec2(r.amount ?? NaN) : money(r.amount)}</td>}<td>{r.page}</td>
             <td className="ar-quote">“{r.quote}”</td></tr>
         ))}</tbody>
       </table>
@@ -456,7 +468,12 @@ function ArNoteView({ n, sources }: { n: ArNote; sources?: Used }) {
             <td>{pct(r.amount, n.against?.value)}</td><td>{cite(r)}</td></tr>)}</tbody>
         </table></div>
       )}
-      <p className="small ar-sum">
+      {(n.topic === 'pledge' || n.topic === 'auditor') ? <>
+        <p className="small ar-sum">{n.topic === 'pledge'
+          ? <><b>{fmt(n.total / 100, 'pct')}</b> of promoter shares pledged or encumbered.</>
+          : <>{n.auditor}: <b>{n.opinion}</b> opinion{n.changed ? '; the auditor changed this year' : ''}.</>}</p>
+        <ArRows v={n} pct={n.topic === 'pledge'} caption={`${title}, ${n.year}, quotes`} />
+      </> : <p className="small ar-sum">
         Total Rs {money(n.total)} cr
         {n.against && <>{n.topic === 'contingent' ? ', ' : ' vs '}{n.topic === 'contingent'
           ? <><b>{pct(n.total, n.against.value)}</b> of net worth (Rs {money(n.against.value)} cr)</>
@@ -465,7 +482,7 @@ function ArNoteView({ n, sources }: { n: ArNote; sources?: Used }) {
         {n.topic === 'capex' && (sources?.used.capex.includes(n.year)
           ? ' The XBRL cash flow for this year is used in the model (they agree).'
           : sources?.used.capex_ar?.includes(n.year) ? ` Used as ${n.year} capex in the model’s history.` : '')}
-      </p>
+      </p>}
     </article>
   )
 }
@@ -661,6 +678,74 @@ export function Explain({ year, company, filings, notes, report, proposals, note
         <span className="muted small" id={`${id}-why`} aria-busy={!!busy}>
           {busy ?? (off ? ai?.message ?? 'The AI status is unknown; is the server running?'
             : ai?.pdf === false && !report ? ai.pdf_message : '')}
+        </span>
+      </div>
+      <p className={`src-note ${msg?.bad ? 'is-bad' : ''}`} role="status">{msg?.text}</p>
+    </div>
+  )
+}
+
+/** An approved explanation of a forensic flag: serif words, marked AI-written, with its citation (or "from the numbers"). */
+export function FlagNoteView({ note }: { note: FlagNote }) {
+  return (
+    <div className="ai-note">
+      <span className="who">AI-written · {note.from_numbers ? 'from the numbers only' : 'cited'}</span>
+      <p className="serif">{note.summary}</p>
+      {note.quote && <p className="src-line"><span className="kind file">File</span>{note.file}, p.{note.page}: <q>{note.quote}</q></p>}
+    </div>
+  )
+}
+
+/** Beside a lit forensic flag: explain it in words from the latest attached annual report (rules pick the pages and
+ * check the quote and every number in the words) or from the numbers only. Approving pins the words; nothing
+ * numeric reads them. */
+export function FlagExplain({ flag, company, filings, notes, reports, proposals, note, ai, onProposals }: {
+  flag: Forensic; company: Company; filings: Filing[]; notes: Record<string, unknown>; reports: Report[]
+  proposals: Proposal[]; note?: FlagNote; ai: AiStatus | null; onProposals: (f: (ps: Proposal[]) => Proposal[]) => void
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null)
+  const askRef = useRef<HTMLDivElement>(null)
+  const report = [...reports].sort((a, b) => b.year.localeCompare(a.year))[0]
+  const live = proposals.filter(p => p.kind === 'flag_note' && p.field === flag.key && p.status === 'proposed').slice(-1)[0]
+  const id = `fx-${flag.key}`
+  const decided = (p: Proposal, s: Proposal['status']) => {
+    onProposals(ps => decideNote(ps, p, s))
+    setMsg({ text: s === 'approved' ? `Pinned the explanation of ${flag.title.toLowerCase()}.` : 'Rejected; kept under Sources & proposals for the record.' })
+    setTimeout(() => askRef.current?.querySelector('button')?.focus())
+  }
+  const explain = async (from: Report | null) => {
+    if (busy) return
+    setBusy(from ? `Finding the pages in ${from.file} and asking the model…` : 'Asking the model…')
+    setMsg(null)
+    try {
+      const p = await api<Proposal>('/api/flags/explain', postJson({ company, filings, notes, key: flag.key, report: from }))
+      const seen = proposals.find(x => x.id === p.id)
+      onProposals(ps => addProposal(ps, p))
+      const failed = p.checks.filter(c => c.pass === false)
+      setMsg(seen ? { text: `The same explanation as before (${PROP_STATUS[seen.status].toLowerCase()}).` }
+        : p.status === 'rejected' ? { text: `The rules rejected it: ${failed.map(c => c.detail).join(' ')} It’s kept for the record.`, bad: true }
+        : { text: from ? `Explained from ${from.file}, PDF page ${p.source.page}; the quote is on that page. Approve it to pin it.`
+          : 'Explained from the numbers only. Approve it to pin it.' })
+    } catch (e) { setMsg({ text: (e as Error).message, bad: true }) } finally { setBusy(null) }
+  }
+  const off = !ai?.available
+  return (
+    <div className="explain">
+      {note && <FlagNoteView note={note} />}
+      {live && <ul className="src-list explain-live" aria-label={`Explanation of ${flag.title} waiting for you`}>
+        <ProposalItem p={live} busy={!!busy} as="h5" title={flag.title} onDecide={decided} />
+      </ul>}
+      <div className="prop-ask" ref={askRef}>
+        {report && <button type="button" onClick={() => explain(report)} disabled={off} aria-disabled={!!busy}
+          aria-describedby={`${id}-why`} aria-label={`Explain ${flag.title.toLowerCase()} from the ${report.year} report`}>
+          {note ? 'Explain again' : 'Explain'} from the {report.year} report</button>}
+        <button type="button" onClick={() => explain(null)} disabled={off} aria-disabled={!!busy}
+          aria-describedby={`${id}-why`} aria-label={`Explain ${flag.title.toLowerCase()} from the numbers only`}>
+          {report ? 'From the numbers only' : 'Explain from the numbers only'}</button>
+        <span className="muted small" id={`${id}-why`} aria-busy={!!busy}>
+          {busy ?? (off ? ai?.message ?? 'The AI status is unknown; is the server running?'
+            : report ? '' : 'No annual report attached, so no citation.')}
         </span>
       </div>
       <p className={`src-note ${msg?.bad ? 'is-bad' : ''}`} role="status">{msg?.text}</p>

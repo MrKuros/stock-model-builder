@@ -227,7 +227,7 @@ class ModelDoc(ModelRequest):
     version: Literal[3, 4, 5, 6]
     excluded_years: list[str] = []
     saved_at: str | None = None
-    # ponytail: proposals are untyped dicts {id, kind (mapping | oneoff_note | ar_note), field, value, unit, period,
+    # ponytail: proposals are untyped dicts {id, kind (mapping | oneoff_note | ar_note | flag_note), field, value, unit, period,
     # source {file, page, quote, tag}, reasoning, checks [{name, pass, detail}], status (proposed | approved |
     # rejected), ai}; mapping adds "filing", oneoff_note "report"/"from_numbers", ar_note "report"/"pages"/"reply".
     # The server re-checks every one it acts on; a pydantic Proposal model if anything but our own client writes them
@@ -239,7 +239,9 @@ class ModelDoc(ModelRequest):
     # 4.3 flag_notes, 4.4 note); 4.1 only reads them, and the note shows their slots empty
     note: dict | None = None  # the thesis and verdict text (4.4): AI-written words with citations
     assumption_sources: dict = {}  # driver key -> where its value came from (4.2: an approved proposal, or you)
-    flag_notes: list[dict] = []  # AI explanations of rule-check flags, with citations (4.3)
+    # AI explanations of forensic flags (4.3), one per flag key, rebuilt by the client from the approved flag_note
+    # proposals: {key, year, proposal, summary, file, page, quote, from_numbers, ai}. Words only: no number reads them
+    flag_notes: list[dict] = []
     reviewed_at: str | None = None  # "Mark as reviewed" in the review bar; cleared when you change the model
 
     @model_validator(mode="after")
@@ -274,8 +276,10 @@ def _company_payload(co, excluded=(), filings=(), notes=None):
         "defaults": model.default_assumptions(up["hist"], exclude=set(excluded), labels=labels),
         "checks": model.data_checks(co),
         "oneoffs": (oneoffs := model.detect_oneoffs(up["hist"], labels)),
-        # the note (4.1): rule checks, key numbers against their 3-year median, rolling revenue CAGRs
-        "rule_checks": model.rule_checks(up["hist"], labels, oneoffs, model.data_checks(co), notes),
+        # the note (4.1): rule checks, key numbers against their 3-year median, rolling revenue CAGRs; the forensic
+        # radar (4.3) behind most of the rule checks
+        "forensic": (radar := model.forensic(up["hist"], labels, notes)),
+        "rule_checks": model.rule_checks(up["hist"], labels, oneoffs, model.data_checks(co), notes, radar),
         "key_numbers": model.key_numbers(up["hist"], labels),
         "cagrs": {"3": model.cagrs(up["hist"], labels, 3), "5": model.cagrs(up["hist"], labels, 5)},
         "valuation": model.VALUATION,  # defaults for a new document
@@ -523,6 +527,63 @@ def explain(req: ExplainRequest):
             "status": "proposed" if ok else "rejected", "ai": True}
 
 
+# ---------- forensic flags explained in words (4.3): rules found the flag, the LLM says why, rules check the words ----------
+
+class FlagRequest(BaseModel):
+    company: Company
+    filings: list[Filing] = []
+    notes: dict = {}
+    key: str
+    report: Report | None = None  # None: from the numbers only
+
+FLAG_LINES = NOTE_LINES + (("cfo", "Cash from operations"), ("receivables", "Receivables"), ("inventory", "Inventory"),
+                           ("cwip", "Capital WIP"), ("cash", "Cash"), ("investments", "Investments"))
+
+
+@app.post("/api/flags/explain")
+def explain_flag(req: FlagRequest):
+    """A words-only proposal (kind flag_note) for a lit forensic flag. Rules re-run the radar (a flag that isn't lit is a
+    422), pick the report's pages and check the quote is on the cited page and that every number in the words is one
+    the app computed or one in the quote; a failure comes back rejected. Approving pins the words; no number reads them."""
+    if not ai.available():
+        raise HTTPException(503, ai.NOT_SET)
+    co = req.company.model_dump()
+    labels, up = model.labels(co["dates"]), model.upgrade(co, [f.model_dump() for f in req.filings], ar_capex(req.notes))
+    flag = next((f for f in model.forensic(up["hist"], labels, req.notes) if f["key"] == req.key), None)
+    if flag is None or flag["severity"] not in ("high", "medium", "low"):
+        raise HTTPException(422, f"{flag['title'] if flag else req.key} isn't flagged.")
+    rows = list(zip(labels, up["hist"]))[-5:]
+    numbers = "\n".join(f"{name}: " + ", ".join(f"{y} {h[k]:,.0f}" if h.get(k) is not None else f"{y} n/a" for y, h in rows)
+                        for k, name in FLAG_LINES)
+    given = f"{flag['title']} {flag['fact']} {flag['detail']} {flag['rule']}\n{numbers}"
+    r = req.report
+    try:
+        if r is None:
+            reply = ai.explain_flag(flag, numbers)
+            checks = [{"name": "Source", "pass": None, "detail": "From the numbers only, no filing read."}]
+            source = {"file": None, "page": None, "quote": None, "tag": None}
+        else:
+            if r.year not in labels:
+                raise HTTPException(422, f"{r.year} isn't one of the reported years in this model.")
+            end, pages = co["dates"][labels.index(r.year)].date(), report_pages(r)
+            sent = ai.pick_flag_pages(pages, req.key, end)
+            if not sent:
+                raise HTTPException(422, f"No page of {r.file} mentions {flag['title'].lower()}. Explain from the numbers only instead.")
+            reply = ai.explain_flag(flag, numbers, [(n, ai.page_text(pages[n - 1])) for n in sent])  # tables: rows kept whole
+            checks = ai.quote_checks(reply, pages, sent, end)
+            source = {"file": r.file, "page": reply["page"], "quote": reply["quote"].strip()[:900], "tag": None}
+    except ai.LLMError as e:
+        raise HTTPException(502, str(e))
+    summary = reply["summary"].strip()
+    checks.append(ai.numbers_check(summary, given, source["quote"]))
+    ok = all(c["pass"] is not False for c in checks)
+    key = f"flag:{req.key}:{r and r.id}:{summary}:{source['page']}:{source['quote']}"
+    return {"id": hashlib.sha1(key.encode()).hexdigest()[:12],
+            "kind": "flag_note", "field": req.key, "value": summary, "unit": None, "period": labels[-1],
+            "source": source, "report": r and r.id, "from_numbers": r is None,
+            "reasoning": flag["detail"], "checks": checks, "status": "proposed" if ok else "rejected", "ai": True}
+
+
 # ---------- annual-report notes (3.3): rules pick pages per topic, the LLM extracts, rules check, the user approves ----------
 
 class NotesRequest(BaseModel):
@@ -570,14 +631,16 @@ def _ar_note(req, topic, reply, sent, pages):
     against = (ag or [None])[0] or ref
     first = rows[0]
     ok = all(c["pass"] is not False for c in checks)
+    value = {"rows": rows, "total": total, "against": against and {"label": against[0], "value": against[1]}}
+    if topic == "auditor":  # words, checked against the quotes: the firm, the opinion, whether it changed
+        value.update(auditor=reply["auditor"].strip()[:120], opinion=reply["opinion"], changed=reply["changed"])
     return {"id": hashlib.sha1(f"ar:{topic}:{r.id}:{json.dumps(reply, sort_keys=True)}".encode()).hexdigest()[:12],
-            "kind": "ar_note", "field": topic, "value": {"rows": rows, "total": total,
-                                                          "against": against and {"label": against[0], "value": against[1]}},
-            "unit": "Rs crore", "period": r.year,
+            "kind": "ar_note", "field": topic, "value": value,
+            "unit": {"pledge": "% of promoter shares", "auditor": None}.get(topic, "Rs crore"), "period": r.year,
             "source": {"file": r.file, "page": first["page"], "quote": first["quote"], "tag": None},
             "report": r.id, "pages": sent, "reply": reply,
             "reasoning": f"{ai.TOPICS[topic][0]} read from PDF page{'s' if len(sent) > 1 else ''} "
-                         f"{', '.join(map(str, sent))}; printed in {reply['unit']}.",
+                         f"{', '.join(map(str, sent))}" + (f"; printed in {reply['unit']}." if reply.get("unit") else "."),
             "checks": checks, "status": "proposed" if ok else "rejected", "ai": True}
 
 
@@ -594,7 +657,7 @@ def notes_plan(req: NotesRequest):
     pages, out = req.pages(), {}
     for t, (title, _, _) in ai.TOPICS.items():
         sent = ai.pick_topic_pages(pages, t, end)
-        chars = len(ai.note_prompt(t, req.report.year, end, [(n, ai.page_text(pages[n - 1])) for n in sent])) if sent else 0
+        chars = len(ai.note_prompt(t, req.report.year, end, [(n, ai.page_text(pages[n - 1], t)) for n in sent])) if sent else 0
         out[t] = {"title": title, "pages": sent, "chars": chars}
     return {"topics": out, "chars": sum(x["chars"] for x in out.values())}
 
@@ -611,7 +674,7 @@ def notes_extract(req: NotesRequest):
     if not sent:
         raise HTTPException(422, f"No page of {req.report.file} looks like the {title} note.")
     try:
-        reply = ai.extract_note(topic, req.report.year, end, [(n, ai.page_text(pages[n - 1])) for n in sent])
+        reply = ai.extract_note(topic, req.report.year, end, [(n, ai.page_text(pages[n - 1], topic)) for n in sent])
     except ai.LLMError as e:
         raise HTTPException(502, str(e))
     if reply.get("found") is False:
@@ -629,7 +692,8 @@ def notes_approve(req: NoteDecision):
     """Re-run the rules on the saved reply against the stored page text (no LLM call); approve only if all pass."""
     p = req.proposal
     rep = req.report if req.report and req.report.id == p.get("report") else None
-    if p.get("kind") != "ar_note" or rep is None or not isinstance(p.get("reply"), dict) or ai.note_shape(p["reply"]):
+    if (p.get("kind") != "ar_note" or rep is None or not isinstance(p.get("reply"), dict) or p.get("field") not in ai.TOPICS
+            or ai.note_shape(p["reply"], p["field"])):
         raise HTTPException(422, "That isn't an annual-report note proposal, or its report isn't attached.")
     req.report = rep
     sent = [n for n in p.get("pages") or [] if isinstance(n, int)]
