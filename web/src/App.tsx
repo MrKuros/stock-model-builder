@@ -469,9 +469,9 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
           </nav>
           <span className="spacer" />
           <ThemeButton />
-          <button type="button" className="tbtn" onClick={exportXlsx} disabled={!proj || exporting}>
+          <button type="button" className="tbtn" onClick={exportXlsx} disabled={!proj || exporting} aria-label={exporting ? 'Exporting to Excel' : 'Export to Excel'}>
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8m0 0L5 7m3 3 3-3M3 13h10" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg>
-            <span className="t-l">{exporting ? 'Exporting…' : 'Excel'}</span><span className="sr">{exporting ? '' : ' export'}</span>
+            <span className="t-l">{exporting ? 'Exporting…' : 'Excel'}</span>
           </button>
         </div>
       </header>
