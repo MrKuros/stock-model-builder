@@ -3,9 +3,11 @@ import Chart from './Chart'
 import DriverStrip from './DriverStrip'
 import Statements, { growth, month } from './Statements'
 import ValuationPanel from './Valuation'
+import DraftPanel, { failing, latest, path, useDraft } from './Draft'
+import { Checks } from './Sources'
 import type { Go } from './App'
 import {
-  fmt, flat, flatAll, groupKeys, money, seed, SCENARIOS, shortYear,
+  DOC_KINDS, fmt, flat, flatAll, groupKeys, money, seed, SCENARIOS, shortYear, type Proposal,
   type Kind, type ModelDoc, type Parsed, type Paths, type Projection, type Row, type Scenario, type Ttm,
 } from './lib'
 
@@ -112,7 +114,23 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
     const next = seed(scenarios.base)
     const edited = (['bull', 'bear'] as const).some(s => JSON.stringify(scenarios[s]) !== JSON.stringify(next[s]))
     if (edited && !window.confirm('Replace your bull and bear assumptions with base ± 3 pp growth and ± 1.5 pp EBITDA margin?')) return
-    setDoc(d => ({ ...d, scenarios: next }))
+    // bull and bear now come from base, so they take base's sources too
+    setDoc(d => ({ ...d, scenarios: next, assumption_sources: { ...d.assumption_sources, bull: { ...d.assumption_sources.base }, bear: { ...d.assumption_sources.base } } }))
+  }
+  const draft = useDraft(doc, setDoc)
+  const srcOf = (k: string) => doc.assumption_sources[active]?.[k]
+  const propOf = (id: string | undefined) => (id && id !== 'manual' && id !== 'history' ? doc.proposals.find(p => p.id === id) : undefined)
+  const docOf = (p: Proposal) => {
+    const r = doc.reports.find(x => x.id === p.report)
+    return r ? `${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}` : p.source.file ?? 'a document'
+  }
+  /** The source chip: an accepted AI proposal, the rule default from history, your edit, or (before 4.2) by value. */
+  const chipOf = (k: string): [cls: string, tag: string, text: string] => {
+    const s = srcOf(k), p = propOf(s), kind = kindOf(k)
+    if (p) return ['ai', 'AI', `${docOf(p)}, p.${p.source.page}`]
+    if (s === 'manual') return ['you', 'You', `default ${fmt(seeded[active][k]?.start, kind)}`]
+    if (s === 'history') return ['rule', 'History', 'rule default from the reported years']
+    return isYou(k) ? ['you', 'You', `default ${fmt(seeded[active][k]?.start, kind)}`] : ['rule', 'Rule', sources?.drivers[k] ?? ruleOf(k)]
   }
   const recent = histYears.slice(-3)
   const flagOf = (k: string) => parsed.oneoffs.filter(o => o.metric === k && recent.includes(o.year))
@@ -125,6 +143,8 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
 
   const selKey = shown(sel) ? sel : 'growth'
   const flags = flagOf(selKey), lit = checkOf(selKey)
+  // the selected input's AI proposal: one waiting for you in the latest draft, else the one its value came from
+  const aiCard = latest(doc).find(p => p.field === selKey && p.status === 'proposed' && !p.from_history) ?? propOf(srcOf(selKey))
 
   return (
     <>
@@ -151,7 +171,8 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
       <p className="small-note">
         Edits change the <b>{active}</b> case. Bull and bear start from base with revenue growth ± 3 pp and EBITDA margin
         ± 1.5 pp.{' '}<button type="button" className="link" onClick={copyBase}>Copy base to bull and bear</button>{' · '}
-        <button type="button" className="link" onClick={() => setA(() => seeded[active])}>Reset {active}</button>
+        <button type="button" className="link" onClick={() => setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [active]: seeded[active] },
+          assumption_sources: { ...d.assumption_sources, [active]: {} } }))}>Reset {active}</button>
       </p>
       <p className="status-line" aria-live="polite">
         {balanced && <span className="ok">Balance sheet balances in every projected year</span>}
@@ -159,6 +180,8 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
           ? <span className="ok">Balance sheet balances; {projYears[0]} cash is off by Rs {money(off)} cr from rounding in the reported figures</span>
           : <span className="bad" role="alert">Balance check fails in {projYears[offIdx]} by Rs {money(off)} cr</span>)}
       </p>
+
+      <DraftPanel parsed={parsed} doc={doc} d={draft} />
 
       <div className="mgrid">
         <section aria-labelledby="inputs-h">
@@ -170,20 +193,20 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
                 <div className="agroup" aria-hidden="true">{group}</div>
                 {keys.filter(shown).map(k => {
                   const kind = kindOf(k), p = valueOf(k), r = range(k), lastV = ratios[nHist - 1]?.[k]
-                  const f = flagOf(k)[0], c = checkOf(k)
+                  const f = flagOf(k)[0], c = checkOf(k), [cls, tag, text] = chipOf(k)
                   const usedText = p.end != null ? `${fmt(p.start, kind)} → ${fmt(p.end, kind)}` : fmt(p.start, kind)
                   return (
                     <div role="listitem" key={k} id={`a-${k}`}>
                       <button type="button" className={`arow${selKey === k ? ' sel' : ''}`} aria-pressed={selKey === k}
-                        aria-label={`${byKey[k][1]}: ${usedText}${f || c ? ', flagged' : ''}. ${isYou(k) ? 'Set by you' : 'Rule default'}.`}
+                        aria-label={`${byKey[k][1]}: ${usedText}${f || c ? ', flagged' : ''}. Source: ${tag}, ${text}.`}
                         onClick={() => pick(k)}>
                         <span className="an">{byKey[k][1].replace(/ \(history incl\. exceptionals\)/, '')}
                           {(f || c) && <em className="redpen">{f ? `${shortYear(f.year)} unusual` : `${shortYear(histYears[nHist - 1])} up`}</em>}</span>
                         <Spark hist={ratios.map(r => r[k])} used={p} />
                         <span className="num ours">{usedText}</span>
                         <span className="num dim">{fmt(lastV, kind)}{r && <> · {fmt(r[0], kind)}–{fmt(r[1], kind)}</>}</span>
-                        <span className="asrc"><span className={`tag ${isYou(k) ? 'you' : 'rule'}`}>{isYou(k) ? 'You' : 'Rule'}</span>
-                          <span className="small">{isYou(k) ? `default ${fmt(seeded[active][k]?.start, kind)}` : (sources?.drivers[k] ?? ruleOf(k))}</span></span>
+                        <span className="asrc"><span className={`tag ${cls}`}>{tag}</span>
+                          <span className="small">{text}</span></span>
                       </button>
                     </div>
                   )
@@ -204,6 +227,9 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
               baseLabel={selKey === 'debt_change' ? 'no new debt' : `default ${fmt(seeded[active][selKey].start, kindOf(selKey))}`}
               onChange={v => setA(prev => ({ ...prev, [selKey]: v }))} ghost={selKey === 'growth' ? implied : null} />
           </div>
+          {aiCard && <AiCard p={aiCard} kind={kindOf(selKey)} current={valueOf(selKey)} doc={docOf(aiCard)} active={active}
+            inUse={propOf(srcOf(selKey))?.id === aiCard.id} busy={!!draft.busy}
+            onApprove={() => draft.accept([aiCard])} onKeep={() => draft.reject(aiCard)} />}
           <div className="card">
             <div className="card-h"><span>How the rule got it</span><span className="tag rule">Rule</span></div>
             <p className="small">{sources?.drivers[selKey] ?? ruleOf(selKey)}.</p>
@@ -230,7 +256,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, go 
                 {doc.filings.length ? `${doc.filings.length} XBRL filing${doc.filings.length > 1 ? 's' : ''}` : 'No XBRL filing.'}{' '}
                 <button type="button" className="link small" onClick={() => go('evidence', 'src-head')}>Attach XBRL</button></li>
               <li><span className={doc.reports.length ? 'ok' : 'dim'}>{doc.reports.length ? '✓' : '○'}</span>{' '}
-                {doc.reports.length ? doc.reports.map(r => `${r.year} annual report`).join(', ') : 'No annual report.'}{' '}
+                {doc.reports.length ? doc.reports.map(r => `${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}`).join(', ') : 'No annual report, transcript or presentation.'}{' '}
                 <button type="button" className="link small" onClick={() => go('evidence', 'src-ar-head')}>Attach PDF</button></li>
             </ul>
           </div>
@@ -322,4 +348,34 @@ function Compare({ all, active, projYear }: { all: Projection['scenarios']; acti
     return <span key={s}>{i > 0 && ' · '}{s} {s === active ? <b className="num ours">{v}</b> : <span className="num">{v}</span>}</span>
   })
   return <p className="compare">In {projYear}, revenue: {list('revenue')} cr. Net profit: {list('pat')} cr.</p>
+}
+
+/** The desk's proposal card: the AI's value for the selected input, its reasoning and quote, the rule checks, and
+ * approve / keep. Approving saves the values as ordinary inputs; nothing recalculates through the AI. */
+function AiCard({ p, kind, current, doc, active, inUse, busy, onApprove, onKeep }: {
+  p: Proposal; kind: Kind; current: { start: number; end: number | null }; doc: string; active: Scenario; inUse: boolean
+  busy: boolean; onApprove: () => void; onKeep: () => void
+}) {
+  const v = (p.value as Record<Scenario, { start: number; end: number | null }>)
+  const bad = failing(p)
+  return (
+    <div className={`card ai-card${bad ? ' flag' : ''}`}>
+      <div className="card-h"><span>{p.status === 'proposed' ? 'AI proposal' : 'From an accepted AI proposal'}</span>
+        <span className="tag ai">AI · cited</span></div>
+      <p className="ai-val"><span className="num ours">{path(v[active], kind)}</span> <span className="small dim">{active} ·
+        bear {path(v.bear, kind)} · bull {path(v.bull, kind)}</span></p>
+      <p className="serif">{p.reasoning}</p>
+      {p.source.quote && <blockquote className="prop-quote serif">“{p.source.quote}” <span className="small dim">{doc}, p.{p.source.page}</span></blockquote>}
+      {p.outside && <p className="small">Outside its history because: {p.outside}</p>}
+      <Checks checks={p.checks} />
+      {p.status === 'proposed' && <>
+        <div className="prop-actions">
+          <button type="button" onClick={onApprove} disabled={bad} aria-disabled={busy}>Approve {path(v[active], kind)}</button>
+          <button type="button" onClick={onKeep}>Keep {path(current, kind)}</button>
+        </div>
+        <p className="small dim">Approving saves bear, base and bull as ordinary inputs with this quote. Nothing recalculates through the AI.</p>
+      </>}
+      {p.status !== 'proposed' && !inUse && <p className="small dim">Changed since; the input no longer uses this proposal.</p>}
+    </div>
+  )
 }

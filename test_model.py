@@ -1145,6 +1145,7 @@ def library_check(root, co, scenarios):
     oneoff_check(server, root, data)
     ar_notes_check(server, root, co, data)
     flag_check(server, root, data)
+    assume_check(server, root, data)
     reimport_check(server, root, co, data)
 
 
@@ -1165,7 +1166,7 @@ def reimport_check(server, root, co, data):
         mid, _ = server.save_model(doc, root, now=datetime(2026, 10, 16, 9, 0))
         r = client.post("/api/parse", files={"file": ("x.xlsx", buf.getvalue())}).json()
         carry = r["restated"]["carry"]
-        assert (carry["notes"], carry["proposals"], carry["reports"]) == (notes, [prop], [rep]), carry
+        assert (carry["notes"], carry["proposals"], carry["reports"]) == (notes, [prop], [dict(rep, kind="annual")]), carry
         assert [f["id"] for f in carry["filings"]] == [f25["id"]], carry["filings"]
         assert r["hist"][-2]["capex"] == 150.0 and r["hist"][-1]["capex"] == 88.25, "the payload uses what carries over"
         server.delete_model(mid, root)
@@ -1710,6 +1711,126 @@ def flag_check(server, root, data):
             server.delete_model(mid, root)
         finally:
             ai.llm = llm
+    finally:
+        server.MODELS = models
+        os.environ.pop("LLM_CMD", None)
+        if env is not None:
+            os.environ["LLM_CMD"] = env
+        shutil.rmtree(root / server.REPORTS, ignore_errors=True)
+
+
+def assume_check(server, root, data):
+    """4.2: drafting every driver. Without documents or LLM_CMD every driver comes from history (the rule defaults);
+    with a transcript, a fake LLM_CMD proposes, and rules pass a cited guided value (outside history, with a reason)
+    and reject a made-up quote, an implausible value, a value outside history without a reason and the wrong
+    bear/base/bull order. Accepting re-checks with no LLM call; recalculating and saving never call it."""
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+    from pydantic import ValidationError  # noqa: PLC0415
+
+    client, models, env = TestClient(server.app), server.MODELS, os.environ.pop("LLM_CMD", None)
+    server.MODELS = root
+    keys = [k for k, _, _ in model.DRIVERS]
+    body = {"company": data["company"], "n": 5}
+    post = lambda b: client.post("/api/assumptions/draft", json=b)  # noqa: E731
+    failed = lambda p: {c["name"] for c in p["checks"] if c["pass"] is False}  # noqa: E731
+    try:
+        r = post(body).json()
+        assert [p["field"] for p in r["proposals"]] == keys and all(p["from_history"] and not p["ai"] for p in r["proposals"]), r
+        assert "No documents attached" in r["message"], r["message"]
+        g = r["proposals"][0]["value"]
+        assert abs(g["base"]["start"] - 0.12) < 1e-3 and abs(g["bull"]["start"] - g["base"]["start"] - 0.03) < 1e-12, g
+        if not ai.pdf_available():
+            print("pdftotext missing: skipped drafting from documents")
+            return
+        pdf = tiny_pdf([["Q4 FY2025 earnings call transcript", "Operator: welcome to the call."],
+                        ["CEO: Going forward we expect revenue growth of 14 percent next year as the new plant ramps up,",
+                         "with demand strong across both segments and pricing steady."],
+                        ["CFO: Receivable days should come down to about 40 days as collections improve.",
+                         "Our capex plan is modest and the dividend payout policy stays unchanged."]])
+        assert client.post("/api/report", files={"file": ("call.pdf", pdf)}, data={"year": "FY2025", "kind": "memo"}).status_code == 422
+        rep = client.post("/api/report", files={"file": ("call.pdf", pdf)}, data={"year": "FY2025", "kind": "transcript"}).json()
+        assert rep["kind"] == "transcript", rep
+        r = post(dict(body, reports=[rep])).json()
+        assert all(p["from_history"] for p in r["proposals"]) and "LLM_CMD" in r["message"], r["message"]
+        # a transcript is not an annual report: the notes and flag readers refuse it
+        assert client.post("/api/flags/explain", json={"company": data["company"], "key": "cash", "report": rep}).status_code in (422, 503)
+        q_growth = "we expect revenue growth of 14 percent next year as the new plant ramps up"
+        q_dso = "Receivable days should come down to about 40 days as collections improve"
+        q_capex = "Our capex plan is modest and the dividend payout policy stays unchanged"
+        cite = lambda page, q: {"doc": "D1", "page": page, "quote": q}  # noqa: E731
+        reply = {"drivers": [
+            {"key": "growth", "from": "documents", "base": {"start": 14, "end": 12}, "bull": {"start": 16, "end": 14},
+             "bear": {"start": 10, "end": None}, "reasoning": "Management guides 14% growth as the new plant ramps up.",
+             "outside_history": "The new plant adds capacity the history didn't have.", **cite(2, q_growth)},
+            {"key": "ebitda_margin", "from": "documents", "base": {"start": 24, "end": None}, "bull": {"start": 25, "end": None},
+             "bear": {"start": 22, "end": None}, "reasoning": "Margins expand.", **cite(2, "margins will expand to 24 percent")},
+            {"key": "payout", "from": "documents", "base": {"start": 150, "end": None}, "bull": {"start": 150, "end": None},
+             "bear": {"start": 150, "end": None}, "reasoning": "Payout unchanged.", **cite(3, q_capex)},
+            {"key": "capex_pct", "from": "documents", "base": {"start": 9, "end": None}, "bull": {"start": 9, "end": None},
+             "bear": {"start": 9, "end": None}, "reasoning": "A modest capex plan.", **cite(3, q_capex)},
+            {"key": "dso", "from": "documents", "base": {"start": 44, "end": None}, "bull": {"start": 47, "end": None},
+             "bear": {"start": 41, "end": None}, "reasoning": "Collections improve to about 40 days.", **cite(3, q_dso)},
+            {"key": "tax_rate", "from": "history"}]}
+        calls = fake_llm(root / "llm", "Draft:\n" + json.dumps(reply))
+        r = post(dict(body, reports=[rep])).json()
+        assert calls() == 1 and [p["field"] for p in r["proposals"]] == keys, r
+        by = {p["field"]: p for p in r["proposals"]}
+        prompt = (root / "llm" / "prompt-0.txt").read_text()
+        assert "=== D1 (FY2025 earnings-call transcript, call.pdf) PAGE 2 ===" in prompt and "buy or sell" in prompt, prompt[:400]
+        assert "- growth (Revenue growth; unit percent" in prompt and "dpo" not in prompt.split("Pages from")[0], "no payables: no dpo"
+        gp = by["growth"]
+        assert gp["status"] == "proposed" and not failed(gp) and gp["ai"] and gp["source"]["page"] == 2, gp["checks"]
+        assert gp["value"]["base"] == {"start": 0.14, "end": 0.12} and gp["value"]["bear"]["end"] is None, gp["value"]
+        assert "the cited reason" in next(c["detail"] for c in gp["checks"] if c["name"] == "Against its history")
+        assert failed(by["ebitda_margin"]) == {"Quote is on the page", "Against its history"}, by["ebitda_margin"]["checks"]
+        assert by["ebitda_margin"]["status"] == "rejected"
+        assert {"Plausible", "Payout vs cash"} <= failed(by["payout"]), by["payout"]["checks"]  # 150%: borrows to pay
+        assert failed(by["capex_pct"]) == {"Against its history"}, by["capex_pct"]["checks"]  # 9% vs 3.5-6.5%, no reason
+        assert failed(by["dso"]) == {"Bear ≤ base ≤ bull"}, by["dso"]["checks"]  # lower days are better
+        assert by["tax_rate"]["from_history"] and by["oi_pct"]["from_history"], "uncovered drivers come from history"
+        assert {c["name"] for c in gp["checks"]} == {"Quote is on the page", "Values parse", "Plausible", "Against its history",
+                                                       "Bear ≤ base ≤ bull", "Numbers match"}, gp["checks"]
+        cx = {c["name"]: c for c in by["capex_pct"]["checks"]}
+        assert cx["Capex vs depreciation and growth"]["pass"] is True, cx
+        # an invented number in the reasoning is rejected
+        bad = dict(reply["drivers"][0], reasoning="Growth of 37% a year is guided.")
+        fake_llm(root / "llm", {"drivers": [bad]})
+        assert "Numbers match" in failed(post(dict(body, reports=[rep])).json()["proposals"][0])
+        # accepting re-checks from the saved reply and page text, with no LLM call
+        llm, ai.llm = ai.llm, None
+        try:
+            sc = data["scenarios"]
+            chk = client.post("/api/assumptions/check", json=dict(body, reports=[rep], scenarios=sc,
+                                                                 proposals=[gp, by["tax_rate"]])).json()["proposals"]
+            assert [p["id"] for p in chk] == [gp["id"], by["tax_rate"]["id"]] and not failed(chk[0]) and chk[1]["from_history"], chk
+            assert "Bear ≤ base ≤ bull" in failed(client.post("/api/assumptions/check", json=dict(
+                body, reports=[rep], scenarios=sc, proposals=[by["dso"]])).json()["proposals"][0])
+            tampered = dict(gp, reply=dict(gp["reply"], quote="growth will double"))
+            assert "Quote is on the page" in failed(client.post("/api/assumptions/check", json=dict(
+                body, reports=[rep], scenarios=sc, proposals=[tampered])).json()["proposals"][0])
+            assert client.post("/api/assumptions/check", json=dict(body, scenarios=sc, proposals=[gp])).status_code == 422, "report gone"
+            # accepted: ordinary assumptions plus where each came from; recalculating, exporting, saving never call the LLM
+            acc = {s: dict(sc[s], growth=gp["value"][s]) for s in sc}
+            srcs = {s: {"growth": gp["id"], "tax_rate": "history", "dso": "manual"} for s in sc}
+            doc = dict(data, scenarios=acc, reports=[rep], proposals=[dict(gp, status="approved"), by["dso"]], assumption_sources=srcs)
+            req = {k: doc[k] for k in ("company", "scenarios", "n", "valuation")}
+            assert client.post("/api/project", json=req).status_code == 200
+            assert client.post("/api/export", json=req).status_code == 200
+            mid, _ = server.save_model(server.ModelDoc.model_validate(doc), root, now=datetime(2026, 10, 17, 9, 0))
+            back = server.load_model(mid, root).model_dump(mode="json")
+            assert back["assumption_sources"] == srcs and back["reports"] == [rep] and back["scenarios"] == acc, back["assumption_sources"]
+            server.delete_model(mid, root)
+            bad_src = dict(doc, assumption_sources={"base": {"growth": 3}})
+            try:
+                server.ModelDoc.model_validate(bad_src)
+                raise AssertionError("assumption_sources must be {scenario: {driver: text}}")
+            except ValidationError:
+                pass
+        finally:
+            ai.llm = llm
+        old = dict(data, version=5, reports=[{k: v for k, v in rep.items() if k != "kind"}])
+        assert server.ModelDoc.model_validate(old).reports[0].kind == "annual", "reports saved before 4.2 are annual"
     finally:
         server.MODELS = models
         os.environ.pop("LLM_CMD", None)

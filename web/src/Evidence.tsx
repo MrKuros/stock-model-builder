@@ -3,7 +3,7 @@ import Sources, { Explain, FlagExplain, useAi } from './Sources'
 import type { Go } from './App'
 import type { Upgrade } from './Model'
 import {
-  fmt, money, rs, when, type Forensic, type ModelDoc, type OneOff, type OneOffNote, type Parsed, type Projection, type Proposal,
+  DOC_KINDS, fmt, isAnnual, money, rs, when, type Forensic, type ModelDoc, type OneOff, type OneOffNote, type Parsed, type Projection, type Proposal,
   type Severity,
 } from './lib'
 
@@ -38,7 +38,8 @@ export default function Evidence({ parsed, doc, setDoc, projection, go, upgrades
   const restated = parsed.restated?.changes.length ? parsed.restated : null
   const oneoffYears = Object.entries(parsed.oneoffs.reduce<Record<string, OneOff[]>>(
     (g, o) => ({ ...g, [o.year]: [...(g[o.year] ?? []), o] }), {}))
-  const decided = doc.proposals.filter(p => p.status !== 'proposed')
+  const decided = doc.proposals.filter(p => p.status !== 'proposed' && p.kind !== 'assumption') // assumptions: Model tab
+  const annual = doc.reports.filter(isAnnual), talk = doc.reports.filter(r => !isAnnual(r))
   const onReports = (f: (rs: ModelDoc['reports']) => ModelDoc['reports']) => setDoc(d => ({ ...d, reports: f(d.reports) }))
   const nCells = sv ? [...sv.grid.flat(), ...(sv.grid_gm ?? []).flat()].filter(x => x != null).length : 0
   const below = sv && v?.price != null ? [...sv.grid.flat(), ...(sv.grid_gm ?? []).flat()].filter(x => x != null && x <= v.price!).length : 0
@@ -59,9 +60,13 @@ export default function Evidence({ parsed, doc, setDoc, projection, go, upgrades
             <p>{doc.filings.length ? `${doc.filings.length} attached; annual ones that tie to Screener add payables, leases and cash-flow capex.`
               : 'Would add trade payables, lease liabilities and cash-flow capex from an annual filing.'}</p>
             <button type="button" className="btn" onClick={() => go('evidence', 'src-head')}>Attach XBRL</button></div>
-          <div className={`doc${doc.reports.length ? '' : ' missing'}`}><h3>Annual reports</h3>
-            <p>{doc.reports.length ? doc.reports.map(r => `${r.year} (${r.pages} pages)`).join(', ') + '.'
+          <div className={`doc${annual.length ? '' : ' missing'}`}><h3>Annual reports</h3>
+            <p>{annual.length ? annual.map(r => `${r.year} (${r.pages} pages)`).join(', ') + '.'
               : 'Would unlock the contingent-liability, related-party, promoter-pledge and auditor checks, and cited explanations.'}</p>
+            <button type="button" className="btn" onClick={() => go('evidence', 'src-ar-head')}>Attach PDF</button></div>
+          <div className={`doc${talk.length ? '' : ' missing'}`}><h3>Call transcripts and presentations</h3>
+            <p>{talk.length ? talk.map(r => `${DOC_KINDS[r.kind ?? 'annual']}, ${r.year} (${r.pages} pages)`).join('; ') + '.'
+              : 'Management’s guidance on growth, margins, capex and payout: lets the app draft assumptions with quotes.'}</p>
             <button type="button" className="btn" onClick={() => go('evidence', 'src-ar-head')}>Attach PDF</button></div>
         </div>
       </section>
@@ -127,7 +132,7 @@ export default function Evidence({ parsed, doc, setDoc, projection, go, upgrades
           ? <OneOffs years={oneoffYears} histYears={years} excluded={doc.excluded_years} pending={pendingYear}
               note={defaultsNote} onToggle={toggleYear} explain={year => (
                 <Explain year={year} company={company} filings={doc.filings} notes={doc.notes} ai={ai} proposals={doc.proposals}
-                  report={doc.reports.find(r => r.year === year)} note={doc.notes[`oneoff:${year}`] as OneOffNote | undefined}
+                  report={annual.find(r => r.year === year)} note={doc.notes[`oneoff:${year}`] as OneOffNote | undefined}
                   onProposals={onProposals} onReports={onReports} />
               )} />
           : <p className="small-note">No year sits more than 2σ from this company’s own median on other income, tax rate, capex or EBITDA margin.</p>}
@@ -211,7 +216,7 @@ function Radar({ flags, doc, parsed, ai, go, onProposals }: {
                     <td className="num">{f.parts![k] != null ? f.parts![k].toFixed(2) : '–'}</td></tr>)}</tbody>
                 </table></div>
                 {f.approx && <ul className="small-note">{f.approx.map(a => <li key={a}>{a[0].toUpperCase() + a.slice(1)}.</li>)}</ul>}</details>}
-              {lit && <FlagExplain flag={f} company={parsed.company} filings={doc.filings} notes={doc.notes} reports={doc.reports}
+              {lit && <FlagExplain flag={f} company={parsed.company} filings={doc.filings} notes={doc.notes} reports={doc.reports.filter(isAnnual)}
                 proposals={doc.proposals} note={doc.flag_notes.find(x => x.key === f.key)} ai={ai} onProposals={onProposals} />}
               {f.needs && <p><button type="button" className="btn" onClick={() => go('evidence', 'src-ar-head')}
                 aria-label={`Attach the ${f.needs} for ${f.title.toLowerCase()}`}>Attach the {f.needs}</button></p>}

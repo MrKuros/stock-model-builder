@@ -685,3 +685,166 @@ def numbers_check(summary, given, quote=None):
             "detail": "Every number in the text is one the app computed or one in the quote." if not bad
             else f"{', '.join(bad[:4])} {'is' if len(bad) == 1 else 'are'} neither computed by the app nor in the quote, "
                  "so the explanation is rejected."}
+
+
+# ---------- drafting assumptions (4.2): rules pick the pages, the LLM proposes every driver, rules check each ----------
+
+KINDS = {"annual": "annual report", "transcript": "earnings-call transcript", "presentation": "investor presentation"}
+# words that point at management's view of the years ahead (word, weight); a page needs a word of weight >= 2
+ASSUME_WORDS = (("guidance", 3), ("outlook", 3), ("order book", 3), ("going forward", 3), ("next year", 2),
+                ("capacity", 2), ("capex", 2), ("capital expenditure", 2), ("expansion", 2), ("margin", 2),
+                ("demand", 2), ("pricing", 2), ("price increase", 2), ("utilisation", 2), ("utilization", 2),
+                ("target", 2), ("double-digit", 2), ("double digit", 2), ("deal wins", 2), ("pipeline", 2),
+                ("payout", 2), ("tax rate", 2), ("deleverag", 2), ("we expect", 2), ("growth", 1), ("expect", 1),
+                ("working capital", 1), ("dividend", 1), ("debt", 1))
+ASSUME_PAGES, ASSUME_PER_DOC = 8, 2  # ponytail: 8 pages in all (~16k tokens), at least the 2 best of each document
+
+
+def pick_assume_pages(docs):
+    """docs [(doc label, pages)] -> [(doc label, page number)]: the best 2 pages of each document by forward-looking
+    words, then the best of the rest up to 8, highest score first."""
+    scored = []
+    for label, pages in docs:
+        mine = []
+        for i, (raw, _) in enumerate(pages):
+            t = norm(raw)
+            if not any(w in t for w, wt in ASSUME_WORDS if wt >= 2):
+                continue
+            mine.append((sum(min(t.count(w), 5) * wt for w, wt in ASSUME_WORDS), label, i + 1))
+        scored.append(sorted(mine, key=lambda x: (-x[0], x[2])))
+    first = [x for s in scored for x in s[:ASSUME_PER_DOC]]
+    rest = sorted((x for s in scored for x in s[ASSUME_PER_DOC:]), key=lambda x: (-x[0], x[2]))
+    return [(lb, n) for _, lb, n in sorted([*first, *rest][:ASSUME_PAGES], key=lambda x: (-x[0], x[2]))]
+
+
+def _pct_unit(kind):
+    return {"pct": "percent (12.5 = 12.5%)", "days": "days", "num": "Rs crore a year"}[kind]
+
+
+def assume_prompt(name, years, rows, pages):
+    """The prompt: each driver's history and rule default (`rows` [{key, label, kind, hist [(year, v)], default}], in
+    the reply's units), then the pages [(doc label, title, page number, text)]."""
+    table = "\n".join(f"- {r['key']} ({r['label']}; unit {_pct_unit(r['kind'])}): "
+                      + ", ".join(f"{y} {v:.1f}" for y, v in r["hist"]) + f"; rule default {r['default']:.1f}" for r in rows)
+    text = "\n\n".join(f"=== {lb} ({title}) PAGE {n} ===\n{t[:MAX_PAGE_CHARS]}" for lb, title, n, t in pages)
+    return (f"You set the forecast assumptions for {name}, an Indian listed company, for {years[0]} to {years[1]}. "
+            f"Its drivers, each with its reported history and the default a fixed rule gives:\n{table}\n\n"
+            f"Pages from its documents (only these were read):\n{text}\n\n"
+            "For EVERY driver above give a base, bull and bear case, each {\"start\": first year, \"end\": last year or "
+            "null for flat}, in the driver's unit. Use the documents where they speak to a driver (guidance, outlook, "
+            "capacity, capex plans, margins, demand, order book, pricing, payout policy): then set \"from\": \"documents\" "
+            "and cite one page with a quote of 5 to 80 words copied character for character from it (it may run across "
+            "consecutive lines or table rows); quote the sentence or row that holds the figures you rely on. Where the "
+            "documents say nothing about a driver, set \"from\": \"history\" and give no values (the rule default is "
+            "used). If a base value sits outside the driver's reported range, say why in \"outside_history\", backed "
+            "by the quote. Reasoning: one or two sentences; every number in it must be in the driver list above or "
+            "inside your quote (a figure from elsewhere on the page is rejected), written as it appears there. "
+            "Bear must be no better than base and bull no worse. Don't say whether to buy or sell.\n"
+            'Answer as a JSON object: {"drivers": [{"key": "growth", "from": "documents", "base": {"start": 12.0, '
+            '"end": 10.0}, "bull": {"start": 14.0, "end": 12.0}, "bear": {"start": 8.0, "end": null}, "reasoning": '
+            '"...", "doc": "D1", "page": 12, "quote": "...", "outside_history": null}, {"key": "dso", "from": "history"}]}.')
+
+
+def _assume_shape(keys):
+    def shape(v):
+        if not isinstance(v, dict) or not isinstance(v.get("drivers"), list):
+            return 'expected {"drivers": [...]}'
+        for x in v["drivers"]:
+            if not isinstance(x, dict) or x.get("key") not in keys or x.get("from") not in ("documents", "history"):
+                return f'each driver must be {{"key": one of {", ".join(keys)}, "from": "documents" or "history", ...}}'
+            if x["from"] == "documents" and not (
+                    all(isinstance(x.get(s), dict) and "start" in x[s] for s in ("base", "bull", "bear"))
+                    and isinstance(x.get("page"), int) and isinstance(x.get("quote"), str) and isinstance(x.get("doc"), str)):
+                return (f'{x["key"]}: a driver from the documents needs "base", "bull" and "bear" objects with "start", '
+                        'and "doc", "page" and "quote"')
+        return None
+    return shape
+
+
+def draft_assumptions(name, years, rows, pages):
+    """{"drivers": [...]} as asked by assume_prompt; values in each driver's own unit (percent for pct drivers)."""
+    return ask_json(assume_prompt(name, years, rows, pages), _assume_shape([r["key"] for r in rows]))
+
+
+# plausible bounds per driver (fractions; days; debt_change is checked against the company's size instead): a value
+# outside is a misread or a typo whatever the documents say
+BOUNDS = {"growth": (-0.5, 1.0), "ebitda_margin": (-0.5, 0.8), "oi_pct": (0.0, 0.3), "dep_pct": (0.0, 0.5),
+          "int_rate": (0.0, 0.3), "tax_rate": (0.0, 0.5), "mi_pct": (-0.5, 0.5), "payout": (0.0, 1.0),
+          "capex_pct": (0.0, 1.0), "dso": (0.0, 365.0), "cogs_pct": (0.0, 1.0), "dio": (0.0, 365.0),
+          "dpo": (0.0, 365.0), "oca_pct": (0.0, 1.0), "ol_pct": (0.0, 1.0)}
+DEBT_MAX = 1.0  # planned borrowing change a year: at most 1x last year's revenue or borrowings, whichever is larger
+HIST_SLACK = {"pct": 0.005, "days": 2.0}  # "inside history" allows half a point or two days past the extremes
+# bull is better than base, base than bear: +1 = higher is better, -1 = lower is better; others have no clear direction
+DIRECTION = {"growth": 1, "ebitda_margin": 1, "oi_pct": 1, "tax_rate": -1, "int_rate": -1, "dso": -1, "dio": -1, "dpo": 1}
+CAPEX_DEP = 0.8  # growing with capex under 80% of depreciation = the net block shrinks while sales rise
+
+
+def assumption_checks(key, kind, value, bad, source, outside, reasoning, ctx):
+    """Rules on one AI-drafted driver. value {base, bull, bear: {start, end}} already in the engine's units, `bad` the
+    ones that didn't parse ("bull end"); source {page, quote, pages (the cited document's page texts), sent (its pages that were sent)};
+    ctx {range: (lo, hi) of the reported history, size (Rs crore), given (the app's numbers as text), project (base
+    set -> (first projected year, rows) or None)}. [{name, pass, detail}]."""
+    fmt = (lambda x: f"{x:.1%}") if kind == "pct" else (lambda x: f"{x:,.0f} days") if kind == "days" else (lambda x: f"{_cr(x)}")
+    nums = [(s, e, value[s][e]) for s in ("base", "bull", "bear") for e in ("start", "end")]
+    page, quote, pages, sent = source["page"], norm(source.get("quote") or ""), source["pages"], source["sent"]
+    on = bool(pages) and 1 <= page <= len(pages) and on_page(quote, pages[page - 1])
+    long = len(quote.split()) >= MIN_QUOTE_WORDS
+    cited = page in sent and on and long
+    checks = [{"name": "Quote is on the page", "pass": cited,
+               "detail": f"The quote occurs on page {page} of {source['file']}." if cited
+               else f"Page {page} of {source['file']} wasn't among the pages sent." if page not in sent
+               else f"The quote is under {MIN_QUOTE_WORDS} words." if on
+               else f"The quote doesn't occur on page {page} of {source['file']}, so the proposal is rejected."},
+              {"name": "Values parse", "pass": not bad,
+               "detail": "Every start and end is a number." if not bad else f"{', '.join(bad)} isn't a number."}]
+    vals = [v for _, _, v in nums if v is not None]
+    if key == "debt_change":
+        lim = DEBT_MAX * ctx["size"]
+        out = [v for v in vals if abs(v) > lim]
+        checks.append({"name": "Plausible", "pass": not out,
+                       "detail": f"Within ± {fmt(lim)} a year (the larger of revenue and borrowings)." if not out
+                       else f"{fmt(out[0])} is more than the company's revenue or borrowings in a year."})
+    else:
+        lo, hi = BOUNDS[key]
+        out = [v for v in vals if not lo <= v <= hi]
+        checks.append({"name": "Plausible", "pass": not out,
+                       "detail": f"Inside {fmt(lo)} to {fmt(hi)}." if not out else f"{fmt(out[0])} is outside {fmt(lo)} to {fmt(hi)}."})
+    rng = ctx.get("range")
+    base = [v for v in (value["base"]["start"], value["base"]["end"]) if v is not None]
+    if rng is None or key == "debt_change" or not base:
+        checks.append({"name": "Against its history", "pass": None, "detail": "No reported range to compare with."})
+    else:
+        slack = HIST_SLACK.get(kind, 0.0)
+        far = [v for v in base if not rng[0] - slack <= v <= rng[1] + slack]
+        why = (outside or "").strip()
+        checks.append({"name": "Against its history", "pass": True if not far else bool(why) and cited,
+                       "detail": f"Base inside the reported range {fmt(rng[0])} to {fmt(rng[1])}." if not far
+                       else f"Base {fmt(far[0])} is outside the reported range {fmt(rng[0])} to {fmt(rng[1])}; "
+                       + (f"the cited reason: {why[:200]}" if why and cited else "no cited reason given, so it fails.")})
+    d = DIRECTION.get(key)
+    if d is None:
+        checks.append({"name": "Bear ≤ base ≤ bull", "pass": None, "detail": "No clear better direction for this driver."})
+    else:
+        at = lambda s, e: value[s]["end"] if e == "end" and value[s]["end"] is not None else value[s]["start"]  # noqa: E731
+        pts = [(at("bear", e), at("base", e), at("bull", e)) for e in ("start", "end")]
+        ok = all(None not in p and d * (p[0] - p[1]) <= 1e-9 and d * (p[1] - p[2]) <= 1e-9 for p in pts)
+        checks.append({"name": "Bear ≤ base ≤ bull", "pass": ok,
+                       "detail": ("Bear no better than base, bull no worse" + (" (lower is better here)." if d < 0 else "."))
+                       if ok else "The cases are in the wrong order: bear is better than base, or base than bull."})
+    checks.append(numbers_check(reasoning, ctx["given"], source.get("quote")))
+    proj = ctx.get("project")
+    if key in ("capex_pct", "payout") and proj:
+        year, rows = proj
+        r0 = rows[0]
+        if key == "capex_pct":
+            ok = r0["revenue"] <= ctx["revenue"] or r0["capex"] >= CAPEX_DEP * r0["dep"]
+            checks.append({"name": "Capex vs depreciation and growth", "pass": ok,
+                           "detail": f"{year} capex {_cr(r0['capex'])} against depreciation {_cr(r0['dep'])}"
+                           + (" while revenue grows." if r0["revenue"] > ctx["revenue"] else ".")
+                           + ("" if ok else f" Under {CAPEX_DEP:.0%} of depreciation: the plant would shrink while sales rise.")})
+        else:
+            need = sum(r.get("revolver") or 0.0 for r in rows)
+            checks.append({"name": "Payout vs cash", "pass": need < 0.5,
+                           "detail": "The base case pays these dividends from its own cash in every year." if need < 0.5
+                           else f"The base case has to borrow {_cr(need)} to keep cash above zero with this payout."})
+    return checks

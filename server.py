@@ -151,12 +151,14 @@ class Filing(BaseModel):
 
 
 class Report(BaseModel):
-    """An attached annual-report PDF: its page text is in models/_reports/<id>.json; `year` is the label it was
-    attached for (FY2020)."""
+    """An attached PDF: its page text is in models/_reports/<id>.json; `year` is the label it was attached for (FY2020).
+    `kind` (4.2): an annual report (notes, flags, one-offs read only these), or a call transcript or investor
+    presentation (read only to draft assumptions); saved before 4.2 = annual."""
     id: str = Field(pattern=r"^[0-9a-f]{12}$")
     file: str
     year: str
     pages: int
+    kind: Literal["annual", "transcript", "presentation"] = "annual"
     model_config = ConfigDict(extra="allow")  # keep unknown keys from older saves instead of dropping them on save
 
 
@@ -227,18 +229,20 @@ class ModelDoc(ModelRequest):
     version: Literal[3, 4, 5, 6]
     excluded_years: list[str] = []
     saved_at: str | None = None
-    # ponytail: proposals are untyped dicts {id, kind (mapping | oneoff_note | ar_note | flag_note), field, value, unit, period,
+    # ponytail: proposals are untyped dicts {id, kind (mapping | oneoff_note | ar_note | flag_note | assumption), field, value, unit, period,
     # source {file, page, quote, tag}, reasoning, checks [{name, pass, detail}], status (proposed | approved |
-    # rejected), ai}; mapping adds "filing", oneoff_note "report"/"from_numbers", ar_note "report"/"pages"/"reply".
+    # rejected), ai}; mapping adds "filing", oneoff_note "report"/"from_numbers", ar_note "report"/"pages"/"reply",
+    # assumption (4.2) "report"/"pages"/"reply"/"from_history"/"outside" with value {base, bull, bear: {start, end}}.
     # The server re-checks every one it acts on; a pydantic Proposal model if anything but our own client writes them
     proposals: list[dict] = []
     # notes (in ModelRequest): "oneoff:FY2020": {proposal, summary, file, page, quote, from_numbers, ai} (3.2b);
     # "ar:segments:FY2021": {proposal, topic, year, file, rows, total, against, ai} (3.3)
     reports: list[Report] = []  # attached annual reports (3.2b); added within version 5, so it defaults to none
-    # Phase 4 (version 6). ponytail: untyped until the features that write them land (4.2 assumption_sources,
-    # 4.3 flag_notes, 4.4 note); 4.1 only reads them, and the note shows their slots empty
+    # Phase 4 (version 6). ponytail: `note` stays untyped until 4.4 writes it
     note: dict | None = None  # the thesis and verdict text (4.4): AI-written words with citations
-    assumption_sources: dict = {}  # driver key -> where its value came from (4.2: an approved proposal, or you)
+    # where each scenario's driver came from (4.2): {scenario: {driver: accepted proposal id | "history" | "manual"}};
+    # a driver missing here is the rule default or an edit made before 4.2
+    assumption_sources: dict[Scenario, dict[str, str]] = {}
     # AI explanations of forensic flags (4.3), one per flag key, rebuilt by the client from the approved flag_note
     # proposals: {key, year, proposal, summary, file, page, quote, from_numbers, ai}. Words only: no number reads them
     flag_notes: list[dict] = []
@@ -446,9 +450,11 @@ def reject(req: Decision):
 # ---------- one-off years explained in words (3.2b): rules pick the pages, the LLM explains, rules check the quote ----------
 
 @app.post("/api/report")
-async def report(file: UploadFile, year: str = Form(...)):
-    """Read an annual-report PDF into page text by rules (pdftotext) and keep the text for explanations. The client
-    adds {id, file, year, pages} to its document's `reports`."""
+async def report(file: UploadFile, year: str = Form(...), kind: str = Form("annual")):
+    """Read a PDF (annual report, call transcript or investor presentation) into page text by rules (pdftotext) and
+    keep the text. The client adds {id, file, year, pages, kind} to its document's `reports`."""
+    if kind not in ai.KINDS:
+        raise HTTPException(422, f"Unknown document kind {kind!r}; one of {', '.join(ai.KINDS)}.")
     data = await file.read(MAX_PDF + 1)
     if len(data) > MAX_PDF:
         raise HTTPException(413, "That file is over 60 MB. Annual reports are usually 5-30 MB.")
@@ -458,7 +464,7 @@ async def report(file: UploadFile, year: str = Form(...)):
         raise HTTPException(503 if str(e) == ai.PDF_MISSING else 422, str(e))
     rid = hashlib.sha1(data).hexdigest()[:12]
     _write(MODELS / REPORTS / f"{rid}.json", json.dumps({"file": file.filename or "", "pages": pages}).encode())
-    return {"id": rid, "file": (file.filename or "report.pdf")[:200], "year": year[:20], "pages": len(pages)}
+    return {"id": rid, "file": (file.filename or "report.pdf")[:200], "year": year[:20], "pages": len(pages), "kind": kind}
 
 
 class ExplainRequest(BaseModel):
@@ -469,8 +475,11 @@ class ExplainRequest(BaseModel):
     report: Report | None = None  # None: explain from the numbers only
 
 
-def report_pages(r):
-    """An attached report's page text [(reading order, layout)] as kept by /api/report."""
+def report_pages(r, annual=False):
+    """An attached report's page text [(reading order, layout)] as kept by /api/report; `annual`: only an annual report
+    will do (the notes, one-off and flag readers check the year and quote its notes)."""
+    if annual and r.kind != "annual":
+        raise HTTPException(422, f"{r.file} is a {ai.KINDS[r.kind]}; attach the annual report for this.")
     raw = MODELS / REPORTS / f"{r.id}.json"
     if not raw.is_file():
         raise HTTPException(422, f"The text of {r.file} isn't on this machine any more; attach it again.")
@@ -506,7 +515,7 @@ def explain(req: ExplainRequest):
             checks = [{"name": "Source", "pass": None, "detail": "From the numbers only, no filing read."}]
             source = {"file": None, "page": None, "quote": None, "tag": None}
         else:
-            pages = report_pages(r)
+            pages = report_pages(r, annual=True)
             sent = ai.pick_pages(pages, {o["metric"] for o in flags}, end)
             if not sent:
                 raise HTTPException(422, f"No page of {r.file} mentions exceptional items or the flagged lines. "
@@ -565,7 +574,7 @@ def explain_flag(req: FlagRequest):
         else:
             if r.year not in labels:
                 raise HTTPException(422, f"{r.year} isn't one of the reported years in this model.")
-            end, pages = co["dates"][labels.index(r.year)].date(), report_pages(r)
+            end, pages = co["dates"][labels.index(r.year)].date(), report_pages(r, annual=True)
             sent = ai.pick_flag_pages(pages, req.key, end)
             if not sent:
                 raise HTTPException(422, f"No page of {r.file} mentions {flag['title'].lower()}. Explain from the numbers only instead.")
@@ -582,6 +591,179 @@ def explain_flag(req: FlagRequest):
             "kind": "flag_note", "field": req.key, "value": summary, "unit": None, "period": labels[-1],
             "source": source, "report": r and r.id, "from_numbers": r is None,
             "reasoning": flag["detail"], "checks": checks, "status": "proposed" if ok else "rejected", "ai": True}
+
+
+# ---------- drafting assumptions (4.2): rules pick the pages, the LLM proposes every driver, rules check each ----------
+
+SHIFT = {"growth": 0.03, "ebitda_margin": 0.015}  # bull / bear around base, as seed() in web/src/lib.ts does
+DRAFT_YEARS = 10  # "inside its history" = the range over the last 10 reported years
+
+
+class DraftRequest(BaseModel):
+    company: Company
+    excluded_years: list[str] = []
+    filings: list[Filing] = []
+    notes: dict = {}
+    reports: list[Report] = []
+    n: int = Field(5, ge=1, le=15)
+    scenarios: dict[Scenario, dict[str, DriverPath]] = {}  # check: the scenarios the accepted values go into
+    proposals: list[dict] = []  # check: the proposals to accept, re-checked by rules
+
+
+def _draft_ctx(req):
+    """What the rules know before reading anything: the upgraded history, its ratios and ranges, the rule defaults,
+    the drivers worth asking about (COGS % only on a COGS basis, payable days only once payables exist)."""
+    co = req.company.model_dump()
+    labels, up = model.labels(co["dates"]), model.upgrade(co, [f.model_dump() for f in req.filings], ar_capex(req.notes))
+    hist, r = up["hist"], model.ratios(up["hist"])
+    try:
+        d = model.default_assumptions(hist, exclude=set(req.excluded_years), labels=labels)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    kinds = {k: kind for k, _, kind in model.DRIVERS}
+    asked = [k for k, _, _ in model.DRIVERS if not (k == "cogs_pct" and not model.on_cogs(hist))
+             and not (k == "dpo" and not up["sources"]["used"]["payables"])]
+    ranges = {}
+    for k in kinds:
+        xs = [x[k] for x in r[-DRAFT_YEARS:] if x[k] is not None and math.isfinite(x[k])]
+        ranges[k] = (min(xs), max(xs)) if xs else None
+    unit = lambda k, v: v * 100 if kinds[k] == "pct" else v  # noqa: E731  the reply's units: percent for pct drivers
+    rows = [{"key": k, "label": lb, "kind": kinds[k], "default": unit(k, d[k]),
+             "hist": [(y, unit(k, x[k])) for y, x in list(zip(labels, r))[-6:] if x[k] is not None]}
+            for k, lb, _ in model.DRIVERS if k in asked]
+    dates = model.projected_dates(co, req.n)
+    last = hist[-1]
+    return {"hist": hist, "defaults": d, "kinds": kinds, "asked": asked, "ranges": ranges, "rows": rows,
+            "years": (model.fy(dates[0], True), model.fy(dates[-1], True)), "n": req.n,
+            "size": max(last["revenue"], model._debt(last)), "revenue": last["revenue"],
+            "given": "\n".join(f"{x['key']} " + " ".join(f"{v:.1f}" for _, v in x["hist"]) + f" {x['default']:.1f}" for x in rows)}
+
+
+def _history(k, ctx, pid=None):
+    """A driver from history: the rule default (default_assumptions) for base, bull and bear seeded around it."""
+    v, s = ctx["defaults"][k], SHIFT.get(k, 0.0)
+    value = {"base": {"start": v, "end": None}, "bull": {"start": v + s, "end": None}, "bear": {"start": v - s, "end": None}}
+    return {"id": pid or hashlib.sha1(f"assume:{k}:history:{v!r}".encode()).hexdigest()[:12], "kind": "assumption",
+            "field": k, "value": value, "unit": ctx["kinds"][k], "period": "–".join(ctx["years"]),
+            "source": {"file": None, "page": None, "quote": None, "tag": None}, "report": None, "from_history": True,
+            "reasoning": "The documents say nothing about it, so the rule default from the reported years stays.",
+            "checks": [{"name": "From history", "pass": None, "detail": "The rule default from the reported years; no AI number."}],
+            "status": "proposed", "ai": False}
+
+
+def _parse(x, kind):
+    """The reply's base / bull / bear {start, end} in the engine's units, and the ones that don't parse."""
+    value, bad = {}, []
+    for s in ("base", "bull", "bear"):
+        raw = x.get(s) if isinstance(x.get(s), dict) else {}
+        out = {}
+        for e in ("start", "end"):
+            v = None if raw.get(e) is None else ai.amount(raw[e])
+            if v is None and (e == "start" or raw.get(e) is not None):
+                bad.append(f"{s} {e}")
+            out[e] = None if v is None else v / 100 if kind == "pct" else v
+        value[s] = out
+    return value, bad
+
+
+def _drafted(x, r, sent, pages, value, bad, ctx, proj):
+    """One AI-drafted driver as a proposal, checked by rules (ai.assumption_checks); a failed check = rejected."""
+    k, kind = x["key"], ctx["kinds"][x["key"]]
+    reasoning, outside = str(x.get("reasoning") or "").strip()[:700], str(x.get("outside_history") or "").strip()[:400] or None
+    given = ctx["given"] + " " + json.dumps({s: x.get(s) for s in ("base", "bull", "bear")})
+    checks = ai.assumption_checks(k, kind, value, bad, {"page": x["page"], "quote": x["quote"], "pages": pages, "sent": sent,
+                                                         "file": r.file}, outside, reasoning,
+                                  dict(ctx, range=ctx["ranges"][k], given=given, project=proj))
+    ok = all(c["pass"] is not False for c in checks)
+    return {"id": hashlib.sha1(f"assume:{k}:{r.id}:{json.dumps(x, sort_keys=True)}".encode()).hexdigest()[:12],
+            "kind": "assumption", "field": k, "value": value, "unit": kind, "period": "–".join(ctx["years"]),
+            "source": {"file": r.file, "page": x["page"], "quote": x["quote"].strip()[:600], "tag": None},
+            "report": r.id, "pages": sent, "reply": x, "from_history": False, "reasoning": reasoning, "outside": outside,
+            "checks": checks, "status": "proposed" if ok else "rejected", "ai": True}
+
+
+def _consistency(ctx, base):
+    """The base set projected by the engine (first projected year label, rows), for the capex and payout checks."""
+    a = {k: base.get(k, {"start": v, "end": None}) for k, v in ctx["defaults"].items()}
+    try:
+        return ctx["years"][0], model.project(ctx["hist"], model.expand(a, ctx["n"]), ctx["n"])
+    except (ArithmeticError, ValueError):
+        return None
+
+
+def _checked(items, ctx, base):
+    """[(reply item, report, sent pages, page texts)] -> proposals; the base set takes every value that parsed."""
+    parsed = [(x, r, sent, pages, *_parse(x, ctx["kinds"][x["key"]])) for x, r, sent, pages in items]
+    for x, _, _, _, value, bad in parsed:
+        if not bad:
+            base = dict(base, **{x["key"]: value["base"]})
+    proj = _consistency(ctx, base)
+    return [_drafted(x, r, sent, pages, value, bad, ctx, proj) for x, r, sent, pages, value, bad in parsed]
+
+
+@app.post("/api/assumptions/draft")
+def draft(req: DraftRequest):
+    """Every driver for base, bull and bear: from the attached documents where the LLM finds them, each with a page and
+    quote and checked by rules, else the rule default ("from history"). Without LLM_CMD or documents, all from
+    history with a message. The client shows them against the current values; nothing changes until accepted."""
+    ctx = _draft_ctx(req)
+    keys = [k for k, _, _ in model.DRIVERS]
+    hist = lambda why: {"proposals": [_history(k, ctx) for k in keys], "message": why, "pages": []}  # noqa: E731
+    if not req.reports:
+        return hist("No documents attached, so every driver comes from history (the rule defaults). Attach an annual "
+                    "report, an earnings-call transcript or an investor presentation to draft from management's words.")
+    if not ai.available():
+        return hist("LLM_CMD isn't set, so every driver comes from history (the rule defaults). " + ai.NOT_SET)
+    docs = {f"D{i + 1}": (r, report_pages(r)) for i, r in enumerate(req.reports)}
+    picks = ai.pick_assume_pages([(lb, pages) for lb, (_, pages) in docs.items()])
+    if not picks:
+        return hist("No page of the attached documents talks about the years ahead (guidance, outlook, capacity, "
+                    "margins, demand), so every driver comes from history.")
+    sent = {lb: [n for b, n in picks if b == lb] for lb in docs}
+    pages = [(lb, f"{docs[lb][0].year} {ai.KINDS[docs[lb][0].kind]}, {docs[lb][0].file}", n, docs[lb][1][n - 1][0])
+             for lb, n in picks]
+    try:
+        reply = ai.draft_assumptions(req.company.name, ctx["years"], ctx["rows"], pages)
+    except ai.LLMError as e:
+        raise HTTPException(502, str(e))
+    first = {}
+    for x in reply["drivers"]:
+        first.setdefault(x["key"], x)
+    items = [(x, docs[x["doc"]][0], sent[x["doc"]], docs[x["doc"]][1]) if x["doc"] in docs
+             else (x, Report(id="0" * 12, file=f"unknown document {x['doc'][:20]}", year="", pages=0), [], [])
+             for x in first.values() if x["from"] == "documents" and x["key"] in ctx["asked"]]
+    drafted = {p["field"]: p for p in _checked(items, ctx, {})}
+    n_doc = len(drafted)
+    return {"proposals": [drafted.get(k) or _history(k, ctx) for k in keys],
+            "message": f"Read {len(picks)} pages from {len(docs)} document{'s' * (len(docs) > 1)}: {n_doc} driver"
+                       f"{'s' * (n_doc != 1)} from the documents, {len(keys) - n_doc} from history.",
+            "pages": [{"file": docs[lb][0].file, "kind": docs[lb][0].kind, "page": n} for lb, n in picks]}
+
+
+@app.post("/api/assumptions/check")
+def assumptions_check(req: DraftRequest):
+    """Before accepting: the rules again on each proposal, from its saved reply and the stored page text (no LLM call),
+    with the consistency checks run on the base case the accepted values would make. History ones come back with
+    today's rule default."""
+    ctx = _draft_ctx(req)
+    base = {k: v.model_dump() for k, v in req.scenarios.get("base", {}).items()}
+    items, ids, out = [], [], {}
+    for p in req.proposals:
+        k = p.get("field")
+        if p.get("kind") != "assumption" or k not in ctx["kinds"]:
+            raise HTTPException(422, "That isn't an assumption proposal.")
+        if p.get("from_history"):
+            out[p.get("id")] = _history(k, ctx, p.get("id"))
+            continue
+        r = next((r for r in req.reports if r.id == p.get("report")), None)
+        x = p.get("reply")
+        if r is None or not isinstance(x, dict) or ai._assume_shape([k])({"drivers": [x]}):
+            raise HTTPException(422, f"The document {k} was drafted from isn't attached any more, or the proposal is damaged.")
+        items.append((x, r, [n for n in p.get("pages") or [] if isinstance(n, int)], report_pages(r)))
+        ids.append(p.get("id"))
+    for pid, q in zip(ids, _checked(items, ctx, base)):
+        out[pid] = dict(q, id=pid)
+    return {"proposals": [out[p.get("id")] for p in req.proposals]}
 
 
 # ---------- annual-report notes (3.3): rules pick pages per topic, the LLM extracts, rules check, the user approves ----------
@@ -602,7 +784,7 @@ class NotesRequest(BaseModel):
         return i, co.dates[i].date()
 
     def pages(self):
-        return report_pages(self.report)
+        return report_pages(self.report, annual=True)
 
 
 def _against(req, topic, i):

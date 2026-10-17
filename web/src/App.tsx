@@ -4,7 +4,7 @@ import Note from './Note'
 import ModelView, { UPGRADED, type Upgrade } from './Model'
 import Evidence from './Evidence'
 import {
-  api, flat, flatAll, fmt, groupKeys, money, postJson, rs, seed, when, clock,
+  api, flat, flatAll, fmt, groupKeys, money, postJson, rs, seed, when, clock, SCENARIOS,
   type ModelDoc, type ModelSummary, type Opened, type Parsed, type Projection, type Proposal, type Scenario,
 } from './lib'
 
@@ -303,9 +303,16 @@ interface WorkspaceProps {
 function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onClose, save, onRetry }: WorkspaceProps) {
   const { company, years: histYears, drivers } = parsed
   const { n, scenarios, valuation, filings, notes } = doc
-  // any change to what the numbers come from puts the note back to draft
+  // any change to what the numbers come from puts the note back to draft; an input changed without a new source
+  // (a strip, a typed value) is yours: its source flips to "manual"
   const setDoc = (f: (d: ModelDoc) => ModelDoc) => setDocRaw(d => {
-    const x = f(d)
+    let x = f(d)
+    if (x.scenarios !== d.scenarios && x.assumption_sources === d.assumption_sources) {
+      const src = { ...d.assumption_sources }
+      for (const s of SCENARIOS) for (const k of Object.keys(x.scenarios[s]))
+        if (JSON.stringify(x.scenarios[s][k]) !== JSON.stringify(d.scenarios[s][k])) src[s] = { ...src[s], [k]: 'manual' }
+      x = { ...x, assumption_sources: src }
+    }
     const moved = x.scenarios !== d.scenarios || x.valuation !== d.valuation || x.n !== d.n || x.filings !== d.filings
       || x.excluded_years !== d.excluded_years
     return moved && x.reviewed_at ? { ...x, reviewed_at: null } : x
@@ -380,8 +387,9 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
   }, [filingIds]) // eslint-disable-line react-hooks/exhaustive-deps
   const applyUpgrades = () => {
     const next = Object.fromEntries(upgrades.map(u => [u.key, flat(u.to)]))
+    const hist = Object.fromEntries(upgrades.map(u => [u.key, 'history']))
     setDoc(d => ({ ...d, scenarios: { base: { ...d.scenarios.base, ...next }, bull: { ...d.scenarios.bull, ...next },
-      bear: { ...d.scenarios.bear, ...next } } }))
+      bear: { ...d.scenarios.bear, ...next } }, assumption_sources: Object.fromEntries(SCENARIOS.map(s => [s, { ...d.assumption_sources[s], ...hist }])) }))
     setUpgrades([])
   }
   const onProposals = (f: (ps: Proposal[]) => Proposal[]) =>
@@ -426,6 +434,7 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
   const m = company.market
   const price = valuation.price ?? m?.price ?? null
   const shares = valuation.shares ?? m?.shares ?? null
+  const fromDocs = Object.values(doc.assumption_sources.base ?? {}).filter(v => v !== 'manual' && v !== 'history').length
   const ai = Object.values(notes).some(x => (x as { ai?: boolean })?.ai) || doc.note != null || doc.flag_notes.length > 0
   const tabs = useMemo(() => VIEWS, [])
 
@@ -470,7 +479,7 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
           <span className={`rv-state${doc.reviewed_at ? ' done' : ''}`}>
             {doc.reviewed_at ? <>● Reviewed {when(doc.reviewed_at)}</> : <>○ Draft, not reviewed by you</>}
           </span>
-          <span className="chip">Numbers: rules, from your Screener export{filings.length ? ', filings' : ''} and your inputs</span>
+          <span className="chip">Numbers: rules, from your Screener export{filings.length ? ', filings' : ''}{fromDocs ? `, ${fromDocs} input${fromDocs > 1 ? 's' : ''} drafted from documents and approved` : ''} and your inputs</span>
           <span className="chip serif">Words: {ai ? 'AI-written, cited' : 'none by AI yet'}</span>
           <button type="button" className="btn" aria-pressed={!!doc.reviewed_at}
             onClick={() => setDocRaw(d => ({ ...d, reviewed_at: d.reviewed_at ? null : new Date().toISOString() }))}>
