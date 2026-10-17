@@ -7,7 +7,7 @@ import { Checks } from './Sources'
 import { PageHead, Toc } from './Shell'
 import { useHref } from './route'
 import {
-  DOC_KINDS, defaultPaths, fmt, flat, groupKeys, isAnnual, money, seed, SCENARIOS, SHIFT, shortYear, type Proposal,
+  DOC_KINDS, copyBase, defaultPaths, drifted, fmt, flat, groupKeys, isAnnual, money, seed, SCENARIOS, SHIFT, shortYear, type Proposal,
   type Kind, type ModelDoc, type Parsed, type Paths, type Projection, type Row, type Scenario, type Ttm,
 } from './lib'
 
@@ -108,13 +108,6 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
   const others = proj ? SCENARIOS.filter(s => s !== active).map(s => ({
     name: s, values: [...hist.map(() => null), ...projection!.scenarios[s].map(m[2])],
   })) : []
-  const copyBase = () => {
-    const next = seed(scenarios.base)
-    const edited = (['bull', 'bear'] as const).some(s => JSON.stringify(scenarios[s]) !== JSON.stringify(next[s]))
-    if (edited && !window.confirm('Replace your bull and bear assumptions with base ± 3 pp growth and ± 1.5 pp EBITDA margin?')) return
-    // bull and bear now come from base, so they take base's sources too
-    setDoc(d => ({ ...d, scenarios: next, assumption_sources: { ...d.assumption_sources, bull: { ...d.assumption_sources.base }, bear: { ...d.assumption_sources.base } } }))
-  }
   const draft = useDraft(doc, setDoc)
   const srcOf = (k: string) => doc.assumption_sources[active]?.[k]
   const propOf = (id: string | undefined) => (id && id !== 'manual' && id !== 'history' ? doc.proposals.find(p => p.id === id) : undefined)
@@ -187,8 +180,9 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
         <section aria-labelledby="inputs-h">
           <div className="inputs-head">
             <h2 id="inputs-h" className="m-h2">Inputs · {active} case</h2>
-            <p className="small">Bull and bear start from base with revenue growth ± 3 pp and EBITDA margin ± 1.5 pp.{' '}
-              <button type="button" className="link" onClick={copyBase}>Copy base to bull and bear</button>{' · '}
+            <p className="small">Bull and bear start from base with revenue growth ± 3 pp and EBITDA margin ± 1.5 pp
+              {drifted(scenarios) ? <b> (they no longer do: one of the cases was edited)</b> : ''}.{' '}
+              <button type="button" className="link" onClick={() => copyBase(setDoc, scenarios)}>Copy base to bull and bear</button>{' · '}
               <button type="button" className="link" onClick={resetActive}>Reset {active} to the rule defaults</button></p>
           </div>
           <div className="atab" role="list" aria-label={`Assumptions, ${active} case. Choose one to see its evidence and edit it.`}>
@@ -248,7 +242,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
             <p className="small dim">{selKey === 'growth' ? 'Revenue, Rs crore' : 'Each year as reported'}, from the Screener export{doc.excluded_years.length ? `; left out: ${doc.excluded_years.join(', ')}` : ''}.</p>
           </div>
           {(flags.length > 0 || lit) && <div className="card flag">
-            <div className="card-h"><span>Flag</span><span className="tag flag">{lit?.status === 'red' || flags.some(f => f.year === histYears[nHist - 1]) ? 'High' : 'Watch'}</span></div>
+            <div className="card-h"><span>Warning sign</span><span className="tag flag">{lit?.status === 'red' || flags.some(f => f.year === histYears[nHist - 1]) ? 'High' : 'Watch'}</span></div>
             {flags.map(f => <p key={f.year} className="small">{f.note}. The default may carry it; in Checks you can leave the year out or explain it.</p>)}
             {lit && <p className="small">{lit.fact}. {lit.rule}.</p>}
             <a className="go small" href={href('checks', flags.length ? 'unusual' : lit!.id)}>See it in Checks</a>

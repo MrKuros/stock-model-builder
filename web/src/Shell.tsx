@@ -1,8 +1,13 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { PAGES, SECTIONS, STATEMENTS, pathOf, type Page } from './route'
 import { rs, when, type ModelSummary } from './lib'
 
 const THEME = 'financial-model:theme'
+const KEYS = 'financial-model:keys'
+/** The single-key page shortcuts can be turned off (they get in the way of speech input); on unless turned off here. */
+export function keysOn() {
+  try { return localStorage.getItem(KEYS) !== 'off' } catch { return true }
+}
 const GROUND = { light: '#e6e9e5', dark: '#0e1211' }
 /** Light / dark: the system's unless picked here; the pick is kept per browser (index.html applies it before paint). */
 export function toggleTheme() {
@@ -61,7 +66,7 @@ export function rangeWords(price: number | null, bear: number | null, base: numb
   if (base == null) return 'No value yet'
   if (price == null) return <>Base <span className="num ours">Rs {rs(base)}</span>, no price</>
   const where = bull != null && price > bull ? 'above our range' : bear != null && price < bear ? 'below our range' : 'inside our range'
-  return <>Price <b className="num mkt">{rs(price)}</b> sits {where}{bear != null && bull != null && <> <span className="num ours">{rs(bear)}–{rs(bull)}</span></>}</>
+  return <>Base value <b className="num ours">Rs {rs(base)}</b> · price <b className="num mkt">{rs(price)}</b> sits {where}{bear != null && bull != null && <> <span className="num ours">{rs(bear)}–{rs(bull)}</span></>}</>
 }
 
 /** The newest saved version of each company (the library lists every day). */
@@ -80,6 +85,23 @@ export interface Here {
 /** The company switcher: a native <details>; every company is a real link to the same page of that company. */
 function Switcher({ here, compact }: { here: Here; compact?: boolean }) {
   const others = latestOf(here.models)
+  const box = useRef<HTMLDetailsElement>(null)
+  useEffect(() => { // a menu closes on Escape, a click outside it, or a pick inside it
+    const close = (refocus: boolean) => {
+      const d = box.current
+      if (!d?.open) return
+      d.open = false
+      if (refocus) d.querySelector('summary')?.focus()
+    }
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape' && box.current?.open) { e.preventDefault(); close(true) } }
+    const down = (e: PointerEvent) => { if (!box.current?.contains(e.target as Node)) close(false) }
+    const pick = (e: MouseEvent) => { if ((e.target as Element).closest?.('.sw-list a')) close(false) }
+    const d = box.current
+    document.addEventListener('keydown', key)
+    document.addEventListener('pointerdown', down)
+    d?.addEventListener('click', pick)
+    return () => { document.removeEventListener('keydown', key); document.removeEventListener('pointerdown', down); d?.removeEventListener('click', pick) }
+  }, [])
   const list = (
     <nav className="sw-list" aria-label="Your companies">
       {others.map(m => {
@@ -91,13 +113,13 @@ function Switcher({ here, compact }: { here: Here; compact?: boolean }) {
     </nav>
   )
   if (compact) return (
-    <details className="m-switch">
+    <details className="m-switch" ref={box}>
       <summary aria-label={`Company: ${here.name}. Switch company`}><b>{here.short}</b><span>Switch ▾</span></summary>
       {list}
     </details>
   )
   return (
-    <details className="switch">
+    <details className="switch" ref={box}>
       <summary aria-label={`Company: ${here.name}. Switch company`}>
         <span className="sw-top"><span className="sw-name">{here.short}</span><span className="sw-chev">Switch ▾</span></span>
         {!here.name.startsWith(here.short) && <span className="sw-full">{here.name}</span>}
@@ -116,35 +138,45 @@ const pageLinks = (here: Here) => PAGES.map(([p, label], i) => ({
 /** Desktop: brand, switcher, the six pages (the open one lists its sections), theme and the key hint at the foot. */
 export function Side({ here }: { here: Here | null }) {
   const subs: [string, string][] = !here ? [] : here.page === 'statements'
-    ? STATEMENTS.filter(s => s[0] !== 'quarters' || here.hasQuarters).map(s => [pathOf(here.slug, 'statements', s[0], here.version), s[1]])
+    ? STATEMENTS.filter(s => s[0] !== 'quarters' || here.hasQuarters || here.sub === 'quarters').map(s => [pathOf(here.slug, 'statements', s[0], here.version), s[1]])
     : (SECTIONS[here.page] ?? []).map(([id, t]) => [`#${id}`, t])
   return (
-    <aside className="side" aria-label="App">
+    <div className="side">
       <Brand />
       {here ? <>
         <Switcher here={here} />
         <nav className="nav" aria-label={`Pages for ${here.short}`}>
           {pageLinks(here).map(l => (
             <div key={l.p}>
-              <a href={l.href} aria-current={here.page === l.p ? 'page' : undefined} aria-keyshortcuts={String(l.key)}>
+              <a href={l.href} aria-current={here.page === l.p ? (l.p === 'statements' ? 'true' : 'page') : undefined} aria-keyshortcuts={String(l.key)}>
                 {ICONS[l.p]}<span>{l.label}</span><kbd aria-hidden="true">{l.key}</kbd></a>
               {here.page === l.p && subs.length > 0 && <div className="sub">
-                {subs.map(([h, t]) => <a key={h} href={h} aria-current={here.page === 'statements' && h.includes(`/${here.sub}`) ? 'page' : undefined}>{t}</a>)}
+                {subs.map(([h, t]) => <a key={h} href={h} aria-current={here.page === 'statements' && h.split('?')[0].endsWith(`/${here.sub}`) ? 'page' : undefined}>{t}</a>)}
               </div>}
             </div>
           ))}
         </nav>
       </> : (
-        <nav className="nav" aria-label="App">
+        <nav className="nav" aria-label="Main">
           <a href="/" aria-current="page">{ICONS.companies}<span>Companies</span></a>
         </nav>
       )}
       <div className="side-foot">
         <div className="row">{here ? <a className="tbtn" href="/">All companies</a> : <span />}<ThemeButton /></div>
-        {here && <span>Press <kbd>1</kbd>–<kbd>6</kbd> to switch pages</span>}
+        {here && <KeyHint />}
       </div>
-    </aside>
+    </div>
   )
+}
+
+function KeyHint() {
+  const [on, setOn] = useState(keysOn)
+  const flip = () => {
+    try { localStorage.setItem(KEYS, on ? 'off' : 'on') } catch { /* private mode: stays as it is */ }
+    setOn(keysOn())
+  }
+  return <span>{on ? <>Press <kbd>1</kbd>–<kbd>6</kbd> to switch pages · </> : 'Page keys are off · '}
+    <button type="button" className="link" onClick={flip}>{on ? 'Turn off' : 'Turn on'}</button></span>
 }
 
 /** Phones: brand mark, the company switcher and theme on top; the six pages along the bottom. */

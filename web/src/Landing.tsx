@@ -1,9 +1,7 @@
-import { useRef, useState, type ReactNode } from 'react'
-import { MiniRange, slugOf } from './Shell'
-import { pathOf } from './route'
-import { api, fmt, rs, when, type ModelSummary, type Parsed, type Scenario } from './lib'
-
-const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { MiniRange, latestOf, rangeWords, slugOf } from './Shell'
+import { pathOf, placed } from './route'
+import { NAMES, api, fmt, rs, when, type ModelSummary, type Parsed } from './lib'
 
 interface Props {
   models: ModelSummary[] | null
@@ -20,6 +18,11 @@ export default function Landing({ models, error: listError, onAdd, onDeleted }: 
   const [over, setOver] = useState(false)
   const input = useRef<HTMLInputElement>(null)
   const libHead = useRef<HTMLHeadingElement>(null)
+  useEffect(() => { // back on the list from a company: focus its heading, like any page change (not on a cold load)
+    if (models == null) return
+    if (placed.once) document.getElementById('page-h')?.focus({ preventScroll: true })
+    placed.once = true
+  }, [models == null]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const run = async (label: string, req: () => Promise<Parsed>) => {
     if (busy) return // one load at a time, so a slow earlier upload can't replace a later one
@@ -81,14 +84,13 @@ export default function Landing({ models, error: listError, onAdd, onDeleted }: 
   )
 
   // newest version of each company leads; older days follow, dimmed
-  const seen = new Set<string>()
-  const rows = models.map(m => ({ m, latest: !seen.has(m.company) && !!seen.add(m.company) }))
-  const latest = rows.filter(r => r.latest).map(r => r.m)
-  const below = latest.filter(m => m.price != null && m.values?.bear != null && m.price < m.values.bear).length
-  const above = latest.filter(m => m.price != null && m.values?.bull != null && m.price > m.values.bull).length
-  const count = (k: number, one: string) => `${k === 1 ? 'One company is' : `${k} companies are`} ${one}`
-  const headline = below ? `${count(below, 'priced below our bear case')}.`
-    : above ? `${count(above, 'priced above our bull case')}.`
+  const latest = latestOf(models)
+  const isLatest = new Set(latest.map(m => m.id))
+  const below = latest.filter(m => m.price != null && m.values?.bear != null && m.price < m.values.bear)
+  const above = latest.filter(m => m.price != null && m.values?.bull != null && m.price > m.values.bull)
+  const count = (ms: ModelSummary[], one: string, many: string) => ms.length === 1 ? `${ms[0].company} ${one}` : `${ms.length} companies ${many}`
+  const headline = below.length ? `${count(below, 'trades below even our cautious (bear) value', 'trade below even our cautious (bear) value')}.`
+    : above.length ? `${count(above, 'trades above even our hopeful (bull) value', 'trade above even our hopeful (bull) value')}.`
     : `${latest.length === 1 ? 'One company' : `${latest.length} companies`} covered, all priced inside our range.`
 
   return (
@@ -112,21 +114,25 @@ export default function Landing({ models, error: listError, onAdd, onDeleted }: 
         <h2 id="library-head" ref={libHead} tabIndex={-1} className="label sec-label">
           <span>Companies · <b>price against our value range</b></span><span>newest first</span>
         </h2>
+        <div className="legend" aria-hidden="true">
+          <span><i className="lg-band" />Our value range, cautious (bear) to hopeful (bull)</span>
+          <span><i className="lg-mkt" />Today’s price</span>
+        </div>
         <ul className="cov">
-          {rows.map(({ m, latest }) => (
+          {models.map(m => { const latest = isLatest.has(m.id); return (
             <li key={m.id} className={`cov-row${latest ? '' : ' old'}`}>
-              <a className="cov-open" href={pathOf(slugOf(m.id), 'overview', '', latest ? null : m.id.split('/')[1])}>
+              <a className="cov-open" href={pathOf(slugOf(m.id), m.values?.base == null ? 'forecast' : 'overview', '', latest ? null : m.id.split('/')[1])}>
                 <span className="co"><strong>{m.company}</strong>
                   <span>{m.saved_at ? when(m.saved_at) : '–'} · {NAMES[m.active]} · {m.n} yrs
                     {m.reviewed_at ? ' · reviewed' : ' · draft'}{latest ? '' : ' · older version'}</span></span>
                 <MiniRange price={m.price ?? null} bear={m.values?.bear ?? null} base={m.values?.base ?? null} bull={m.values?.bull ?? null} />
                 <span className="pf">{coverText(m)}</span>
-                <span className="fl">{m.flags == null ? '' : m.flags ? `${m.flags} flag${m.flags > 1 ? 's' : ''}` : 'No flags'}</span>
+                <span className="fl">{m.flags == null ? '' : m.flags ? `${m.flags} warning sign${m.flags > 1 ? 's' : ''}` : 'No warning signs'}</span>
               </a>
               <button type="button" className="link lib-del" disabled={!!busy} onClick={() => remove(m)}
                 aria-label={`Delete ${m.company}, saved ${m.saved_at ? when(m.saved_at) : 'earlier'}`}>Delete</button>
             </li>
-          ))}
+          ) })}
         </ul>
       </section>
       <footer className="foot">
@@ -139,9 +145,10 @@ export default function Landing({ models, error: listError, onAdd, onDeleted }: 
 }
 
 function coverText(m: ModelSummary): ReactNode {
-  if (m.values?.base == null) return <span className="muted">No value yet: {m.why ?? 'open it to see why'}</span>
+  if (m.values?.base == null) return <span className="muted">No value yet: {(m.why ?? 'open it to see why').replace(/\.$/, '')}. Open it to fix the forecast.</span>
+  const where = rangeWords(m.price ?? null, m.values.bear ?? null, m.values.base, m.values.bull ?? null)
   if (m.implied != null && m.growth != null)
-    return <>Priced for <span className="num mkt">{fmt(m.implied, 'pct')}</span> growth a year / ours <span className="num ours">{fmt(m.growth, 'pct')}</span></>
+    return <>{where}<br /><span className="muted">Priced for <span className="num mkt">{fmt(m.implied, 'pct')}</span> growth a year / ours <span className="num ours">{fmt(m.growth, 'pct')}</span></span></>
   if (m.price == null) return <>Base <span className="num ours">Rs {rs(m.values.base)}</span>, no price</>
   return <>Base <span className="num ours">Rs {rs(m.values.base)}</span>, no growth rate reaches the price</>
 }

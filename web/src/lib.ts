@@ -30,6 +30,19 @@ export function seed(base: Paths): Scenarios {
   return { base, bull: move(1), bear: move(-1) }
 }
 
+/** Bull and bear no longer sit at base ± the seed shifts (base was edited after them, or they were edited). */
+export const drifted = (s: Scenarios) => {
+  const next = seed(s.base)
+  return (['bull', 'bear'] as const).some(k => JSON.stringify(s[k]) !== JSON.stringify(next[k]))
+}
+/** Bull and bear again from base (after a confirm when they hold edits); they take base's sources too. */
+export function copyBase(setDoc: (f: (d: ModelDoc) => ModelDoc) => void, scenarios: Scenarios) {
+  if (drifted(scenarios) && !window.confirm('Replace your bull and bear assumptions with base ± 3 pp growth and ± 1.5 pp EBITDA margin?')) return
+  setDoc(d => ({ ...d, scenarios: seed(d.scenarios.base),
+    assumption_sources: { ...d.assumption_sources, bull: { ...d.assumption_sources.base }, bear: { ...d.assumption_sources.base } } }))
+}
+export const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
+
 /** Share price (Rs) and count (crore) from the export; null when Screener left them out. */
 export interface Market { price: number | null; shares: number | null; price_hist: (number | null)[]; shares_hist: (number | null)[]; face_value?: number | null }
 /** The export's Quarters block (model.QUARTERS keys: sales, op_profit, net_profit, ...), null where Screener left a gap. */

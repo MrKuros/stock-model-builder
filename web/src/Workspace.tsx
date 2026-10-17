@@ -7,14 +7,13 @@ import Fundamentals from './Fundamentals'
 import StatementsPage from './Statements'
 import ValuationPage from './Valuation'
 import { BottomNav, DL, MobileTop, Side, type Here } from './Shell'
-import { HrefCtx, PAGES, STATEMENTS, pathOf, type Href, type Route } from './route'
+import { HrefCtx, PAGES, STATEMENTS, pathOf, placed, type Href, type Route } from './route'
 import type { SaveState } from './App'
 import {
-  api, clock, flat, groupKeys, money, postJson, rs, when, SCENARIOS,
+  NAMES, api, clock, flat, groupKeys, money, postJson, rs, when, SCENARIOS,
   type ModelDoc, type ModelSummary, type Parsed, type Projection, type Proposal, type Scenario,
 } from './lib'
 
-const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
 const ORDER: Scenario[] = ['bear', 'base', 'bull']
 const HORIZONS = [3, 5, 7, 10]
 
@@ -149,19 +148,19 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const label = PAGES.find(p => p[0] === route.page)![1]
   const stmt = route.page === 'statements' ? STATEMENTS.find(s => s[0] === route.sub)?.[1] : null
   useEffect(() => { document.title = `${short} · ${label}${stmt ? ` · ${stmt}` : ''} · Stock Model Builder` }, [short, label, stmt])
-  const shown = useRef<string | null>(null)
+  const shown = useRef<string | null>(null) // with placed.once, a remount (another company) still counts as a move
   const done = useRef<Route | null>(null) // each navigation is placed once, not again when the projection refreshes
   const ready = proj != null
   useEffect(() => {
     if (done.current === route || ((route.anchor || route.y != null) && !ready)) return // a place below the fold waits for the numbers
     done.current = route
     const where = `${route.page}/${route.sub}`
-    const moved = shown.current != null && shown.current !== where
+    const moved = placed.once && shown.current !== where
+    placed.once = true
     shown.current = where
-    if (route.y != null) { window.scrollTo(0, route.y); return }
-    if (!route.anchor) {
-      window.scrollTo(0, 0)
-      if (moved) document.getElementById('page-h')?.focus({ preventScroll: true })
+    if (!route.anchor || route.y != null) {
+      if (moved) document.getElementById('page-h')?.focus({ preventScroll: true }) // a screen reader reads the new page's name
+      window.scrollTo({ top: route.y ?? 0, behavior: 'instant' }) // a page change jumps; only in-page links glide
       return
     }
     const t = window.setTimeout(() => {
@@ -202,10 +201,13 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
                 {price != null
                   ? <span>Price <span className="num mkt">Rs {rs(price)}</span>{valuation.price != null ? ' (typed)' : ''}</span>
                   : <a href={href('valuation', 'v-price')}>No share price: type one</a>}
+                {v?.scenarios[doc.active].per_share != null && <span>Our {doc.active} value <span className="num ours">Rs {rs(v.scenarios[doc.active].per_share!)}</span>
+                  {v.scenarios[doc.active].upside != null && <> ({v.scenarios[doc.active].upside! < 0 ? '−' : '+'}{Math.round(Math.abs(v.scenarios[doc.active].upside!) * 100)}% vs price)</>}</span>}
                 {price != null && shares != null && <span className="wide">Market cap <span className="num">Rs {money(price * shares)} cr</span></span>}
                 <span className="wide">Rs crore · reported {histYears[0]}–{histYears[nHist - 1]}</span>
               </p>
               <div className="controls">
+                <span className="label case-l" id="case-l" aria-hidden="true">Case</span>
                 <div className="seg" role="radiogroup" aria-label="Case: bear is cautious, base is central, bull is hopeful">
                   {ORDER.map(s => (
                     <button key={s} type="button" role="radio" aria-checked={doc.active === s} tabIndex={doc.active === s ? 0 : -1}
@@ -230,7 +232,8 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
                 <button type="button" className="link"
                   onClick={() => setDocRaw(d => ({ ...d, reviewed_at: d.reviewed_at ? null : new Date().toISOString() }))}>
                   {doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed'}</button>
-                <span className="src">Numbers: rules{filings.length ? ', filings' : ''}{fromDocs ? `, ${fromDocs} input${fromDocs > 1 ? 's' : ''} from documents` : ''} · Words: {ai ? 'AI-written, cited' : 'none by AI yet'}</span>
+                <span className="src">Numbers: calculated, no AI{filings.length ? ', filings' : ''}{fromDocs ? `, ${fromDocs} input${fromDocs > 1 ? 's' : ''} from documents` : ''}</span>
+                <span className="src words">Words: {ai ? 'AI-written, cited' : 'none by AI yet'}</span>
                 {error && <span className="bad" role="alert">{error}</span>}
                 {notice && <span className="note">{notice}</span>}
               </p>

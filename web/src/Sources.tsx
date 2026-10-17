@@ -28,6 +28,18 @@ const show = (p: Proposal) => (typeof p.value !== 'number' ? (p.value == null ? 
   : p.unit === 'Rs crore' ? `Rs ${Math.abs(p.value) >= 100 ? money(p.value) : dec2(p.value)} cr` : `${dec2(p.value)}${p.unit ? ` ${p.unit}` : ''}`)
 const amount = (k: string, v: number) => (PER_SHARE.has(k) ? `Rs ${dec2(v)}` : money(v))
 
+/** Shown once at the top of a page with AI buttons when no AI command is set; each button then just says "AI is off". */
+export function AiOffNote({ ai }: { ai: AiStatus | null }) {
+  if (!ai || ai.available) return null
+  return (
+    <details className="ai-off" id="ai-off">
+      <summary><b>AI writing is off on this computer.</b> The numbers and checks still work. How to turn it on</summary>
+      <p>Set <code>LLM_CMD</code> to a command that reads a prompt and prints a reply (the README shows examples), then
+        restart the app. The AI buttons on this page then work.</p>
+    </details>
+  )
+}
+
 export interface AiStatus { available: boolean; message: string | null; pdf?: boolean; pdf_message?: string | null }
 /** LLM_CMD set on the server (and pdftotext there)? Only the AI buttons need it; everything else works without. */
 let aiStatus: Promise<AiStatus | null> | null = null // asked once per page load: it only changes when the server restarts
@@ -35,7 +47,7 @@ export function useAi() {
   const [ai, setAi] = useState<AiStatus | null>(null)
   useEffect(() => {
     aiStatus ??= api<AiStatus>('/api/ai').then(x => (x.available ? x : { ...x,
-      message: 'AI is off on this computer. To turn it on, set LLM_CMD to a command that reads a prompt and prints a reply (see the README), then restart the app.' }))
+      message: 'AI is off (see the note at the top of this page).' }))
       .catch(() => { aiStatus = null; return null })
     let live = true
     aiStatus.then(x => { if (live) setAi(x) })

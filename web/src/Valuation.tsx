@@ -4,11 +4,10 @@ import { BreakEvens, Bridge, Change, Prose, Tornado, avg, shortName } from './No
 import { PageHead, Toc } from './Shell'
 import { useHref } from './route'
 import {
-  dec2, fmt, money, noNegZero, type ModelDoc, type Multiple, type Parsed, type Path, type Projection, type Scenario, type ValInputs, type Valuation,
+  NAMES, copyBase, dec2, drifted, fmt, money, noNegZero, type ModelDoc, type Multiple, type Parsed, type Path, type Projection, type Scenario, type ValInputs, type Valuation,
 } from './lib'
 
 const ORDER: Scenario[] = ['bear', 'base', 'bull']
-const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
 type Unit = '%' | 'Rs' | 'cr' | ''
 
 /** Rs per share: whole rupees from 100 up, paise below (a Rs 12 stock needs them). */
@@ -81,6 +80,7 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
   const burn = v ? ORDER.filter(s => v.scenarios[s].error) : [] // scenarios with no terminal value (same message)
   const pct = (x: number | null | undefined) => (x == null ? '' : toText(x, '%'))
   const sv = v?.scenarios.base, value = sv?.per_share ?? null, price = v?.price ?? null
+  const sa = v?.scenarios[active], shown = sa?.per_share ?? null // the headline follows the case picked at the top
   const base = doc.scenarios.base
   const oursOf = (k: string) => (k === 'wacc' ? v?.wacc ?? 0 : k === 'g' ? v?.g ?? 0 : avg(base[k]))
   const nb = v?.note ?? null, be = nb?.breakevens ?? {}
@@ -88,16 +88,16 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
   const P = (text: string, _refs: unknown, uid: string) => (tn ? <Prose text={text} refs={[]} tn={tn} refN={new Map()} uid={uid} /> : null)
   const c3 = parsed.cagrs?.['3'] ?? []
   const short = shortName(company.name)
-  const why = !v ? 'Calculating…' : v.error ?? sv?.error ?? (v.shares == null ? 'There is no share count in this file: type one below.' : '')
+  const why = !v ? 'Calculating…' : v.error ?? sa?.error ?? (v.shares == null ? 'There is no share count in this file: type one below.' : '')
 
   return (
     <>
-      <PageHead label={<>Valuation · <b>base case</b> · discounted cash flow, valued at the {asOf} year end</>}
-        title={value != null ? <>What {short} is worth: <span className="ours">Rs {rs(value)}</span> a share</> : 'No value yet'}
-        purpose={value != null
+      <PageHead label={<>Valuation · <b>{NAMES[active].toLowerCase()} case</b> · discounted cash flow, valued at the {asOf} year end</>}
+        title={shown != null ? <>What {short} is worth{active !== 'base' ? ` in the ${active} case` : ''}: <span className="ours">Rs {rs(shown)}</span> a share</> : 'No value yet'}
+        purpose={shown != null
           ? <>We add up the cash the business should make over the forecast, discount it to today and compare it with the
             price{price != null ? <> of <span className="num mkt">Rs {rs(price)}</span></> : ' (none in this file: type one below)'}. Change the inputs in the first box; everything below recalculates.</>
-          : sv?.error && !v?.error
+          : sa?.error && !v?.error
             ? <>{why} <a href={href('forecast', 'capex_pct')}>Change capex or growth in Forecast</a></>
             : <>{why} Fix it in the inputs below and the value appears.</>}
         next={<a className="btn" href="#inputs">Change the inputs</a>} />
@@ -143,9 +143,11 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
       {v && !v.error && <>
         <section className="blk" id="worth" aria-labelledby="worth-h">
           <h2 id="worth-h">Value by case</h2>
-          <p className="why">Bear and bull move revenue growth by 3 points and EBITDA margin by 1.5 points from base; the
+          <p className="why">Bull and bear start at base ± 3 points of revenue growth and ± 1.5 points of EBITDA margin; the
             {' '}{NAMES[active].toLowerCase()} case is highlighted. Business value (enterprise value) is the cash flows discounted;
             equity value adds cash and takes off debt.</p>
+          {drifted(doc.scenarios) && <p className="small-note">Bull and bear no longer sit at base ± 3 / ± 1.5 points (one of
+            the cases was edited).{' '}<button type="button" className="link" onClick={() => copyBase(setDoc, doc.scenarios)}>Copy base to bull and bear</button></p>}
           {burn.length > 0 && (
             <p className="val-error">{burn.map((s, i) => (i ? NAMES[s].toLowerCase() : NAMES[s])).join(', ').replace(/, (?=[^,]*$)/, ' and ')}{' '}
               {burn.length > 1 ? 'cases' : 'case'}: {v.scenarios[burn[0]].error}{' '}<a href={href('forecast', 'capex_pct')}>Open capex in Forecast</a></p>
@@ -184,7 +186,7 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
         </section>
 
         <section className="blk" id="hinges" aria-labelledby="hinges-h">
-          <h2 id="hinges-h">What moves the value</h2>
+          <h2 id="hinges-h">What moves the value{active !== 'base' && ' (base case)'}</h2>
           <p className="why">Each input moved one step either way, the rest left at base. The longest bar matters most.</p>
           {nb && nb.impact.length > 0 && value != null
             ? <div className="split2">
@@ -197,7 +199,7 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
         </section>
 
         <section className="blk" id="gap" aria-labelledby="gap-h">
-          <h2 id="gap-h">What would close or widen the gap</h2>
+          <h2 id="gap-h">What would close or widen the gap{active !== 'base' && ' (base case)'}</h2>
           {nb && value != null && price != null
             ? <Change impact={nb.impact} base={value} price={price} oursOf={oursOf} v={v} be={be} tn={tn} P={P} />
             : value == null ? <p className="val-empty">Needs a base value per share first.</p>

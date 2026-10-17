@@ -22,6 +22,10 @@ export const SECTIONS: Partial<Record<Page, [string, string][]>> = {
   checks: [['flags', 'Warning signs'], ['unusual', 'Unusual years'], ['documents', 'Documents'], ['audit', 'Audit trail']],
 }
 
+/** Set once the first page of this load is placed: every later page (another company, Back, the list) moves focus
+ * to its heading; the first one leaves focus where the browser put it. */
+export const placed = { once: false }
+
 export interface Route { slug: string | null; page: Page; sub: string; version: string | null; anchor: string; y: number | null }
 
 export function readRoute(): Route {

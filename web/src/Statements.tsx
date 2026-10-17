@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react'
 import { PageHead } from './Shell'
 import { STATEMENTS, useHref } from './route'
 import { fmt, type LayoutLine, type LineKind, type ModelDoc, type Parsed, type Projection, type Quarters, type Row, type Ttm } from './lib'
@@ -24,7 +25,7 @@ export default function StatementsPage({ parsed, doc, projection, sub }: { parse
     quarters: company.quarters, ttm: parsed.ttm ?? null, ttmPrev: parsed.ttm_prev ?? null,
     fy: histYears[nHist - 1], last: hist[nHist - 1], prev: nHist > 1 ? hist[nHist - 2] : null,
   } : null
-  const tabs = STATEMENTS.filter(t => t[0] !== 'quarters' || quarterly)
+  const tabs = STATEMENTS.filter(t => t[0] !== 'quarters' || quarterly || sub === 'quarters')
   const cur = STATEMENTS.find(t => t[0] === sub) ?? STATEMENTS[0]
   const tab = cur[2] as string
   const hide = parsed.sources?.basis === 'cogs' ? undefined : new Set(['cogs'])
@@ -38,10 +39,10 @@ export default function StatementsPage({ parsed, doc, projection, sub }: { parse
             <b>{NAMES[active]}</b> case’s forecast in blue. Change the case and years at the top; change the inputs in Forecast.</>}
         next={<a className="btn" href={href('forecast')}>Change the forecast</a>} />
       <nav className="stmt-tabs" aria-label="Statements">
-        {tabs.map(([id, name]) => <a key={id} href={href('statements', '', id)} aria-current={id === cur[0] ? 'page' : undefined}>{name}</a>)}
+        {tabs.map(([id, name]) => <a key={id} href={href('statements', '', id)} aria-current={id === cur[0] ? 'true' : undefined}>{name}</a>)}
       </nav>
       <section className="statements" aria-labelledby="page-h">
-        {tab !== 'QUARTERS' && proj && <p className="small dim scroll-hint">The table scrolls sideways: the forecast years ({projection!.years[0]}–{projection!.years[n - 1]}) are at the right, in blue.</p>}
+        {tab !== 'QUARTERS' && proj && <p className="small dim scroll-hint">The table scrolls sideways: earlier years are to the left, the forecast ({projection!.years[0]}–{projection!.years[n - 1]}) to the right, in blue.</p>}
         {tab === 'QUARTERS'
           ? quarterly
             ? <div className="table-wrap" tabIndex={0} role="region" aria-label="Quarters"><QuarterTable {...quarterly} /></div>
@@ -80,8 +81,16 @@ function StatementTable({ layout, section, years, rows, nHist, hide }: {
     else if (key && at === section && !hide?.has(key) && !(OPTIONAL.has(key) && rows.every(r => !r[key])))
       lines.push([label, key, kind as LineKind])
   }
+  // a narrow screen opens on the latest reported year (next to the row names), not on the oldest
+  const wrap = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const w = wrap.current
+    if (!w || w.scrollWidth <= w.clientWidth) return
+    const th = w.querySelectorAll<HTMLElement>('thead th')
+    if (th[nHist]) w.scrollLeft = Math.max(0, th[nHist].offsetLeft - th[0].offsetWidth - 8)
+  }, [section, nHist, years.length])
   return (
-    <div className="table-wrap" tabIndex={0} role="region" aria-labelledby="page-h">
+    <div className="table-wrap" ref={wrap} tabIndex={0} role="region" aria-labelledby="page-h">
       <table>
         <thead>
           <tr>

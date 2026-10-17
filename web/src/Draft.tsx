@@ -1,12 +1,11 @@
 import { useState } from 'react'
 import { Checks } from './Sources'
 import {
-  api, DOC_KINDS, fmt, isAnnual, postJson, SCENARIOS, type Drafted, type Kind, type ModelDoc, type Parsed, type Path,
+  NAMES, api, DOC_KINDS, fmt, isAnnual, postJson, SCENARIOS, type Drafted, type Kind, type ModelDoc, type Parsed, type Path,
   type Proposal, type Scenario,
 } from './lib'
 
 const ORDER: Scenario[] = ['bear', 'base', 'bull']
-const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
 type SetDoc = (f: (d: ModelDoc) => ModelDoc) => void
 interface Msg { text: string; bad?: boolean }
 
