@@ -886,6 +886,177 @@ def notes_approve(req: NoteDecision):
     return dict(again, id=p.get("id", again["id"]), status="approved")
 
 
+# ---------- the research note's words (4.4): AI writes from the app's numbers, rules check every number ----------
+
+def inputs_hash(req: ModelRequest):
+    """What the note's numbers come from: the company, every scenario's inputs, the horizon, the valuation inputs and
+    whatever the filings and approved capex notes add. A saved note with another hash was written for earlier inputs."""
+    key = {"company": req.company.model_dump(mode="json"), "n": req.n, "valuation": req.valuation.model_dump(),
+           "scenarios": {s: {k: v.model_dump() for k, v in a.items()} for s, a in req.scenarios.items()},
+           "filings": [[f.id, f.facts] for f in req.filings], "capex": ar_capex(req.notes)}
+    return hashlib.sha1(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+
+def _rs(x):
+    """Rs a share as the note shows it: whole rupees from 100 up (Indian grouping), paise below."""
+    return model._cr(x)[:-3] if abs(x) >= 100 else f"Rs {x:,.2f}"
+
+
+_pc = "{:.1%}".format
+SEVERITY = {"high": "Red", "medium": "Amber", "low": "Amber (low)"}
+MAX_CITES = 24  # ponytail: quotes only, never whole pages; the approved quotes already say what the pages hold
+
+
+def _thesis_facts(doc: "ModelDoc"):
+    """({key: text}, {id: citation}) the note may use: the verdict numbers, what moves value, break-evens, key numbers,
+    lit forensic flags, inputs with their sources, and the quotes behind approved inputs and notes. Rules only."""
+    co, sc, n, out = doc.projection()
+    v, hist, labels = doc.dcf(co, sc, n, out), co["hist"], model.labels(co["dates"])
+    years, last = [model.fy(d, True) for d in model.projected_dates(co, n)], labels[-1]
+    ex, sv = model.expand(sc["base"], n), v["scenarios"]
+    avg = lambda k: sum(ex[k]) / n  # noqa: E731
+    price, value, bear, bull = v["price"], sv["base"]["per_share"], sv["bear"]["per_share"], sv["bull"]["per_share"]
+    f = {}
+    if price:
+        f["price"] = f"Share price: {_rs(price)}"
+    for s in ("base", "bear", "bull"):
+        if sv[s]["per_share"] is not None:
+            f[f"value_{s}"] = f"Our {s} value: {_rs(sv[s]['per_share'])} a share"
+        elif sv[s]["error"] or v["error"]:
+            f[f"value_{s}"] = f"Our {s} case has no value: {sv[s]['error'] or v['error']}"
+    if value is not None and price:
+        f["upside"] = f"{'Upside' if value > price else 'Downside'} to our base value: {_pc(abs(value / price - 1))}"
+        f["gap"] = f"Price {'above' if price > value else 'below'} our base value by {_rs(abs(price - value))} a share"
+        if bull is not None and price > bull:
+            f["over_bull"] = f"Price above our bull value by {_rs(price - bull)} ({_pc(price / bull - 1)})"
+        if bear is not None and price < bear:
+            f["under_bear"] = f"Price below our bear value by {_rs(bear - price)} ({_pc(1 - price / bear)})"
+    f["growth"] = f"Our base revenue growth, average {years[0]}–{years[-1]}: {_pc(avg('growth'))} a year"
+    f["margin"] = f"Our base EBITDA margin, average {years[0]}–{years[-1]}: {_pc(avg('ebitda_margin'))}"
+    if sv["base"].get("implied_growth") is not None:
+        f["implied_growth"] = (f"Flat revenue growth the price needs for {n} years, other inputs at base (reverse DCF): "
+                               f"{_pc(sv['base']['implied_growth'])} a year")
+    elif price and value is not None:
+        f["implied_growth"] = "No flat revenue growth between -30% and +80% a year gets our base value to the price"
+    if not v["error"]:
+        f["wacc"] = f"Discount rate (WACC): {_pc(v['wacc'])}; terminal growth {_pc(v['g'])}"
+    if sv["base"]["tv_share"] is not None:
+        f["tv_share"] = f"Share of our base enterprise value that is terminal value: {_pc(sv['base']['tv_share'])}"
+    for y in (3, 5):
+        cs = model.cagrs(hist, labels, y)
+        if cs:
+            b = max(cs, key=lambda c: c["value"])
+            f[f"best{y}"] = f"Fastest {y}-year revenue growth since {labels[0]}: {_pc(b['value'])} a year ({b['from']}–{b['to']})"
+            f[f"last{y}"] = f"Revenue growth over the last {y} years ({cs[-1]['from']}–{cs[-1]['to']}): {_pc(cs[-1]['value'])} a year"
+    p0 = out["base"][0]
+    for k, name in (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "Net profit")):
+        if hist[-1].get(k) is not None:
+            f[f"{k}_last"] = f"{name} {last}: {model._cr(hist[-1][k])}"
+        f[f"{k}_next"] = f"{name} {years[0]}, our base: {model._cr(p0[k])}"
+    show = {"pct": _pc, "x": "{:.2f}x".format, "days": "{:.0f} days".format}
+    for k in model.key_numbers(hist, labels):
+        if k["last"] is not None:
+            f[f"kn_{k['key']}"] = (f"{k['label']} {k['year']}: {show[k['kind']](k['last'])}"
+                                   + (f" (median of the 3 years before: {show[k['kind']](k['typical'])})" if k["typical"] is not None else ""))
+    nb = v.get("note") or {}
+    unit = lambda key, x: f"{x:.0f} days" if key in ("dso", "dio", "dpo") else _pc(x)  # noqa: E731
+    ours = lambda key: v["wacc"] if key == "wacc" else v["g"] if key == "g" else avg(key)  # noqa: E731
+    for d in nb.get("impact", [])[:5]:
+        ends = " and ".join(_rs(x) for x in (d["down"], d["up"]) if x is not None)
+        step = f"{d['step']:.0f} days" if d["key"] in ("dso", "dio", "dpo") else f"{d['step'] * 100:g} pp"
+        f[f"impact_{d['key']}"] = (f"{d['label']} {step} down and up from our {unit(d['key'], ours(d['key']))}: "
+                                   f"our base value {ends} a share")
+    for k, b in (nb.get("breakevens") or {}).items():
+        name = {"growth": "Flat revenue growth", "ebitda_margin": "EBITDA margin", "wacc": "WACC", "g": "Terminal growth"}[k]
+        f[f"be_{k}"] = (f"{name} at which our base value equals the price: {_pc(b['value'])}" if b["value"] is not None
+                        else f"No {name.lower()} in the range searched gets our base value to the price")
+    for x in model.forensic(hist, labels, doc.notes):
+        if x["severity"] in SEVERITY:
+            f[f"flag_{x['key']}"] = f"{SEVERITY[x['severity']]} rule check, {x['title']}: {x['fact']}. {x['detail']}"
+    for o in model.detect_oneoffs(hist, labels):
+        if o["year"] in labels[-3:]:
+            f[f"oneoff_{o['metric']}_{o['year']}"] = f"Unusual year: {o['note']}"
+
+    props = {p.get("id"): p for p in doc.proposals}
+    reports = {r.id: r for r in doc.reports}
+    cites = {}
+
+    def cite(what, src, report):
+        file = src.get("file") or (reports[report].file if report in reports else None)
+        if file and src.get("quote") and isinstance(src.get("page"), int) and len(cites) < MAX_CITES:
+            cites[f"C{len(cites) + 1}"] = {"what": what, "file": file, "page": src["page"], "quote": src["quote"], "report": report}
+            return f"C{len(cites)}"
+    label = {k: lab for k, lab, _ in model.DRIVERS}
+    for k, pid in (doc.assumption_sources.get("base") or {}).items():
+        a = sc["base"].get(k)
+        if a is None or k not in label:
+            continue
+        p = props.get(pid) or {}
+        c = cite(f"Behind the approved input {label[k]} ({p.get('reasoning', '')[:200]}):", p.get("source") or {}, p.get("report")) \
+            if p.get("kind") == "assumption" and not p.get("from_history") else None
+        show_k = (lambda x: f"{x:,.0f} days") if k in ("dso", "dio", "dpo") else model._cr if k == "debt_change" else _pc
+        path = show_k(a["start"]) + (f" fading to {show_k(a['end'])}" if a.get("end") is not None else "")
+        why = f"drafted from a document and approved, see {c}" if c else "the rule default from history" \
+            if pid == "history" or p.get("from_history") else "set by you"
+        f[f"in_{k}"] = f"Base input {label[k]}: {path} ({why})"
+    for x in doc.flag_notes:
+        cite(f"Approved explanation of the {x.get('key')} flag (AI-written): {x.get('summary', '')[:300]}", x,
+             (props.get(x.get("proposal")) or {}).get("report"))
+    for key, x in doc.notes.items():
+        if not isinstance(x, dict):
+            continue
+        rep = (props.get(x.get("proposal")) or {}).get("report")
+        if key.startswith("oneoff:"):
+            cite(f"Approved explanation of {key[7:]} (AI-written): {x.get('summary', '')[:300]}", x, rep)
+        elif key.startswith("ar:"):
+            for row in (x.get("rows") or [])[:4]:
+                amt = f": {model._cr(row['amount'])}" if isinstance(row.get("amount"), (int, float)) else ""
+                cite(f"Annual-report note, {x.get('topic')} {x.get('year')}, {row.get('label')}{amt}.",
+                     dict(row, file=x.get("file")), rep)
+    return co["name"], f, cites
+
+
+@app.post("/api/note/write")
+def write_note(req: ModelDoc):
+    """The note's words. The LLM gets only the computed facts and the approved quotes (_thesis_facts); rules check
+    every number, reference and quote and the wording (ai.thesis_checks); a failure is sent back once with the reasons,
+    then returned as rejected with what failed. Only this endpoint calls the LLM for the note; nothing reads the
+    words back into a number. The note carries the inputs hash so the client can tell when it goes stale."""
+    if not ai.available():
+        raise HTTPException(503, ai.NOT_SET)
+    name, facts, cites = _thesis_facts(req)
+    cache = {}
+
+    def texts(file, page):
+        """The page's texts in every attached document of that name; [] if none is attached, None if none has its text."""
+        found = None
+        for r in (r for r in req.reports if r.file == file):
+            if r.id not in cache:
+                try:
+                    cache[r.id] = report_pages(r)
+                except HTTPException:  # the page text isn't on this machine any more
+                    cache[r.id] = None
+            if cache[r.id] is not None:
+                found = (found or []) + (list(cache[r.id][page - 1]) if 1 <= page <= len(cache[r.id]) else [])
+        return found if any(r.file == file for r in req.reports) else []
+
+    prompt, why = ai.thesis_prompt(name, facts, cites), None
+    try:
+        for rounds in (1, 2):
+            reply = ai.write_thesis(prompt, why)
+            checks = ai.thesis_checks(reply, facts, cites, texts)
+            failed = [c for c in checks if c["pass"] is False]
+            if not failed:
+                break
+            why = "\n".join(f"- {c['name']}: {c['detail']}" for c in failed)
+    except ai.LLMError as e:
+        raise HTTPException(502, str(e))
+    keep = ("headline", "thesis", "priced_in", "risks", "bull_trigger", "bear_trigger", "what_to_watch")
+    return {**{k: reply[k] for k in keep}, "facts": facts, "cites": cites, "checks": checks, "rounds": rounds,
+            "status": "rejected" if failed else "written", "inputs_hash": inputs_hash(req),
+            "written_at": datetime.now().isoformat(timespec="seconds"), "ai": True}
+
+
 @app.get("/api/sample")
 def sample():
     from test_model import fake_screener  # ponytail: synthetic demo company, swap for a real export later
@@ -925,7 +1096,7 @@ def refresh(req: DefaultsRequest):
 def project(req: ModelRequest):
     co, sc, n, out = req.projection()
     return {"years": [model.fy(d, True) for d in model.projected_dates(co, n)], "scenarios": out,
-            "valuation": req.dcf(co, sc, n, out)}
+            "valuation": req.dcf(co, sc, n, out), "inputs_hash": inputs_hash(req)}
 
 
 @app.post("/api/export")

@@ -222,6 +222,27 @@ main.wrap:focus { outline: none; }
 .cols { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, .8fr); gap: 36px; margin-top: 34px; align-items: start; }
 .sec + .sec { margin-top: 34px; }
 .empty { border: 1px dashed var(--rule-2); border-radius: 6px; padding: 14px 16px; font: 400 15px/1.55 var(--prose); color: var(--ink-2); }
+/* thesis (4.4): serif = written words; numbers stay mono; each point opens to its sources (no animation) */
+.thesis .headline { font: 600 18px/1.4 var(--prose); margin: 0 0 16px; text-wrap: pretty; }
+.claim { padding: 0 0 16px; margin-bottom: 16px; border-bottom: 1px solid var(--rule); }
+.claim h3 { font: 600 20px/1.3 var(--prose); letter-spacing: -.005em; text-wrap: pretty; }
+.claim p, .thesis .prose { margin-top: 8px; font: 400 16.5px/1.6 var(--prose); color: var(--ink-2); text-wrap: pretty; }
+.claim .num, .thesis .prose .num, .watch .num, .ai-risks .num, .change .serif .num, .headline .num { color: var(--ink); font-size: .8em; }
+.thesis .label.sub { margin: 18px 0 0; }
+.watch, .ai-risks { margin: 6px 0 0; padding-left: 18px; font: 400 15.5px/1.55 var(--prose); }
+.watch li + li, .ai-risks li + li { margin-top: 6px; }
+details.src { margin-top: 10px; }
+details.src summary { display: inline-flex; align-items: center; min-height: 32px; font: 600 12px/1 var(--ui); color: var(--ours); cursor: pointer; }
+details.src ol { margin: 6px 0 0; padding: 0; list-style: none; border-left: 2px solid var(--ours-tint); }
+details.src li { padding: 6px 0 6px 12px; font-size: 13px; line-height: 1.45; color: var(--ink-2); }
+details.src li + li { border-top: 1px solid var(--rule); }
+.who.stale { border-style: solid; border-color: var(--market); background: var(--market-soft); color: var(--market); }
+.stale-note { margin: 0 0 14px; padding: 8px 10px; border-left: 3px solid var(--market); background: var(--market-soft); font-size: 13.5px; color: var(--ink); }
+.fail { margin: 8px 0 12px; padding: 8px 10px; border-left: 3px solid var(--flag); background: var(--flag-soft); font-size: 13.5px; color: var(--ink); }
+.fail ul { margin: 6px 0 0; padding-left: 18px; }
+.write { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 12px; }
+.write .small-note { margin: 0; flex: 1 1 220px; }
+.change li.ai .serif { font-size: 15px; }
 .risks { list-style: none; margin: 0; padding: 0; }
 .risks li { padding: 10px 0; border-bottom: 1px solid var(--rule); font-size: 14px; }
 .risks li:first-child { padding-top: 0; }

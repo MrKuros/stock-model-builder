@@ -165,11 +165,24 @@ export interface ModelDoc {
   proposals: Proposal[]
   notes: Record<string, unknown>
   reports: Report[]
-  // Phase 4 blocks (version 6): written by 4.2-4.4; 4.1 shows their slots empty
-  note: Record<string, unknown> | null
+  // Phase 4 blocks (version 6): written by 4.2-4.4
+  note: ThesisNote | null // 4.4: the note's words, AI-written and checked by rules
+
   assumption_sources: AssumptionSources // 4.2
   flag_notes: FlagNote[] // 4.3: approved explanations of forensic flags
   reviewed_at: string | null // "Mark as reviewed"; cleared when the model changes
+}
+/** What a sentence of the note rests on: a computed fact's key, a citation id ("C1"), or a quote the model gave. */
+export type NoteRef = string | { file: string; page: number; quote: string }
+/** An approved quote the note writer was given (server._thesis_facts): what it backs, where it is. */
+export interface Cited { what: string; file: string; page: number; quote: string; report: string | null }
+/** POST /api/note/write: the note's words with the facts and quotes they were written from. Words only: nothing reads
+ * them back into a number. inputs_hash against /api/project's tells when the inputs have moved since (stale). */
+export interface ThesisNote {
+  headline: string; thesis: { head: string; text: string; refs: NoteRef[] }[]; priced_in: string
+  risks: { text: string; refs: NoteRef[] }[]; bull_trigger: string; bear_trigger: string; what_to_watch: string[]
+  facts: Record<string, string>; cites: Record<string, Cited>; checks: Check[]; rounds: number
+  status: 'written' | 'rejected'; inputs_hash: string; written_at: string; ai: true
 }
 /** A reported year whose metric sits far from the company's own median (model.detect_oneoffs). */
 export interface OneOff { year: string; metric: string; value: number; typical: number; note: string }
@@ -210,7 +223,10 @@ export interface ModelSummary {
 }
 /** GET /api/models/{id}: the document plus what the dashboard derives from the company. */
 export interface Opened { id?: string; doc?: ModelDoc; parsed: Parsed }
-export interface Projection { years: string[]; scenarios: Record<Scenario, Row[]>; valuation: Valuation }
+export interface Projection {
+  years: string[]; scenarios: Record<Scenario, Row[]>; valuation: Valuation
+  inputs_hash?: string // what the numbers come from (server.inputs_hash); a note with another hash is stale
+}
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init)

@@ -1146,6 +1146,7 @@ def library_check(root, co, scenarios):
     ar_notes_check(server, root, co, data)
     flag_check(server, root, data)
     assume_check(server, root, data)
+    thesis_check(server, root, data)
     reimport_check(server, root, co, data)
 
 
@@ -1708,6 +1709,106 @@ def flag_check(server, root, data):
             mid, _ = server.save_model(server.ModelDoc.model_validate(doc), root, now=datetime(2026, 10, 17, 9, 0))
             back = server.load_model(mid, root).model_dump(mode="json")
             assert back["flag_notes"] == [fn] and [x["kind"] for x in back["proposals"]] == ["flag_note"] * 2, back
+            server.delete_model(mid, root)
+        finally:
+            ai.llm = llm
+    finally:
+        server.MODELS = models
+        os.environ.pop("LLM_CMD", None)
+        if env is not None:
+            os.environ["LLM_CMD"] = env
+        shutil.rmtree(root / server.REPORTS, ignore_errors=True)
+
+
+def thesis_check(server, root, data):
+    """4.4: the note's words (fake LLM_CMD). The LLM gets the computed facts and approved quotes only; a good note
+    passes every rule; a number the app didn't compute, recommendation wording, a made-up quote and an unknown
+    reference each reject it after one retry with the reasons; a retry that fixes it passes. The note carries the
+    inputs hash, which /api/project repeats until an input changes (stale). Projecting, exporting, saving and
+    reopening a model with a note never call the LLM."""
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    client, models, env = TestClient(server.app), server.MODELS, os.environ.pop("LLM_CMD", None)
+    server.MODELS = root
+    post = lambda b: client.post("/api/note/write", json=b)  # noqa: E731
+    failed = lambda p: {c["name"] for c in p["checks"] if c["pass"] is False}  # noqa: E731
+    doc = dict(data, n=5, valuation=dict(model.VALUATION), excluded_years=[])  # the export's price, 5 years: the pinned numbers
+    try:
+        assert post(doc).status_code == 503, "no LLM_CMD: a calm 503"
+        quote = "trade receivables from a large customer were delayed"
+        if ai.pdf_available():  # an approved, cited flag note becomes citation C1
+            pdf = tiny_pdf([["Annual Report 2024-25"], ["Directors' report 2024-25. Cash generated from operations fell",
+                                                         "as trade receivables from a large customer were delayed."]])
+            rep = client.post("/api/report", files={"file": ("ar.pdf", pdf)}, data={"year": "FY2025"}).json()
+            fp = {"id": "f1", "kind": "flag_note", "field": "cash", "report": rep["id"], "status": "approved", "source": {}}
+            doc = dict(doc, reports=[rep], proposals=[fp], flag_notes=[
+                {"key": "cash", "year": "FY2025", "proposal": "f1", "summary": "A large customer paid late.", "file": "ar.pdf",
+                 "page": 2, "quote": quote, "from_numbers": False, "ai": True}])
+        cited = ["flag_cash", "C1"] if ai.pdf_available() else ["flag_cash"]
+        facts = server._thesis_facts(server.ModelDoc.model_validate(doc))[1]
+        at = lambda k, i=0: re.findall(r"Rs [\d,]+|-?[\d.]+%|[\d.]+x", facts[k])[i]  # noqa: E731  a number as the facts show it
+        good = {"headline": f"The price needs {at('implied_growth')} growth a year; the business has grown {at('best3')}.",
+                "thesis": [{"head": "Priced for growth it has never had",
+                            "text": f"At {at('price')} the price needs {at('implied_growth')} a year for 5 years. "
+                                    f"The fastest three years ran at {at('best3')}.", "refs": ["price", "implied_growth", "best3"]},
+                           {"head": "Our value range sits below the price",
+                            "text": f"Bear to bull we get {at('value_bear')} to {at('value_bull')}, so the price is "
+                                    f"{at('over_bull')} above even our bull case.", "refs": ["value_bear", "value_bull", "over_bull"]},
+                           {"head": "Profit isn't turning into cash",
+                            "text": f"Operating cash flow was {at('flag_cash')} net profit over three years.", "refs": cited}],
+                "priced_in": f"The price needs an EBITDA margin of {at('be_ebitda_margin')} against our {at('margin')}.",
+                "risks": [{"text": "Receivables from a large customer were delayed.", "refs": cited}],
+                "bull_trigger": f"A WACC of {at('be_wacc')} would make the price fair.",
+                "bear_trigger": f"Each point of capex on revenue takes our value to {at('impact_capex_pct', 2)}.",
+                "what_to_watch": ["Cash from operations against profit in FY2026."]}
+        calls = fake_llm(root / "llm", good)
+        n = post(doc).json()
+        assert n["status"] == "written" and n["rounds"] == 1 and calls() == 1 and not failed(n), n["checks"]
+        assert [c["name"] for c in n["checks"]] == ["Numbers match", "Sources exist", "Quotes on page",
+                                                    "No recommendation wording", "Length"], n["checks"]
+        assert n["thesis"] == good["thesis"] and n["ai"] and "implied_growth" in n["facts"], n.keys()
+        prompt = (root / "llm" / "prompt-0.txt").read_text()
+        assert facts["implied_growth"] in prompt and "Never write buy" in prompt, prompt
+        if ai.pdf_available():
+            assert quote in prompt and "Annual Report 2024-25" not in prompt, "only approved quotes, never whole pages"
+            assert n["cites"]["C1"]["page"] == 2, n["cites"]
+        # each broken note fails its rule twice (the retry gets the reasons), then comes back rejected
+        for change, rule, word in [
+                (lambda g: g["thesis"][0].update(text="Revenue grew 37.3% last year."), "Numbers match", "37.3"),
+                (lambda g: g.update(bull_trigger=f"We would buy below {at('value_base')}."), "No recommendation wording", '"buy"'),
+                (lambda g: g["risks"][0].update(refs=["flag_cash", {"file": "ar.pdf", "page": 2,
+                                                                     "quote": "receivables were written off"}]),
+                 "Quotes on page" if ai.pdf_available() else "Sources exist", "written off" if ai.pdf_available() else "ar.pdf"),
+                (lambda g: g["thesis"][2].update(refs=["X9"]), "Sources exist", "X9"),
+                (lambda g: g.update(headline="x" * 200), "Length", "200 characters")]:
+            bad = json.loads(json.dumps(good))
+            change(bad)
+            calls = fake_llm(root / "llm", bad)
+            r = post(doc).json()
+            hit = next(c for c in r["checks"] if c["name"] == rule)
+            assert r["status"] == "rejected" and failed(r) == {rule} and word in hit["detail"] and calls() == 2, (rule, r["checks"])
+            assert rule in (root / "llm" / "prompt-1.txt").read_text(), "the retry names what failed"
+        calls = fake_llm(root / "llm", dict(good, headline="Priced for 87.6% growth."), good)
+        r = post(doc).json()
+        assert r["status"] == "written" and r["rounds"] == 2 and calls() == 2, r["checks"]
+        fake_llm(root / "llm", "no json", "still none")
+        assert post(doc).status_code == 502
+        # stale: /api/project repeats the hash until an input changes
+        req = {k: doc[k] for k in ("company", "scenarios", "n", "valuation", "filings", "notes")}
+        llm, ai.llm = ai.llm, None  # from here on, any LLM call fails loudly
+        try:
+            assert client.post("/api/project", json=req).json()["inputs_hash"] == n["inputs_hash"]
+            moved = json.loads(json.dumps(req))
+            moved["scenarios"]["base"]["growth"]["start"] += 0.01
+            assert client.post("/api/project", json=moved).json()["inputs_hash"] != n["inputs_hash"], "a changed input = stale"
+            vi = dict(req, valuation=dict(req["valuation"], g=0.04))
+            assert client.post("/api/project", json=vi).json()["inputs_hash"] != n["inputs_hash"]
+            assert client.post("/api/export", json=req).status_code == 200
+            mid, _ = server.save_model(server.ModelDoc.model_validate(dict(doc, note=n)), root, now=datetime(2026, 10, 17, 9, 0))
+            back = server.load_model(mid, root).model_dump(mode="json")
+            assert back["note"] == n, "the note round-trips through the library"
+            assert client.get(f"/api/models/{mid}").status_code == 200
             server.delete_model(mid, root)
         finally:
             ai.llm = llm
