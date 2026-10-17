@@ -1,17 +1,36 @@
 # Stock Model Builder
 
-Open an Indian listed company and get a research note: what the price assumes against what the business does, the value range, what the value hinges on, the red flags and a written thesis. Behind it sit a three-statement model you can steer and an Excel export with live formulas.
+Open an Indian listed company and get a research note: what the price assumes against what the business does, ten years of fundamentals, the value range, what the value hinges on, the red flags and a written thesis. Behind it sit a three-statement model you can steer and an Excel export with live formulas. It runs locally as a web app with a page for every part, and the browser can install it to open in its own window.
 
 Numbers come from fixed rules. Words come from an AI command you choose, and every number in them is checked against the model before they are saved. It is analysis, not a recommendation.
 
-![Research note: Tata Consultancy Services, the price needs 16.6% growth a year against 5.8%](docs/screenshots/note-light.png)
+![Overview: Tata Consultancy Services, the price needs 16.6% growth a year against 5.8%](docs/screenshots/note-light.png)
 
 <table>
 <tr>
-<td><img src="docs/screenshots/landing.png" alt="Coverage: every company's price against our value range" /></td>
-<td><img src="docs/screenshots/note-dark.png" alt="The research note in dark mode" /></td>
+<td><img src="docs/screenshots/fundamentals.png" alt="Fundamentals: twelve years of revenue, margins, profit and cash, each chart opening its table" /></td>
+<td><img src="docs/screenshots/note-dark.png" alt="The Overview in dark mode" /></td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/screenshots/landing.png" alt="Your companies: every company's price against our value range" /></td>
 </tr>
 </table>
+
+## Pages
+
+Every company has six pages, each with its own address, so a link, a bookmark, a reload or a second browser tab opens exactly that page. Keys 1–6 switch between them (N, M and E still open Overview, Forecast and Checks).
+
+| Page | Address | What it answers |
+|---|---|---|
+| Your companies | `/` | Every saved company's price against our value range; add one by dropping a Export export or try the sample |
+| Overview | `/c/<company>/overview` | What the price assumes against what the business does: the verdict, the business in five numbers, price against value, rule checks, thesis, risks and key numbers |
+| Fundamentals | `/c/<company>/fundamentals` | How the business has done: growth over 3, 5 and 10 years, eight charts (revenue, margin, profit, cash against profit, returns, free cash and dividends, receivable days, net cash) and a table of key ratios, each opening the statement row behind it |
+| Statements | `/c/<company>/statements/<profit-and-loss, balance-sheet, cash-flow, ratios, quarters>` | Every reported line, then the forecast in blue |
+| Forecast | `/c/<company>/forecast` | Every input with where it came from, the editor for the selected one, drafting inputs from documents, and the projection |
+| Valuation | `/c/<company>/valuation` | The discount-rate inputs, value by case, what moves the value, what would close the gap, the what-if grids and the multiples |
+| Checks | `/c/<company>/checks` | Warning signs found by rules, unusual years, the documents (attached right there) and the audit trail |
+
+The case (bear, base, bull), the forecast years, the Excel download, the save and review status sit in the same bar on every company page. Tabs on the same company stay in step: a save in one tab reloads the others (the last save wins, and the other tab says so).
 
 ## What it does
 
@@ -33,12 +52,13 @@ Numbers come from fixed rules. Words come from an AI command you choose, and eve
 - **Exchange filings (XBRL):** attach an NSE/BSE financial-results XBRL file to a model. Fixed rules map about 100 standard tags to statement lines in Rs crore (including cost of materials, payables and the balance sheet when filed), list the tags they don't know, and check that PBT less tax equals profit and that revenue and net profit match Export's figure for the same year or quarter within 1%. An annual filing whose revenue matches Export's adds that year's trade payables, lease liabilities and cash-flow capex to the model (see below); other filings are kept for reference.
 - **AI-proposed mappings for leftover tags (optional):** with `LLM_CMD` set to any command that reads a prompt on stdin and prints the reply (no SDK, any provider), "Propose mappings" asks the model which statement line each unknown tag is. Rules then check every answer (the line exists, the unit is right, the line isn't already filled, the sign and size are plausible, totals such as expenses and total income still tie within 1%), and you approve or reject each one. An approved mapping is saved to `mappings.json` in the model library and the filing is re-read by rules; from then on every filing applies it with no AI call. Projecting and exporting never call the model. Without `LLM_CMD` the button is off and everything else works.
 - **Explain unusual years (optional, words only):** each flagged year has an Explain action. Attach that year's annual-report PDF and rules pick the few pages that mention exceptional or one-time items, the flagged line and the year (text read with the system `pdftotext`); the model answers in at most two sentences with a page and a quote, and the explanation is rejected unless that quote really occurs on that page. Without a report it can explain from the numbers only, labelled as such. Approving pins the note next to the flag, marked as AI-written; no number uses it.
-- **Annual-report notes (optional):** attach a year's annual-report PDF under Sources & proposals. For segment revenue, debt maturity, capex, contingent liabilities, related-party transactions, exceptional items, promoter pledge and the auditor's report, rules pick the most likely pages per topic (three; the auditor gets a slot for its signature page), and the app shows the pages and the exact prompt size before anything is sent. The model returns each figure with its page and a quote; rules check that every quote occurs on its page and contains its number, convert the unit (lakh, million...) to Rs crore (pledge is a percentage from 0 to 100, a quoted "nil" counting as 0; the auditor's report is words only: the firm, the opinion and whether the auditor changed, each checked against a quote on its page; exceptional items are words and citations for the note, never fed to the engine), and tie the sums to the statements (segments to revenue within 2%, maturity buckets to borrowings within 5%, capex to the XBRL cash flow when attached). A note that fails is kept as rejected. Approved notes are drawn as a segment mix, a maturity ladder, contingent liabilities against net worth and a related-party table; an approved capex figure becomes that year's capex in the history behind the default.
-- **Research note (home screen):** the verdict in one sentence ("The price needs 16.6% growth a year. The company is doing 5.8%."), downside or upside to our base value, how many of the 50 sensitivity cases sit below the price, and the input the value hinges on with its break-even. A two-scale ruler puts the price against the bear–bull range and the growth each value needs. Then the rule-check strip, the tornado of what moves value, break-evens, key numbers, the value bridge and what would close or widen the gap. Every number has a footnote with its source. Model and Evidence tabs hold the tables, documents and checks (N / M / E keys).
+- **Annual-report notes (optional):** attach a year’s annual-report PDF under Checks, Documents. For segment revenue, debt maturity, capex, contingent liabilities, related-party transactions, exceptional items, promoter pledge and the auditor's report, rules pick the most likely pages per topic (three; the auditor gets a slot for its signature page), and the app shows the pages and the exact prompt size before anything is sent. The model returns each figure with its page and a quote; rules check that every quote occurs on its page and contains its number, convert the unit (lakh, million...) to Rs crore (pledge is a percentage from 0 to 100, a quoted "nil" counting as 0; the auditor's report is words only: the firm, the opinion and whether the auditor changed, each checked against a quote on its page; exceptional items are words and citations for the note, never fed to the engine), and tie the sums to the statements (segments to revenue within 2%, maturity buckets to borrowings within 5%, capex to the XBRL cash flow when attached). A note that fails is kept as rejected. Approved notes are drawn as a segment mix, a maturity ladder, contingent liabilities against net worth and a related-party table; an approved capex figure becomes that year's capex in the history behind the default.
+- **Research note (Overview):** the verdict in one sentence ("The price needs 16.6% growth a year. The company is doing 5.8%."), downside or upside to our base value, how many of the 50 sensitivity cases sit below the price, and the input the value hinges on with its break-even. A two-scale ruler puts the price against the bear–bull range and the growth each value needs. Then the rule-check strip, the tornado of what moves value, break-evens, key numbers, the value bridge and what would close or widen the gap. Every number has a footnote with its source. The tornado, break-evens and the gap live on Valuation; the tables, documents and checks on their own pages.
 - **Forensic radar:** 15 rules for cash conversion, receivable and inventory days, capital WIP, other income, tax swings, debt and interest cover, working capital, a Beneish-style M-score, and (from approved annual-report notes) contingent liabilities, related parties, promoter pledge and the auditor. Each lit flag can be explained from the annual report with a checked quote.
 - **Drafted assumptions:** attach annual reports, earnings-call transcripts or investor presentations, and the AI command proposes bear, base and bull for every driver with a page and a quote. Rules check the quote, the bounds, the company's own 10-year history (a value outside it needs a quote that prints that figure; a quote with no number gets a "size not in the source" note), the order of the cases and the cash consequences; you accept, edit or reject each one.
 - **Thesis writer:** "Write the note" sends the AI command only the numbers on the note (verdict, what moves value, break-evens, key numbers, lit flags, inputs and their sources) and the quotes you approved, never whole pages. It writes a headline, three thesis points, what is priced in, risks, bull and bear triggers and what to watch. Rules reject it unless every number is one the app computed or one in a cited quote, every reference exists, every quote is on its page (a quote from a report whose text is gone only if it was approved), nothing says buy, sell, target price or recommend, nothing says never, always or ever (the history starts at the export's first year), and each part fits its length; a failure is retried once with the reasons, then shown. The saved note is marked AI-written; when an input changes it is marked "written for earlier inputs", and it is only rewritten when you ask.
-- **Model library:** models autosave to `models/` locally, and you can reopen any of them from the start page.
+- **Model library:** models autosave to `models/` locally, and you can reopen any of them from Your companies or the company switcher.
+- **An installable app:** a web app manifest and icons, so Chrome or Edge offers "Install app" and opens it in its own window. Old `#note`, `#model` and `#evidence` links still open the right page.
 - **Excel export:** every projected statement cell is a live formula. Inputs are blue, and a scenario selector switches the whole workbook between base, bull and bear.
 
 ## How the numbers stay trustworthy
@@ -60,7 +80,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Node.js 20+. LibreOffice is option
 ./run.sh test     # engine tests + Excel parity check
 ```
 
-Then open the app, drop in a Export.in export, or click **Explore with a sample company**.
+Then open the app, drop in a Export.in export, or click **Try the sample company**. To use it like a desktop app, choose **Install app** in the browser's address bar.
 
 ## Stack
 
@@ -76,7 +96,8 @@ model.py          parse, checks, defaults, projection, ratios, one-offs, valuati
 server.py         API + local model library
 ai.py             LLM_CMD calls, PDF page text and picking, quote and number checks
 test_model.py     self-check incl. Excel parity
-web/src/          App (shell, coverage), Note, Ruler, Model, Evidence, Draft, DriverStrip, Chart, Statements, Valuation, Sources
+web/src/          App (routing, autosave, tab sync), Shell, Workspace, Landing, Note (Overview), Fundamentals, Statements,
+                  Model (Forecast), Valuation, Evidence (Checks), Ruler, Draft, DriverStrip, Chart, Sources, route
 ```
 
 ## Design notes
@@ -84,7 +105,8 @@ web/src/          App (shell, coverage), Note, Ruler, Model, Evidence, Draft, Dr
 - **Type is provenance:** Martian Mono for every number computed by rules, Source Serif 4 for written words (AI prose, quotes), Archivo for the interface.
 - **Colour is who says it:** ochre for the market price, blue for our model, carmine for a lit rule, green for a passed check, black for reported history.
 - **Numbers** use Indian digit grouping (1,23,456), with negatives in brackets.
-- **Accessibility:** light and dark themes, works down to 390 px, keyboard-accessible sliders and tabs, and reduced motion is respected.
+- **Navigation:** a sidebar with the company switcher and the six pages (the open page lists its sections); on a phone, a top bar and the pages along the bottom. Every page opens with what it is for and its next step; every navigation item is a real link.
+- **Accessibility:** landmarks, a skip link, focus on the page heading after a page change, light and dark themes, works down to 390 px, keyboard-accessible sliders and tabs, and reduced motion is respected.
 
 ## Limitations
 

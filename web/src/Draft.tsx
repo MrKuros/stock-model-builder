@@ -123,7 +123,7 @@ export default function DraftPanel({ parsed, doc, d }: { parsed: Parsed; doc: Mo
             and capex and payout against the cash. Inputs the documents don’t cover keep the rule default
             (“from history”). Accepted values are ordinary inputs: recalculating never calls AI.</p>
           <p className="small">{docs.length ? <>Reads: {docs.map(r => `${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}`).join(', ')}.</>
-            : !d.msg && <>No documents attached, so a draft gives the rule defaults. Attach a call transcript, presentation or annual report in Evidence.</>}</p>
+            : !d.msg && <>No documents attached, so a draft gives the rule defaults. Attach a call transcript, presentation or annual report under Checks, Documents.</>}</p>
         </div>
         <button type="button" className="btn primary" onClick={d.draft} aria-disabled={!!d.busy}>
           {rows.length ? 'Draft again' : 'Draft assumptions'}</button>

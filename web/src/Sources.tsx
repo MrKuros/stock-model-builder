@@ -30,9 +30,17 @@ const amount = (k: string, v: number) => (PER_SHARE.has(k) ? `Rs ${dec2(v)}` : m
 
 export interface AiStatus { available: boolean; message: string | null; pdf?: boolean; pdf_message?: string | null }
 /** LLM_CMD set on the server (and pdftotext there)? Only the AI buttons need it; everything else works without. */
+let aiStatus: Promise<AiStatus | null> | null = null // asked once per page load: it only changes when the server restarts
 export function useAi() {
   const [ai, setAi] = useState<AiStatus | null>(null)
-  useEffect(() => { api<AiStatus>('/api/ai').then(setAi).catch(() => setAi(null)) }, [])
+  useEffect(() => {
+    aiStatus ??= api<AiStatus>('/api/ai').then(x => (x.available ? x : { ...x,
+      message: 'AI is off on this computer. To turn it on, set LLM_CMD to a command that reads a prompt and prints a reply (see the README), then restart the app.' }))
+      .catch(() => { aiStatus = null; return null })
+    let live = true
+    aiStatus.then(x => { if (live) setAi(x) })
+    return () => { live = false }
+  }, [])
   return ai
 }
 
@@ -222,7 +230,7 @@ export default function Sources({
 
   return (
     <section className="sources" aria-labelledby="src-head">
-      <div className="val-top"><h2 id="src-head" ref={head} tabIndex={-1}>Sources &amp; proposals</h2></div>
+      <div className="val-top"><h2 id="src-head" ref={head} tabIndex={-1}>Filings and AI proposals</h2></div>
       <p className="muted small">
         Results filings from the exchanges, read by fixed rules and checked against the Export figures. An annual
         filing whose revenue matches Export’s adds that year’s trade payables, lease liabilities and cash-flow capex
@@ -325,7 +333,7 @@ export default function Sources({
           An annual report’s notes: segment revenue, debt maturity, capex, contingent liabilities and related-party
           transactions. Rules pick a few pages per topic, AI reads them and quotes each figure, rules check the quotes
           and tie the sums to the statements, and you approve. An approved capex figure becomes that year’s capex.
-          Transcripts and presentations are read only when you draft assumptions (Model tab).
+          Transcripts and presentations are read only when you draft assumptions (Forecast page).
         </p>
         <AttachReport years={years} ai={ai} onReports={onReports} />
         {reports.length > 0 && (
@@ -622,7 +630,7 @@ export function Explain({ year, company, filings, notes, report, proposals, note
   // the waiting proposal disappears once decided: keep keyboard focus nearby (the pinned note, or the Explain button)
   const decided = (p: Proposal, s: Proposal['status']) => {
     onProposals(ps => decideNote(ps, p, s))
-    setMsg({ text: s === 'approved' ? `Pinned the explanation of ${year}.` : 'Rejected; kept under Sources & proposals for the record.' })
+    setMsg({ text: s === 'approved' ? `Pinned the explanation of ${year}.` : 'Rejected; kept in the filings and AI proposals list for the record.' })
     setTimeout(() => (s === 'approved' ? noteRef.current : askRef.current?.querySelector('button'))?.focus())
   }
   const live = proposals.filter(p => p.kind === 'oneoff_note' && p.period === year && p.status === 'proposed').slice(-1)[0]
@@ -649,9 +657,9 @@ export function Explain({ year, company, filings, notes, report, proposals, note
       const seen = proposals.find(x => x.id === p.id)
       onProposals(ps => addProposal(ps, p))
       const failed = p.checks.filter(c => c.pass === false)
-      setMsg(seen ? { text: `The same explanation as before (${PROP_STATUS[seen.status].toLowerCase()}); it’s already under Sources & proposals.` }
+      setMsg(seen ? { text: `The same explanation as before (${PROP_STATUS[seen.status].toLowerCase()}); it’s already in the filings and AI proposals list.` }
         : p.status === 'rejected'
-        ? { text: `The rules rejected the explanation: ${failed.map(c => c.detail).join(' ')} It’s kept under Sources & proposals.`, bad: true }
+        ? { text: `The rules rejected the explanation: ${failed.map(c => c.detail).join(' ')} It’s kept in the filings and AI proposals list.`, bad: true }
         : { text: from ? `Explained from ${from.file}, PDF page ${p.source.page}; the quote is on that page. Approve it to pin it.`
           : 'Explained from the numbers only. Approve it to pin it.' })
     } catch (e) { setMsg({ text: (e as Error).message, bad: true }) } finally { setBusy(null) }
@@ -723,7 +731,7 @@ export function FlagExplain({ flag, company, filings, notes, reports, proposals,
   const id = `fx-${flag.key}`
   const decided = (p: Proposal, s: Proposal['status']) => {
     onProposals(ps => decideNote(ps, p, s))
-    setMsg({ text: s === 'approved' ? `Pinned the explanation of ${flag.title.toLowerCase()}.` : 'Rejected; kept under Sources & proposals for the record.' })
+    setMsg({ text: s === 'approved' ? `Pinned the explanation of ${flag.title.toLowerCase()}.` : 'Rejected; kept in the filings and AI proposals list for the record.' })
     setTimeout(() => askRef.current?.querySelector('button')?.focus())
   }
   const explain = async (from: Report | null) => {

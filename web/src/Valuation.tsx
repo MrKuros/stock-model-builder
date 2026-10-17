@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { niceTicks } from './Chart'
-import { dec2, fmt, money, noNegZero, type Market, type Multiple, type Path, type Scenario, type ValInputs, type Valuation } from './lib'
+import { BreakEvens, Bridge, Change, Prose, Tornado, avg, shortName } from './Note'
+import { PageHead, Toc } from './Shell'
+import { useHref } from './route'
+import {
+  dec2, fmt, money, noNegZero, type ModelDoc, type Multiple, type Parsed, type Path, type Projection, type Scenario, type ValInputs, type Valuation,
+} from './lib'
 
 const ORDER: Scenario[] = ['bear', 'base', 'bull']
 const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
@@ -12,8 +17,8 @@ const signed = (v: number) => `${v > 0 ? '+' : ''}${fmt(v, 'pct')}`
 const toText = (v: number, unit: Unit) => (unit === '%' ? noNegZero((v * 100).toFixed(2).replace(/\.?0+$/, '')) : String(v))
 
 /** A typed input that commits on blur/Enter (Escape restores). Blank = null where the field has a fallback. */
-function Field({ id, label, unit, value, fallback, nullable, onCommit }: {
-  id: string; label: string; unit: Unit; value: number | null; fallback?: string; nullable?: boolean
+function Field({ id, label, term, unit, value, fallback, nullable, onCommit }: {
+  id: string; label: string; term: string; unit: Unit; value: number | null; fallback?: string; nullable?: boolean
   onCommit: (v: number | null) => void
 }) {
   const shown = value == null ? '' : toText(value, unit)
@@ -38,6 +43,7 @@ function Field({ id, label, unit, value, fallback, nullable, onCommit }: {
   return (
     <label className="vfield" htmlFor={id}>
       <span className="vfield-label">{label}</span>
+      <span className="term">{term}</span>
       <span className="vfield-box">
         {unit === 'Rs' && <span className="unit">Rs</span>}
         <input id={id} inputMode="decimal" value={draft} placeholder={fallback} aria-describedby={bad ? `${id}-bad` : undefined}
@@ -54,117 +60,176 @@ function Field({ id, label, unit, value, fallback, nullable, onCommit }: {
   )
 }
 
-interface Props {
-  inputs: ValInputs
-  defaults: ValInputs
-  v: Valuation | null // null while a projection loads
-  market?: Market
-  active: Scenario
-  asOf: string // last reported year: the valuation date
-  next?: string // first projected year
-  growth: Path // the active scenario's revenue growth, for the reverse DCF sentence
-  n: number
-  onChange: (f: (p: ValInputs) => ValInputs) => void
-}
+interface Props { parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null }
 
-export default function ValuationPanel({ inputs, defaults, v, market, active, asOf, next, growth, n, onChange }: Props) {
+/** Valuation: the inputs first (everything below recalculates), then the value by case, what moves it, what would
+ * close the gap, how sure, and the multiples. The research-note pieces (tornado, break-evens) are base case only. */
+export default function ValuationPage({ parsed, doc, setDoc, projection }: Props) {
+  const href = useHref()
+  const { company, years: histYears } = parsed
+  const { active, n, valuation: inputs } = doc
+  const defaults = parsed.valuation, market = company.market
+  const proj = projection?.scenarios[active].length === n ? projection : null
+  const v = proj?.valuation ?? null
+  const asOf = histYears[histYears.length - 1], next = proj?.years[0]
+  const growth = doc.scenarios[active].growth
+  const onChange = (f: (p: ValInputs) => ValInputs) => setDoc(d => ({ ...d, valuation: f(d.valuation) }))
   const set = (k: keyof ValInputs) => (x: number | null) => onChange(p => ({ ...p, [k]: x }))
   const buildUp = v ? v.wacc_build : null
   const edited = JSON.stringify(inputs) !== JSON.stringify(defaults)
   const head = useRef<HTMLHeadingElement>(null)
   const burn = v ? ORDER.filter(s => v.scenarios[s].error) : [] // scenarios with no terminal value (same message)
   const pct = (x: number | null | undefined) => (x == null ? '' : toText(x, '%'))
+  const sv = v?.scenarios.base, value = sv?.per_share ?? null, price = v?.price ?? null
+  const base = doc.scenarios.base
+  const oursOf = (k: string) => (k === 'wacc' ? v?.wacc ?? 0 : k === 'g' ? v?.g ?? 0 : avg(base[k]))
+  const nb = v?.note ?? null, be = nb?.breakevens ?? {}
+  const tn = doc.note
+  const P = (text: string, _refs: unknown, uid: string) => (tn ? <Prose text={text} refs={[]} tn={tn} refN={new Map()} uid={uid} /> : null)
+  const c3 = parsed.cagrs?.['3'] ?? []
+  const short = shortName(company.name)
+  const why = !v ? 'Calculating…' : v.error ?? sv?.error ?? (v.shares == null ? 'There is no share count in this file: type one below.' : '')
 
   return (
-    <section className="valuation" aria-labelledby="val-head">
-      <div className="val-top">
-        <h2 id="val-head" tabIndex={-1} ref={head}>Valuation</h2>
-        {/* the button unmounts once inputs match the defaults, so focus moves to the heading */}
-        {edited && <button type="button" className="link small"
-          onClick={() => { onChange(() => defaults); head.current?.focus() }}>Reset valuation inputs</button>}
-      </div>
-      <p className="muted small">
-        Discounted cash flow of free cash flow to firm, valued at the {asOf} year end; upside compares that value with
-        the share price at export (or the one you type). The same inputs apply to all three scenarios. Blank fields
-        use the value shown in grey.
-      </p>
+    <>
+      <PageHead label={<>Valuation · <b>base case</b> · discounted cash flow, valued at the {asOf} year end</>}
+        title={value != null ? <>What {short} is worth: <span className="ours">Rs {rs(value)}</span> a share</> : 'No value yet'}
+        purpose={value != null
+          ? <>We add up the cash the business should make over the forecast, discount it to today and compare it with the
+            price{price != null ? <> of <span className="num mkt">Rs {rs(price)}</span></> : ' (none in this file: type one below)'}. Change the inputs in the first box; everything below recalculates.</>
+          : sv?.error && !v?.error
+            ? <>{why} <a href={href('forecast', 'capex_pct')}>Change capex or growth in Forecast</a></>
+            : <>{why} Fix it in the inputs below and the value appears.</>}
+        next={<a className="btn" href="#inputs">Change the inputs</a>} />
+      <Toc page="valuation" />
 
-      <div className="wacc" role="group" aria-label="WACC and terminal value inputs">
-        <Field id="v-rf" label="Risk-free (10-yr G-sec)" unit="%" value={inputs.rf} onCommit={x => x != null && set('rf')(x)} />
-        <Field id="v-erp" label="Equity risk premium" unit="%" value={inputs.erp} onCommit={x => x != null && set('erp')(x)} />
-        <Field id="v-beta" label="Beta" unit="" value={inputs.beta} onCommit={x => x != null && set('beta')(x)} />
-        <Field id="v-kd" label="Cost of debt, pre-tax" unit="%" value={inputs.kd} nullable fallback={pct(v?.kd)}
-          onCommit={set('kd')} />
-        <Field id="v-g" label="Terminal growth" unit="%" value={inputs.g} onCommit={x => x != null && set('g')(x)} />
-        <Field id="v-wacc" label="WACC override" unit="%" value={inputs.wacc_override} nullable fallback={pct(buildUp)}
-          onCommit={set('wacc_override')} />
-        <Field id="v-price" label="Share price" unit="Rs" value={inputs.price} nullable
-          fallback={market?.price != null ? String(market.price) : 'none'} onCommit={set('price')} />
-        <Field id="v-shares" label="Shares" unit="cr" value={inputs.shares} nullable
-          fallback={market?.shares != null ? dec2(market.shares).replace(/,/g, '') : 'none'} onCommit={set('shares')} />
-        <label className="vcheck">
-          <input type="checkbox" checked={inputs.mid_year} onChange={e => onChange(p => ({ ...p, mid_year: e.target.checked }))} />
-          Mid-year discounting
-        </label>
-      </div>
-
-      {v && (
-        <p className="wacc-sum">
-          Cost of equity {fmt(v.ke, 'pct')} · debt {fmt(v.kd_after_tax, 'pct')} after {fmt(v.tax, 'pct')} tax ·
-          weights {fmt(v.we, 'pct')} equity ({v.price && v.shares ? 'market cap' : v.price ? 'book, no share count' : 'book, no share price'}), {fmt(1 - v.we, 'pct')} debt ·{' '}
-          <b>WACC <span className="pencil-num">{fmt(v.wacc, 'pct')}</span></b>
-          {inputs.wacc_override != null && <> (typed; the build-up gives {fmt(buildUp, 'pct')})</>}
-        </p>
-      )}
-
-      {v?.error && <p className="val-error" role="alert">{v.error}</p>}
-      {v && !v.error && <>
-        {burn.length > 0 && (
-          <p className="val-error">{burn.map((s, i) => (i ? NAMES[s].toLowerCase() : NAMES[s])).join(', ').replace(/, (?=[^,]*$)/, ' and ')}{' '}
-            {burn.length > 1 ? 'cases' : 'case'}: {v.scenarios[burn[0]].error}</p>
-        )}
-        {v.shares == null
-          ? <p className="val-empty">Enter shares to get a per-share value.</p>
-          : <Ruler v={v} active={active} />}
-        {v.shares != null && v.price == null && <p className="muted small">Enter a share price to see the upside.</p>}
-        <Implied v={v} active={active} growth={growth} n={n} />
-        <div className="table-wrap" id="a-bridge" tabIndex={0} role="region" aria-label="Valuation by scenario: enterprise value to equity to per share">
-          <table className="val-table">
-            <thead>
-              <tr>
-                <th scope="col">Rs crore</th><th scope="col">Enterprise value</th><th scope="col">Equity value</th>
-                <th scope="col">Per share (Rs)</th><th scope="col">Upside</th><th scope="col">Explicit / terminal</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ORDER.map(s => {
-                const x = v.scenarios[s]
-                return (
-                  <tr key={s} className={s === active ? 'is-active' : undefined}>
-                    <th scope="row">{NAMES[s]}</th>
-                    <td>{money(x.ev)}</td>
-                    <td>{money(x.equity)}</td>
-                    <td>{x.per_share == null ? '–' : rs(x.per_share)}</td>
-                    <td>{x.upside == null ? '–' : signed(x.upside)}</td>
-                    <td><Split share={x.tv_share} /></td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+      <section className="blk first card" id="inputs" aria-labelledby="val-head">
+        <div className="strip-head">
+          <h2 id="val-head" tabIndex={-1} ref={head}>Inputs for valuing the cash flows</h2>
+          {/* the button unmounts once inputs match the defaults, so focus moves to the heading */}
+          {edited && <button type="button" className="link small"
+            onClick={() => { onChange(() => defaults); head.current?.focus() }}>Reset to the defaults</button>}
         </div>
-        {v.shares != null && v.steps && <Sensitivity v={v} active={active} />/* steps: a server not yet restarted has none */}
-        {v.shares != null && v.multiples && next && <Multiples v={v} active={active} asOf={asOf} next={next} />}
-        <p className="muted small">
-          Equity value = enterprise value − borrowings{v.lease ? ' and lease liabilities' : ''} Rs {money(v.borrowings)} cr + cash Rs {money(v.cash)} cr +
-          investments Rs {money(v.investments)} cr ({asOf})
-          {v.nci > 0 && <> − minority interest, estimated as minorities’ {fmt(v.nci, 'pct')} share of profit</>}.
-          Terminal value: Gordon growth at {fmt(v.g, 'pct')} on the
-          final year’s free cash flow. Free cash flow to firm = EBIT after tax + depreciation − capex − change in working
-          capital; other income is left out because its cash and investments are added here instead.
-        </p>
+        <p className="why">The same inputs apply to bear, base and bull. A box showing a grey number uses it until you type your own.</p>
+        <div className="wacc" role="group" aria-label="Discount rate and terminal value inputs">
+          <Field id="v-rf" label="Risk-free rate" term="10-year government bond yield" unit="%" value={inputs.rf} onCommit={x => x != null && set('rf')(x)} />
+          <Field id="v-erp" label="Equity risk premium" term="Extra return investors want for owning shares" unit="%" value={inputs.erp} onCommit={x => x != null && set('erp')(x)} />
+          <Field id="v-beta" label="Beta" term="How much the stock swings with the market; 1 = average" unit="" value={inputs.beta} onCommit={x => x != null && set('beta')(x)} />
+          <Field id="v-kd" label="Cost of debt, before tax" term="Interest rate on borrowings" unit="%" value={inputs.kd} nullable fallback={pct(v?.kd)}
+            onCommit={set('kd')} />
+          <Field id="v-g" label="Terminal growth" term="Growth a year forever after the forecast" unit="%" value={inputs.g} onCommit={x => x != null && set('g')(x)} />
+          <Field id="v-wacc" label="Discount rate (WACC)" term="The return investors need; built from the four above" unit="%" value={inputs.wacc_override} nullable fallback={pct(buildUp)}
+            onCommit={set('wacc_override')} />
+          <Field id="v-price" label="Share price" term="From the export; type today’s" unit="Rs" value={inputs.price} nullable
+            fallback={market?.price != null ? String(market.price) : 'none'} onCommit={set('price')} />
+          <Field id="v-shares" label="Shares" term="Number of shares, in crore" unit="cr" value={inputs.shares} nullable
+            fallback={market?.shares != null ? dec2(market.shares).replace(/,/g, '') : 'none'} onCommit={set('shares')} />
+        </div>
+        {v && (
+          <p className="wacc-sum">
+            Cost of equity {fmt(v.ke, 'pct')} · debt {fmt(v.kd_after_tax, 'pct')} after {fmt(v.tax, 'pct')} tax ·
+            weights {fmt(v.we, 'pct')} equity ({v.price && v.shares ? 'market cap' : v.price ? 'book, no share count' : 'book, no share price'}), {fmt(1 - v.we, 'pct')} debt ·{' '}
+            <b>Discount rate <span className="pencil-num">{fmt(v.wacc, 'pct')}</span></b>
+            {inputs.wacc_override != null && <> (typed; the build-up gives {fmt(buildUp, 'pct')})</>}
+            <label className="vcheck">
+              <input type="checkbox" checked={inputs.mid_year} onChange={e => onChange(p => ({ ...p, mid_year: e.target.checked }))} />
+              Mid-year discounting <span className="dim">(cash arrives through the year, not at its end)</span>
+            </label>
+          </p>
+        )}
+        {v?.error && <p className="val-error" role="alert">{v.error}</p>}
+      </section>
+
+      {v && !v.error && <>
+        <section className="blk" id="worth" aria-labelledby="worth-h">
+          <h2 id="worth-h">Value by case</h2>
+          <p className="why">Bear and bull move revenue growth by 3 points and EBITDA margin by 1.5 points from base; the
+            {' '}{NAMES[active].toLowerCase()} case is highlighted. Business value (enterprise value) is the cash flows discounted;
+            equity value adds cash and takes off debt.</p>
+          {burn.length > 0 && (
+            <p className="val-error">{burn.map((s, i) => (i ? NAMES[s].toLowerCase() : NAMES[s])).join(', ').replace(/, (?=[^,]*$)/, ' and ')}{' '}
+              {burn.length > 1 ? 'cases' : 'case'}: {v.scenarios[burn[0]].error}{' '}<a href={href('forecast', 'capex_pct')}>Open capex in Forecast</a></p>
+          )}
+          {v.shares == null
+            ? <p className="val-empty">No share count, so no value per share. <a href="#v-shares">Type the share count</a></p>
+            : <Ruler v={v} active={active} />}
+          {v.shares != null && v.price == null && <p className="val-empty">No share price in this file, so no upside. <a href="#v-price">Type a price</a></p>}
+          <Implied v={v} active={active} growth={growth} n={n} />
+          <div className="table-wrap" tabIndex={0} role="region" aria-label="Valuation by case: business value to equity to per share">
+            <table className="val-table">
+              <thead>
+                <tr>
+                  <th scope="col">Rs crore</th><th scope="col">Business value</th><th scope="col">Equity value</th>
+                  <th scope="col">Per share (Rs)</th><th scope="col">vs price</th><th scope="col">Forecast / after it</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ORDER.map(s => {
+                  const x = v.scenarios[s]
+                  return (
+                    <tr key={s} className={s === active ? 'is-active' : undefined}>
+                      <th scope="row">{NAMES[s]}</th>
+                      <td>{money(x.ev)}</td>
+                      <td>{money(x.equity)}</td>
+                      <td>{x.per_share == null ? '–' : rs(x.per_share)}</td>
+                      <td>{x.upside == null ? '–' : signed(x.upside)}</td>
+                      <td><Split share={x.tv_share} /></td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          {value != null && proj && <Bridge v={v} value={value} price={price} years={proj.years} />}
+        </section>
+
+        <section className="blk" id="hinges" aria-labelledby="hinges-h">
+          <h2 id="hinges-h">What moves the value</h2>
+          <p className="why">Each input moved one step either way, the rest left at base. The longest bar matters most.</p>
+          {nb && nb.impact.length > 0 && value != null
+            ? <div className="split2">
+                <Tornado impact={nb.impact.slice(0, 5)} base={value} price={price} oursOf={oursOf} />
+                {price != null
+                  ? <BreakEvens be={be} price={price} oursOf={oursOf} c3={c3} hist={parsed.hist ?? company.hist} v={v} vi={inputs} beta0={defaults.beta} />
+                  : <p className="val-empty">Break-evens need a share price. <a href="#v-price">Type a price</a></p>}
+              </div>
+            : <p className="val-empty">Needs a base value per share first.</p>}
+        </section>
+
+        <section className="blk" id="gap" aria-labelledby="gap-h">
+          <h2 id="gap-h">What would close or widen the gap</h2>
+          {nb && value != null && price != null
+            ? <Change impact={nb.impact} base={value} price={price} oursOf={oursOf} v={v} be={be} tn={tn} P={P} />
+            : value == null ? <p className="val-empty">Needs a base value per share first.</p>
+            : <p className="val-empty">Needs a share price. <a href="#v-price">Type a price</a></p>}
+        </section>
+
+        <section className="blk" id="sure" aria-labelledby="sure-h">
+          <h2 id="sure-h">How sure: what-if cases</h2>
+          {v.shares == null ? <p className="val-empty">Needs a share count. <a href="#v-shares">Type it</a></p>
+            : v.steps && v.scenarios[active].per_share != null ? <Sensitivity v={v} active={active} />
+            : <p className="val-empty">Needs a value per share in the {NAMES[active].toLowerCase()} case first.</p>}
+        </section>
+
+        <section className="blk" id="multiples" aria-labelledby="mult-h">
+          <h2 id="mult-h">Cross-check with multiples</h2>
+          {v.shares != null && v.multiples && next ? <Multiples v={v} active={active} asOf={asOf} next={next} />
+            : <p className="val-empty">Needs a share count and a forecast year.</p>}
+        </section>
+
+        <details className="audit">
+          <summary>How this is computed</summary>
+          <p className="muted small">
+            Equity value = enterprise value − borrowings{v.lease ? ' and lease liabilities' : ''} Rs {money(v.borrowings)} cr + cash Rs {money(v.cash)} cr +
+            investments Rs {money(v.investments)} cr ({asOf})
+            {v.nci > 0 && <> − minority interest, estimated as minorities’ {fmt(v.nci, 'pct')} share of profit</>}.
+            Terminal value: Gordon growth at {fmt(v.g, 'pct')} on the
+            final year’s free cash flow. Free cash flow to firm (FCFF) = operating profit after tax + depreciation − capex − change in working
+            capital; other income is left out because its cash and investments are added here instead.
+          </p>
+        </details>
       </>}
-    </section>
+    </>
   )
 }
 
@@ -181,7 +246,7 @@ function Implied({ v, active, growth, n }: { v: Valuation; active: Scenario; gro
     : <p className="implied">
         Today’s price of Rs {rs(v.price)} implies revenue growth of <b>{fmt(x, 'pct')}</b> a year for {n} years,
         versus your <span className="pencil-num">{yours}</span> ({NAMES[active].toLowerCase()} case, other
-        assumptions as set). The dashed line on the revenue growth strip marks it.
+        assumptions as set). The dashed line on the revenue growth input in Forecast marks it.
       </p>
 }
 

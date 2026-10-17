@@ -1,80 +1,106 @@
-import { useState } from 'react'
-import { fmt, groupKeys, type LayoutLine, type LineKind, type Quarters, type Row, type Ttm } from './lib'
+import { PageHead } from './Shell'
+import { STATEMENTS, useHref } from './route'
+import { fmt, type LayoutLine, type LineKind, type ModelDoc, type Parsed, type Projection, type Quarters, type Row, type Ttm } from './lib'
 
 const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf', 'fcf', 'fcff'])
-const ALL_TABS = [['PROFIT & LOSS', 'Profit & loss'], ['BALANCE SHEET', 'Balance sheet'], ['CASH FLOW', 'Cash flow'],
-  ['RATIOS', 'Ratios'], ['QUARTERS', 'Quarters']] as const
 
 /** The quarterly tab's inputs: the export's quarters, TTM (and a year earlier), the last reported year (and the one before). */
 export interface QuarterProps { quarters: Quarters; ttm: Ttm | null; ttmPrev: Ttm | null; fy: string; last: Row; prev: Row | null }
-interface Props {
-  layout: LayoutLine[]; years: string[]; rows: Row[]; nHist: number; quarterly: QuarterProps | null
-  hide?: Set<string> // lines that mean nothing for this company (COGS when days run on revenue)
-}
 const OPTIONAL = new Set(['cogs', 'lease', 'payables']) // shown only when some year has them
+const NAMES = { base: 'base', bull: 'bull', bear: 'bear' } as const
 
-export default function Statements({ layout, years, rows, nHist, quarterly, hide }: Props) {
-  const TABS = quarterly ? ALL_TABS : ALL_TABS.slice(0, 4) // no Quarters block in the export: no tab
-  const [picked, setTab] = useState<string>(TABS[0][0])
-  const tab = TABS.some(t => t[0] === picked) ? picked : TABS[0][0]
+/** Statements: one address per statement (/statements/profit-and-loss ...), history in ink and the active case's
+ * forecast in blue. A row named in a link (#revenue) is focused and highlighted on arrival. */
+export default function StatementsPage({ parsed, doc, projection, sub }: { parsed: Parsed; doc: ModelDoc; projection: Projection | null; sub: string }) {
+  const href = useHref()
+  const { company, years: histYears, layout } = parsed
+  const hist = parsed.hist ?? company.hist
+  const nHist = hist.length
+  const n = doc.n, active = doc.active
+  const proj = projection?.scenarios[active].length === n ? projection.scenarios[active] : null
+  const years = proj ? [...histYears, ...projection!.years] : histYears
+  const rows = proj ? [...hist, ...proj] : hist
+  const quarterly: QuarterProps | null = company.quarters?.dates.length ? {
+    quarters: company.quarters, ttm: parsed.ttm ?? null, ttmPrev: parsed.ttm_prev ?? null,
+    fy: histYears[nHist - 1], last: hist[nHist - 1], prev: nHist > 1 ? hist[nHist - 2] : null,
+  } : null
+  const tabs = STATEMENTS.filter(t => t[0] !== 'quarters' || quarterly)
+  const cur = STATEMENTS.find(t => t[0] === sub) ?? STATEMENTS[0]
+  const tab = cur[2] as string
+  const hide = parsed.sources?.basis === 'cogs' ? undefined : new Set(['cogs'])
+  return (
+    <>
+      <PageHead label={<>Statements · <b>{cur[1]}</b> · Rs crore</>} title={cur[1]}
+        purpose={tab === 'QUARTERS'
+          ? <>The last ten quarters as the company reported them, then the last full year and the trailing twelve months
+            (TTM: the last four quarters added up), so the run rate sits next to the annual figure.</>
+          : <>Every line as the company reported it ({histYears[0]}–{histYears[nHist - 1]}, in black), then our{' '}
+            <b>{NAMES[active]}</b> case’s forecast in blue. Change the case and years at the top; change the inputs in Forecast.</>}
+        next={<a className="btn" href={href('forecast')}>Change the forecast</a>} />
+      <nav className="stmt-tabs" aria-label="Statements">
+        {tabs.map(([id, name]) => <a key={id} href={href('statements', '', id)} aria-current={id === cur[0] ? 'page' : undefined}>{name}</a>)}
+      </nav>
+      <section className="statements" aria-labelledby="page-h">
+        {tab !== 'QUARTERS' && proj && <p className="small dim scroll-hint">The table scrolls sideways: the forecast years ({projection!.years[0]}–{projection!.years[n - 1]}) are at the right, in blue.</p>}
+        {tab === 'QUARTERS'
+          ? quarterly
+            ? <div className="table-wrap" tabIndex={0} role="region" aria-label="Quarters"><QuarterTable {...quarterly} /></div>
+            : <p className="val-empty">This Export export has no quarterly figures. Exports that include the Quarters block
+                show the last ten quarters and the trailing twelve months here.</p>
+          : <StatementTable layout={layout} section={tab} years={years} rows={rows} nHist={nHist} hide={hide} />}
+        {tab === 'RATIOS' && (
+          <p className="muted small">
+            ROE = net profit / average equity. ROCE = EBIT / average (equity + borrowings + lease liabilities), EBIT = profit before tax +
+            interest. Asset turnover = revenue / average total assets. Averages use opening and closing balances; the
+            first year uses closing. Net debt = borrowings + lease liabilities − cash − investments. – means not meaningful (zero or
+            negative denominator).
+          </p>
+        )}
+        {tab === 'QUARTERS' && quarterly && (
+          <p className="muted small">
+            As reported, last {Math.min(quarterly.quarters.dates.length, SHOW)} quarters. Operating profit = profit before
+            tax + interest + depreciation − other income, the same as EBITDA in the yearly tables. TTM (trailing twelve
+            months) adds up the last four quarters{quarterly.ttm ? ` to ${month(quarterly.ttm.end)}` : ''}. YoY (year
+            on year) compares a quarter with the same quarter a year earlier, and TTM with the four quarters before it.
+            {!quarterly.ttm && ' No TTM here: the last four quarters in the file aren’t consecutive.'}
+          </p>
+        )}
+      </section>
+    </>
+  )
+}
+
+function StatementTable({ layout, section, years, rows, nHist, hide }: {
+  layout: LayoutLine[]; section: string; years: string[]; rows: Row[]; nHist: number; hide?: Set<string>
+}) {
   const lines: [string, string, LineKind][] = []
-  let section = ''
+  let at = ''
   for (const [label, key, kind] of layout) {
-    if (kind === 'head') section = label
-    else if (key && section === tab && !hide?.has(key) && !(OPTIONAL.has(key) && rows.every(r => !r[key])))
+    if (kind === 'head') at = label
+    else if (key && at === section && !hide?.has(key) && !(OPTIONAL.has(key) && rows.every(r => !r[key])))
       lines.push([label, key, kind as LineKind])
   }
-
   return (
-    <section className="statements" aria-label="Financial statements">
-      <div className="tabs" role="tablist" aria-label="Statement">
-        {TABS.map(([id, name], i) => (
-          <button key={id} id={`stmt-tab-${i}`} role="tab" type="button" aria-selected={tab === id} className="tab"
-            aria-controls="stmt-panel" tabIndex={tab === id ? 0 : -1} onClick={() => setTab(id)}
-            onKeyDown={e => groupKeys(e, TABS.map(t => t[0] as string), tab, setTab)}>
-            {name}
-          </button>
-        ))}
-      </div>
-      <div className="table-wrap" id="stmt-panel" role="tabpanel" tabIndex={0}
-        aria-labelledby={`stmt-tab-${TABS.findIndex(t => t[0] === tab)}`}>
-        {tab === 'QUARTERS' && quarterly ? <QuarterTable {...quarterly} /> : <table>
-          <thead>
-            <tr>
-              <th scope="col">{tab === 'RATIOS' ? 'Ratio' : 'Rs crore'}</th>
-              {years.map((y, i) => <th scope="col" key={y} className={i >= nHist ? 'proj' : undefined}>{y}</th>)}
+    <div className="table-wrap" tabIndex={0} role="region" aria-labelledby="page-h">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">{section === 'RATIOS' ? 'Ratio' : 'Rs crore'}</th>
+            {years.map((y, i) => <th scope="col" key={y} className={i >= nHist ? 'proj' : undefined}>{y}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map(([label, key, kind]) => (
+            <tr key={key} id={key} tabIndex={-1} className={TOTALS.has(key) ? 'total' : undefined}>
+              <th scope="row">{label}</th>
+              {rows.map((r, i) => (
+                <td key={years[i]} className={i >= nHist ? 'proj' : undefined}>{fmt(r[key], kind)}</td>
+              ))}
             </tr>
-          </thead>
-          <tbody>
-            {lines.map(([label, key, kind]) => (
-              <tr key={key} className={TOTALS.has(key) ? 'total' : undefined}>
-                <th scope="row">{label}</th>
-                {rows.map((r, i) => (
-                  <td key={years[i]} className={i >= nHist ? 'proj' : undefined}>{fmt(r[key], kind)}</td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>}
-      </div>
-      {tab === 'RATIOS' && (
-        <p className="muted small">
-          ROE = net profit / average equity. ROCE = EBIT / average (equity + borrowings + lease liabilities), EBIT = profit before tax +
-          interest. Asset turnover = revenue / average total assets. Averages use opening and closing balances; the
-          first year uses closing. Net debt = borrowings + lease liabilities − cash − investments. – means not meaningful (zero or
-          negative denominator).
-        </p>
-      )}
-      {tab === 'QUARTERS' && quarterly && (
-        <p className="muted small">
-          As reported, last {Math.min(quarterly.quarters.dates.length, SHOW)} quarters. Operating profit = profit before
-          tax + interest + depreciation − other income, the same as EBITDA in the yearly tables. TTM (trailing twelve
-          months) adds up the last four quarters{quarterly.ttm ? ` to ${month(quarterly.ttm.end)}` : ''}. YoY (year
-          on year) compares a quarter with the same quarter a year earlier, and TTM with the four quarters before it.
-          {!quarterly.ttm && ' No TTM here: the last four quarters in the file aren’t consecutive.'}
-        </p>
-      )}
-    </section>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 

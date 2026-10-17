@@ -1181,6 +1181,7 @@ def library_check(root, co, scenarios):
     assert back == {**data, "saved_at": at}, "round trip must restore scenarios, fades, horizon, exclusions"
     assert back["scenarios"]["bear"]["growth"]["end"] is not None and back["scenarios"]["base"]["tax_rate"]["end"] is None
     restatement_check(server, root, co)
+    pages_check(server, root)
     # same day overwrites; a new day is a new version; the listing is newest first with final-year revenue
     server.save_model(doc.model_copy(update={"active": "bull"}), root, now=datetime(2026, 10, 15, 18, 0))
     server.save_model(doc, root, now=datetime(2026, 10, 16, 9, 0))
@@ -2136,6 +2137,35 @@ def xbrl_api_check(server, root, co, data):
         except ValidationError:
             pass
     server.delete_model(mid, root)
+
+
+def pages_check(server, root):
+    """The app's page addresses (/c/<slug>/<page>) get index.html, so a page opened cold from its URL loads; /api
+    paths and missing assets never fall back, and real files are served as they are."""
+    from fastapi import FastAPI  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    dist = root / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>app</title>")
+    (dist / "assets" / "app.js").write_text("console.log(1)")
+    (dist / "manifest.webmanifest").write_text("{}")
+    app = FastAPI()
+
+    @app.get("/api/models")
+    def _models():
+        return []
+
+    app.mount("/", server.AppPages(directory=dist, html=True))
+    c = TestClient(app)
+    for path in ("/", "/c/tcs/overview", "/c/tcs/statements/profit-and-loss?v=2026-10-17", "/c/jsw-steel-ltd/checks"):
+        r = c.get(path)
+        assert r.status_code == 200 and "<title>app</title>" in r.text, (path, r.status_code)
+    assert c.get("/assets/app.js").text == "console.log(1)"
+    assert c.get("/manifest.webmanifest").headers["content-type"].startswith("application/manifest+json")
+    assert c.get("/api/models").json() == []
+    for path in ("/api/nope", "/api/models/x/y/z/w", "/assets/missing.js", "/missing.png"):
+        assert c.get(path).status_code == 404, path
 
 
 def restatement_check(server, root, co):
