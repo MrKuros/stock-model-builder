@@ -81,8 +81,21 @@ export interface NoteNumbers {
   breakevens: Partial<Record<'growth' | 'ebitda_margin' | 'wacc' | 'g', BreakEven>> // empty without a price
   growth_scale: [number, number | null][] // flat revenue growth -> value per share, other inputs at base
 }
-/** A cell of the note's rule-check strip (model.rule_checks). */
-export interface RuleCheck { id: string; name: string; status: 'red' | 'amber' | 'clear' | 'filing'; fact: string; rule: string }
+/** A cell of the note's rule-check strip (model.rule_checks); severity as on the forensic radar. */
+export interface RuleCheck { id: string; name: string; status: 'red' | 'amber' | 'clear' | 'filing'; severity?: Severity; fact: string; rule: string }
+export type Severity = 'high' | 'medium' | 'low' | 'ok' | 'not_checked'
+/** One forensic rule (model.forensic): rules only; `needs` = a filing that would let it run. */
+export interface Forensic {
+  key: string; title: string; severity: Severity; value: number | null; threshold: number | null; years: string[]
+  fact: string; detail: string; rule: string; needs: string | null
+  parts?: Record<string, number> // the M-score's eight ratios
+  approx?: string[] // ... and how each one Screener lacks is approximated
+}
+/** An approved explanation of a forensic flag, doc.flag_notes: words only, AI-written, cited or from the numbers. */
+export interface FlagNote {
+  key: string; year: string; proposal: string; summary: string; file: string | null; page: number | null
+  quote: string | null; from_numbers: boolean; ai: true
+}
 /** A measure's last reported year against the median of the three years before (model.key_numbers). */
 export interface KeyNumber { key: string; label: string; kind: 'pct' | 'x' | 'days'; year: string; last: number | null; typical: number | null }
 export interface Cagr { from: string; to: string; value: number }
@@ -96,7 +109,7 @@ export interface Filing {
 }
 /** Something read by AI that could change a number: shown with its source and checks, used only once approved. */
 export interface Proposal {
-  id: string; kind: 'mapping' | 'oneoff_note' | 'ar_note'; field: string; value: unknown; unit: string | null
+  id: string; kind: 'mapping' | 'oneoff_note' | 'ar_note' | 'flag_note'; field: string; value: unknown; unit: string | null
   period: string | null; source: { file: string | null; page?: number | null; quote?: string | null; tag?: string | null }
   reasoning: string; checks: Check[]; status: 'proposed' | 'approved' | 'rejected'; ai: boolean
   filing?: string // a mapping: the id of the filing whose unmapped tag it maps
@@ -108,7 +121,11 @@ export interface Proposal {
 /** One value of an annual-report note, in Rs crore (converted by rules), with where it was read. */
 export interface ArRow { label: string; amount: number | null; raw: unknown; page: number; quote: string }
 /** An annual-report note's value (proposal.value for kind ar_note): rows, their sum, and what it's compared with. */
-export interface ArValue { rows: ArRow[]; total: number; against: { label: string; value: number } | null }
+export interface ArValue {
+  rows: ArRow[]; total: number; against: { label: string; value: number } | null
+  // the auditor topic: words checked against the quotes (rows carry the quotes, amounts null)
+  auditor?: string; opinion?: 'unmodified' | 'qualified' | 'adverse' | 'disclaimer'; changed?: boolean
+}
 /** An approved annual-report note, notes[`ar:${topic}:${year}`]. AI-read, rule-checked, approved by you. */
 export interface ArNote extends ArValue { proposal: string; topic: string; year: string; file: string | null; ai: true }
 /** POST /api/notes/plan: the pages rules pick per topic and the exact prompt size, before anything is sent. */
@@ -140,7 +157,7 @@ export interface ModelDoc {
   // Phase 4 blocks (version 6): written by 4.2-4.4; 4.1 shows their slots empty
   note: Record<string, unknown> | null
   assumption_sources: Record<string, unknown>
-  flag_notes: Record<string, unknown>[]
+  flag_notes: FlagNote[] // 4.3: approved explanations of forensic flags
   reviewed_at: string | null // "Mark as reviewed"; cleared when the model changes
 }
 /** A reported year whose metric sits far from the company's own median (model.detect_oneoffs). */
@@ -165,6 +182,7 @@ export interface Parsed {
   ttm_prev?: Ttm | null // the four quarters a year earlier, for TTM growth
   restated?: Restated | null // only on a fresh upload; null when no model of this company is saved
   rule_checks?: RuleCheck[] // red, amber, clear, then needs-a-filing (missing on an old server)
+  forensic?: Forensic[] // the full radar, fixed order (missing on an old server)
   key_numbers?: KeyNumber[]
   cagrs?: Record<'3' | '5', Cagr[]> // every rolling 3- and 5-year revenue CAGR
   valuation: ValInputs // defaults for a new document

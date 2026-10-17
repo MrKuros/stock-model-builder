@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { withNotes } from './Sources'
+import { withFlagNotes, withNotes } from './Sources'
 import Note from './Note'
 import ModelView, { UPGRADED, type Upgrade } from './Model'
 import Evidence from './Evidence'
@@ -385,7 +385,10 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
     setUpgrades([])
   }
   const onProposals = (f: (ps: Proposal[]) => Proposal[]) =>
-    setDoc(d => { const proposals = f(d.proposals); return { ...d, proposals, notes: withNotes(d.notes, proposals) } })
+    setDoc(d => {
+      const proposals = f(d.proposals)
+      return { ...d, proposals, notes: withNotes(d.notes, proposals), flag_notes: withFlagNotes(proposals) }
+    })
 
   const [pendingYear, setPendingYear] = useState<string | null>(null)
   const [defaultsNote, setDefaultsNote] = useState('')
@@ -423,7 +426,7 @@ function Workspace({ parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, onC
   const m = company.market
   const price = valuation.price ?? m?.price ?? null
   const shares = valuation.shares ?? m?.shares ?? null
-  const ai = Object.values(notes).some(x => (x as { ai?: boolean })?.ai) || doc.note != null
+  const ai = Object.values(notes).some(x => (x as { ai?: boolean })?.ai) || doc.note != null || doc.flag_notes.length > 0
   const tabs = useMemo(() => VIEWS, [])
 
   return (

@@ -949,62 +949,313 @@ def key_numbers(hist, labels):
             for k, lab, kind, xs in series]
 
 
-def rule_checks(hist, labels, oneoffs, issues, notes=None):
-    """The note's rule-check strip: [{id, name, status (red | amber | clear | filing), fact, rule}], red first.
-    Rules only; thresholds are deliberately plain (ponytail: fixed cut-offs, per-sector bands in 4.3)."""
-    out, last, y = [], hist[-1], labels[-1]
-    recent = labels[-3:]
-    for o in oneoffs:  # unusual years among the last three, red when it's the latest
-        if o["year"] in recent:
-            name = dict((k, w) for k, w, _, _ in ONEOFF)[o["metric"]]
-            out.append({"id": f"oneoff-{o['metric']}-{o['year']}", "name": name[0].upper() + name[1:],
-                        "status": "red" if o["year"] == y else "amber",
-                        "fact": f"{_pct(o['value'])} in {o['year']}, typically {_pct(o['typical'])}",
-                        "rule": "More than 2 sigma (1.4826 x MAD) from the company's own median, and past a floor"})
-    if issues:
-        out.append({"id": "data", "name": "Reported data", "status": "amber",
-                    "fact": f"{len(issues)} issue{'s' * (len(issues) > 1)} in the export",
-                    "rule": "Assets = liabilities, lines add to totals, PBT - tax = profit, 12-month years"})
-    w = [h for h in hist[-3:] if h.get("cfo") is not None]
-    pat = sum(h["pat"] for h in w)
-    if w and pat > 0:
+# ---------- forensic radar (4.3): rules detect, AI only explains (words, cited) ----------
+
+# Thresholds as (high, medium[, low]). ponytail: one set of cut-offs for every sector; per-sector bands once peers
+# exist (5.2). Each line says why the cut-off sits there.
+CASH_CONV = (0.5, 0.8)  # CFO / net profit summed over the window: under 0.8 a fifth of profit isn't cash; under 0.5, half
+DAYS_UP = (0.5, 0.2, 0.1)  # receivable / inventory days up this share over 3 years = the book growing faster than sales
+DAYS_MIN = (30, 10, 5)  # ... and by at least these many days, so a 10-day book can't flag on a 2-day wobble
+CWIP_SHARE = (0.6, 0.3, 0.15)  # capital WIP / net block, only while rising: plant not yet earning (or costs parked there)
+OI_SHARE = (0.5, 0.3, 0.2)  # other income / PBT over 3 years: profit that doesn't come from the business
+TAX_SWING = (0.20, 0.10)  # max - min effective tax rate over the last 5 profit years; a steady payer moves 2-3 pp
+DEBT_PACE = (0.25, 0.10)  # debt CAGR minus EBITDA CAGR, 3 years, when debt is up 30%+ and net debt > 0: borrowing outruns earnings
+DEBT_UP = 0.30  # ... the 30%: smaller rises are ordinary refinancing noise
+ND_EBITDA = (3.5, 2.0)  # net debt / EBITDA: lenders' usual comfort is under 2-2.5x; past 3.5x covenants bite
+COVER = (1.5, 3.0)  # EBIT / interest: under 3x one bad year hurts; under 1.5x profit barely pays the interest
+NWC_DRIFT = (0.15, 0.08, 0.04)  # working capital / revenue, last year against the median of the 3 before (pp of revenue)
+M_SCORE = (-1.78, -2.22)  # Beneish (1999): above -1.78 most manipulators in his sample; -2.22 the stricter screen
+NOTE_SHARE = (0.25, 0.10)  # contingent liabilities / net worth and related-party transactions / revenue
+PLEDGE = (0.50, 0.20, 0.0)  # promoter shares pledged: any pledge is worth knowing, a fifth is a risk, half is a margin call away
+SEVERITY = ("high", "medium", "low", "ok", "not_checked")
+
+
+def _sev(x, cuts, below=False):
+    """'high' | 'medium' | 'low' | 'ok' for x against (high, medium[, low]) cut-offs; below=True when less is worse."""
+    for s, c in zip(SEVERITY, cuts):
+        if (x < c) if below else (x > c):
+            return s
+    return "ok"
+
+
+def _worst(*s):
+    return min(s, key=SEVERITY.index)
+
+
+def _cagr(a, b, n):
+    return (b / a) ** (1 / n) - 1 if a > 0 and b > 0 else None
+
+
+def _note(notes, topic):
+    """The latest approved annual-report note for the topic ("ar:<topic>:FY2025") as (year, note), or (None, None)."""
+    k = max((k for k, v in (notes or {}).items() if k.startswith(f"ar:{topic}:") and isinstance(v, dict)),
+            default=None, key=lambda k: k.split(":")[2])
+    return (k.split(":")[2], notes[k]) if k else (None, None)
+
+
+def _mscore(p, h, cogs):
+    """Beneish M-score (8 variables) for year h against p, approximated from what Screener has. (score, parts, notes)
+    or None when cash flow, receivables or a positive margin is missing. Weights are Beneish's 1999 ones."""
+    if h.get("cfo") is None or not (p["revenue"] > 0 and h["revenue"] > 0 and p["receivables"] > 0 and h["total_assets"] > 0
+                                    and p["total_assets"] > 0):
+        return None
+    gm = ((lambda r: (r["revenue"] - r["cogs"]) / r["revenue"]) if cogs and p.get("cogs") is not None and h.get("cogs") is not None
+          else (lambda r: r["ebitda"] / r["revenue"]))
+    if gm(p) <= 0 or gm(h) <= 0:
+        return None
+    lev = lambda r: (_debt(r) + r["other_liab"] + (r.get("payables") or 0.0)) / r["total_assets"]  # noqa: E731
+    dr = lambda r: r["dep"] / (r["dep"] + r["net_block"]) if r["dep"] + r["net_block"] > 0 else None  # noqa: E731
+    parts = {"DSRI": (h["receivables"] / h["revenue"]) / (p["receivables"] / p["revenue"]), "GMI": gm(p) / gm(h),
+             "AQI": 1.0, "SGI": h["revenue"] / p["revenue"],
+             "DEPI": dr(p) / dr(h) if dr(p) and dr(h) else 1.0, "SGAI": 1.0,
+             "LVGI": lev(h) / lev(p) if lev(p) > 0 else 1.0, "TATA": (h["pat"] - h["cfo"]) / h["total_assets"]}
+    w = {"DSRI": 0.92, "GMI": 0.528, "AQI": 0.404, "SGI": 0.892, "DEPI": 0.115, "SGAI": -0.172, "TATA": 4.679, "LVGI": -0.327}
+    approx = ["asset quality (AQI) set to 1: Screener doesn't split current from non-current assets",
+              "SG&A (SGAI) set to 1: not read from the export"]
+    if not (cogs and p.get("cogs") is not None and h.get("cogs") is not None):
+        approx.insert(0, "gross margin (GMI) read as EBITDA margin: no cost of goods in the export")
+    approx.append("leverage (LVGI) uses borrowings + other liabilities, current and long-term together")
+    return -4.84 + sum(w[k] * v for k, v in parts.items()), parts, approx
+
+
+def forensic(hist, labels, notes=None):
+    """The forensic radar: [{key, title, severity (high | medium | low | ok | not_checked), value, threshold, years,
+    fact, detail, rule, needs}], in a fixed order. Rules only, on the reported years (and approved annual-report
+    notes); `needs` = "annual report" when a filing would let the check run. AI never touches these numbers."""
+    out, n, last, y = [], len(hist), hist[-1], labels[-1]
+    span = lambda k: f"{labels[-k]}–{y}"  # noqa: E731
+
+    def add(key, title, sev, value, threshold, years, fact, detail, rule, needs=None):
+        out.append({"key": key, "title": title, "severity": sev, "value": value, "threshold": threshold,
+                    "years": years, "fact": fact, "detail": detail, "rule": rule, "needs": needs})
+
+    # cash conversion, 3 and 5 years
+    for k, key in ((3, "cash"), (5, "cash5")):
+        rule = (f"Operating cash flow / net profit, summed over the last {k} years: below {CASH_CONV[1]}x medium, "
+                f"{CASH_CONV[0]}x high")
+        title = f"Cash conversion, {k} yrs"
+        w = hist[-k:]
+        if n < k or any(h.get("cfo") is None for h in w):
+            add(key, title, "not_checked", None, CASH_CONV[1], labels[-k:], f"Needs {k} years of cash flow",
+                f"The export has fewer than {k} years of operating cash flow.", rule)
+            continue
+        pat = sum(h["pat"] for h in w)
+        if pat <= 0:
+            add(key, title, "not_checked", None, CASH_CONV[1], labels[-k:], "Losses over the window",
+                f"Net profit over {span(k)} adds up to a loss, so cash conversion means nothing.", rule)
+            continue
         cc = sum(h["cfo"] for h in w) / pat
-        out.append({"id": "cash", "name": "Cash conversion", "status": "red" if cc < 0.5 else "amber" if cc < 0.8 else "clear",
-                    "fact": f"CFO {cc:.2f}x profit, last {len(w)} years",
-                    "rule": "Operating cash flow / net profit, summed over the last 3 years: below 0.8 amber, 0.5 red"})
-    dso = [x["dso"] for x in ratios(hist)]
-    typ = _median_before(dso)
-    if dso[-1] is not None and typ:
-        up = dso[-1] - typ
-        out.append({"id": "dso", "name": "Receivable days",
-                    "status": "red" if up > 30 and dso[-1] > typ * 1.3 else "amber" if up > 7 and dso[-1] > typ * 1.1 else "clear",
-                    "fact": f"{dso[-1]:.0f} days in {y}, 3-yr median {typ:.0f}",
-                    "rule": "Receivables x 365 / revenue against the 3 years before: +10% and 7 days amber, +30% and 30 days red"})
+        add(key, title, _sev(cc, CASH_CONV, below=True), cc, CASH_CONV[1], labels[-k:], f"CFO {cc:.2f}x profit, {span(k)}",
+            f"Over {span(k)} operating cash flow was {cc:.2f}x net profit: Rs {_inr(100 * cc)} of cash for every Rs 100 "
+            f"of profit.", rule)
+
+    # receivable and inventory days stretching faster than revenue (3 years)
+    cogs = on_cogs(hist)
+    for key, title, line, base, what in (("dso", "Receivable days", "receivables", "revenue", "revenue"),
+                                         ("dio", "Inventory days", "inventory", "cogs" if cogs else "revenue",
+                                          "cost of goods" if cogs else "revenue")):
+        rule = (f"{line.capitalize()} x 365 / {what}, against 3 years before: up {DAYS_UP[2]:.0%} and {DAYS_MIN[2]} days low, "
+                f"{DAYS_UP[1]:.0%} and {DAYS_MIN[1]} days medium, {DAYS_UP[0]:.0%} and {DAYS_MIN[0]} days high")
+        if n < 4:
+            add(key, title, "not_checked", None, None, labels, "Needs 4 years", "Needs four reported years.", rule)
+            continue
+        p = hist[-4]
+        b0, b1 = p.get(base) or 0.0, last.get(base) or 0.0
+        if b0 <= 0 or b1 <= 0:
+            add(key, title, "not_checked", None, None, [labels[-4], y], f"No {what} to divide by", f"No {what} in {labels[-4]} or {y}.", rule)
+            continue
+        d0, d1 = p[line] * 365 / b0, last[line] * 365 / b1
+        if d0 < DAYS_MIN[2] and d1 < DAYS_MIN[2]:
+            add(key, title, "ok", d1, None, [labels[-4], y], f"{d1:.0f} days in {y}",
+                f"Under {DAYS_MIN[2]} days of {what} in {labels[-4]} and {y}: nothing to stretch.", rule)
+            continue
+        up = d1 / d0 - 1 if d0 > 0 else math.inf
+        sev = next((s for s, u, m in zip(SEVERITY, DAYS_UP, DAYS_MIN) if up > u and d1 - d0 > m), "ok")
+        g_line, g_base = _cagr(p[line], last[line], 3), _cagr(b0, b1, 3)
+        pace = (f" {line.capitalize()} grew {_pct(g_line)} a year, {what} {_pct(g_base)}."
+                if g_line is not None and g_base is not None else "")
+        add(key, title, sev, d1, d0 * (1 + DAYS_UP[2]), [labels[-4], y], f"{d1:.0f} days, {d0:.0f} in {labels[-4]}",
+            f"{title} went from {d0:.0f} in {labels[-4]} to {d1:.0f} in {y}.{pace}", rule)
+
+    # capital work in progress piling up against the net block
+    rule = (f"Capital WIP / net block, while higher than 3 years before: above {CWIP_SHARE[2]:.0%} low, "
+            f"{CWIP_SHARE[1]:.0%} medium, {CWIP_SHARE[0]:.0%} high")
+    if n < 4 or last["net_block"] <= 0 or hist[-4]["net_block"] <= 0:
+        add("cwip", "Capital WIP", "not_checked", None, CWIP_SHARE[2], labels[-4:], "Needs 4 years and a net block",
+            "Needs four reported years with a positive net block.", rule)
+    else:
+        r0, r1 = hist[-4]["cwip"] / hist[-4]["net_block"], last["cwip"] / last["net_block"]
+        add("cwip", "Capital WIP", _sev(r1, CWIP_SHARE) if r1 > r0 else "ok", r1, CWIP_SHARE[2], [labels[-4], y],
+            f"{_pct(r1)} of net block, {_pct(r0)} in {labels[-4]}",
+            f"Capital work in progress is Rs {_inr(last['cwip'])} cr, {_pct(r1)} of the net block in {y} against "
+            f"{_pct(r0)} in {labels[-4]}" + (": spending that isn't earning yet." if r1 > r0 else ", and falling."), rule)
+
+    # other income as a share of profit before tax
+    rule = (f"Other income / profit before tax, summed over 3 years: above {OI_SHARE[2]:.0%} low, {OI_SHARE[1]:.0%} medium, "
+            f"{OI_SHARE[0]:.0%} high")
+    w = hist[-3:]
+    pbt, oi = sum(h["pbt"] for h in w), sum(h["other_income"] for h in w)
+    if pbt <= 0:
+        add("other_income", "Other income vs PBT", "not_checked", None, OI_SHARE[2], labels[-3:], "PBT not positive",
+            f"Profit before tax over {span(3)} adds up to a loss.", rule)
+    else:
+        add("other_income", "Other income vs PBT", _sev(oi / pbt, OI_SHARE), oi / pbt, OI_SHARE[2], labels[-3:],
+            f"{_pct(oi / pbt)} of PBT, {span(3)}",
+            f"Other income was {_pct(oi / pbt)} of profit before tax over {span(min(3, n))}"
+            + (" (Screener folds exceptional gains into it)." if oi / pbt > OI_SHARE[2] else "."), rule)
+
+    # tax-rate swings
+    rule = f"Effective tax rate (tax / PBT) over the last 5 profit years: a spread over {TAX_SWING[1]:.0%} medium, {TAX_SWING[0]:.0%} high"
+    pts = [(labels[i], hist[i]["tax"] / hist[i]["pbt"]) for i in range(max(0, n - 5), n) if hist[i]["pbt"] > 0]
+    if len(pts) < 3:
+        add("tax", "Tax-rate swing", "not_checked", None, TAX_SWING[1], [p[0] for p in pts], "Needs 3 profit years",
+            "Fewer than three profit years in the last five.", rule)
+    else:
+        lo, hi = min(pts, key=lambda t: t[1]), max(pts, key=lambda t: t[1])
+        add("tax", "Tax-rate swing", _sev(hi[1] - lo[1], TAX_SWING), hi[1] - lo[1], TAX_SWING[1], [p[0] for p in pts],
+            f"{_pct(lo[1])}–{_pct(hi[1])}, {pts[0][0]}–{pts[-1][0]}",
+            f"The effective tax rate ran from {_pct(lo[1])} ({lo[0]}) to {_pct(hi[1])} ({hi[0]}); it was {_pct(pts[-1][1])} "
+            f"in {pts[-1][0]}.", rule)
+
+    # debt: level against EBITDA, and pace against EBITDA over 3 years
     nd = _debt(last) - last["cash"] - last["investments"]
     nd_e = nd / last["ebitda"] if last["ebitda"] > 0 else None
-    out.append({"id": "debt", "name": "Net debt" if nd > 0 else "Net cash",
-                "status": "clear" if nd <= 0 else "red" if nd_e is None or nd_e > 3.5 else "amber" if nd_e > 2 else "clear",
-                "fact": f"Rs {_inr(abs(nd))} cr" + (f", {nd_e:.1f}x EBITDA" if nd > 0 and nd_e is not None else ""),
-                "rule": "Borrowings + leases - cash - investments; net debt over 2x EBITDA amber, 3.5x (or negative EBITDA) red"})
+    rule = (f"Net debt (borrowings + leases - cash - investments) / EBITDA: over {ND_EBITDA[1]}x medium, {ND_EBITDA[0]}x "
+            f"(or negative EBITDA) high; and debt up {DEBT_UP:.0%}+ in 3 years growing {DEBT_PACE[1]:.0%} a year faster "
+            f"than EBITDA medium, {DEBT_PACE[0]:.0%} high")
+    if nd <= 0:
+        add("debt", "Net cash", "ok", nd, ND_EBITDA[1], [y], f"Net cash Rs {_inr(-nd)} cr",
+            f"Cash and investments exceed borrowings by Rs {_inr(-nd)} cr in {y}.", rule)
+    else:
+        sev = "high" if nd_e is None else _sev(nd_e, ND_EBITDA)
+        txt = (f"Net debt is Rs {_inr(nd)} cr in {y}, " + (f"{nd_e:.1f}x EBITDA." if nd_e is not None else "with EBITDA negative."))
+        if n >= 4:
+            d0, e0 = _debt(hist[-4]), hist[-4]["ebitda"]
+            gd, ge = _cagr(d0, _debt(last), 3), _cagr(e0, last["ebitda"], 3)
+            if gd is not None and _debt(last) > d0 * (1 + DEBT_UP):
+                if ge is None:
+                    sev, txt = _worst(sev, "medium"), txt + f" Debt grew {_pct(gd)} a year since {labels[-4]} while EBITDA fell below zero."
+                else:
+                    sev = _worst(sev, _sev(gd - ge, DEBT_PACE))
+                    txt += f" Debt grew {_pct(gd)} a year since {labels[-4]}, EBITDA {_pct(ge)}."
+        add("debt", "Net debt", sev, nd_e, ND_EBITDA[1], [labels[-4] if n >= 4 else y, y],
+            f"Rs {_inr(nd)} cr" + (f", {nd_e:.1f}x EBITDA" if nd_e is not None else ", EBITDA negative"), txt, rule)
+
+    # interest cover
+    rule = f"EBIT (PBT + interest) / interest: below {COVER[1]:.0f}x medium, {COVER[0]}x high"
     ebit = last["pbt"] + last["interest"]
     if last["interest"] > 0:
         cov = ebit / last["interest"]
-        out.append({"id": "cover", "name": "Interest cover", "status": "red" if cov < 1.5 else "amber" if cov < 3 else "clear",
-                    "fact": f"{cov:.1f}x in {y}", "rule": "EBIT / interest: below 3x amber, 1.5x red"})
+        add("cover", "Interest cover", _sev(cov, COVER, below=True), cov, COVER[1], [y], f"{cov:.1f}x in {y}",
+            f"Operating profit covered interest {cov:.1f} times in {y}.", rule)
+    else:
+        add("cover", "Interest cover", "ok", None, COVER[1], [y], f"No interest in {y}", f"No interest expense in {y}.", rule)
+
+    # working capital drifting up against revenue
+    rule = (f"(Receivables + inventory + other current assets - other liabilities - payables) / revenue, last year against "
+            f"the median of the 3 before: up {NWC_DRIFT[2] * 100:.0f} pp low, {NWC_DRIFT[1] * 100:.0f} pp medium, "
+            f"{NWC_DRIFT[0] * 100:.0f} pp high")
+    wc = [(h["receivables"] + h["inventory"] + h["other_ca"] - h["other_liab"] - (h.get("payables") or 0.0)) / h["revenue"]
+          if h["revenue"] > 0 else None for h in hist]
+    typ = _median_before(wc)
+    if wc[-1] is None or typ is None:
+        add("nwc", "Working capital", "not_checked", None, NWC_DRIFT[2], labels[-4:], "Needs 3 earlier years",
+            "Needs the last year and at least two of the three before it.", rule)
+    else:
+        add("nwc", "Working capital", _sev(wc[-1] - typ, NWC_DRIFT), wc[-1] - typ, NWC_DRIFT[2], labels[-4:],
+            f"{_pct(wc[-1])} of revenue, median {_pct(typ)}",
+            f"Working capital was {_pct(wc[-1])} of revenue in {y} against a median of {_pct(typ)} in the three years before.",
+            rule)
+
+    # Beneish M-score, approximated
+    rule = (f"Beneish M-score (8 variables, 1999 weights) on {labels[-2] if n > 1 else y} to {y}: above {M_SCORE[1]} low, above "
+            f"{M_SCORE[0]} medium. Approximated from Screener, so never high")
+    m = _mscore(hist[-2], last, cogs) if n > 1 else None
+    if m is None:
+        add("mscore", "M-score", "not_checked", None, M_SCORE[0], labels[-2:], "Missing inputs",
+            "Needs two years with operating cash flow, receivables and a positive margin.", rule)
+    else:
+        score, parts, approx = m
+        add("mscore", "M-score", _sev(score, (math.inf, *M_SCORE)), score, M_SCORE[0], labels[-2:], f"{score:.2f} for {y}",
+            f"The Beneish M-score is {score:.2f} for {y}, approximated from Screener (above {M_SCORE[0]} looked like "
+            "manipulation in Beneish's sample).", rule)
+        out[-1].update(parts=parts, approx=approx)
+
+    # from approved annual-report notes only
     net_worth = last["share_cap"] + last["reserves"]
-    for topic, name, base, what, cut in (("contingent", "Contingent liabilities", net_worth, "net worth", 0.10),
-                                          ("related", "Related parties", last["revenue"], "revenue", 0.10)):
-        k = max((k for k in (notes or {}) if k.startswith(f"ar:{topic}:")), default=None)
-        t = k and isinstance(notes[k], dict) and notes[k].get("total")
-        if isinstance(t, (int, float)) and math.isfinite(t) and base > 0:
-            out.append({"id": topic, "name": name, "status": "amber" if t / base > cut else "clear",
-                        "fact": f"Rs {_inr(t)} cr, {_pct(t / base)} of {what} ({k.split(':')[2]})",
-                        "rule": f"Approved annual-report note against {what}: above {cut:.0%} amber"})
-        else:
-            out.append({"id": topic, "name": name, "status": "filing", "fact": "Needs the annual report",
-                        "rule": "Attach the annual report and read its notes (Evidence)"})
+    for topic, title, base, what in (("contingent", "Contingent liabilities", net_worth, "net worth"),
+                                     ("related", "Related parties", last["revenue"], "revenue")):
+        rule = (f"Approved annual-report note against {what}: above {NOTE_SHARE[1]:.0%} medium, {NOTE_SHARE[0]:.0%} high"
+                + ("; dividends paid to the promoter group are left out (paid pro rata to all shareholders)" if topic == "related" else ""))
+        yr, nt = _note(notes, topic)
+        rows = [r for r in (nt or {}).get("rows") or [] if isinstance(r, dict) and isinstance(r.get("amount"), (int, float))
+                and math.isfinite(r["amount"])]
+        if topic == "related":
+            rows = [r for r in rows if "dividend" not in str(r.get("label", "")).lower()]
+        t = sum(abs(r["amount"]) for r in rows) if rows else (nt or {}).get("total")
+        if not isinstance(t, (int, float)) or not math.isfinite(t) or base <= 0:
+            add(topic, title, "not_checked", None, NOTE_SHARE[1], [], "Needs the annual report",
+                f"Attach an annual report and read its {title.lower()} note.", rule, "annual report")
+            continue
+        add(topic, title, _sev(t / base, NOTE_SHARE), t / base, NOTE_SHARE[1], [yr],
+            f"Rs {_inr(t)} cr, {_pct(t / base)} of {what} ({yr})",
+            f"{title} in the {yr} annual report add up to Rs {_inr(t)} cr, {_pct(t / base)} of {y} {what}.", rule)
+
+    yr, nt = _note(notes, "pledge")
+    rule = f"Promoter shares pledged or encumbered (approved annual-report note): any low, over {PLEDGE[1]:.0%} medium, over {PLEDGE[0]:.0%} high"
+    pct = (nt or {}).get("total")
+    if isinstance(pct, (int, float)) and math.isfinite(pct) and 0 <= pct <= 100:
+        add("pledge", "Promoter pledge", _sev(pct / 100, PLEDGE), pct / 100, PLEDGE[1], [yr], f"{_pct(pct / 100)} pledged ({yr})",
+            f"The {yr} annual report shows {_pct(pct / 100)} of promoter shares pledged or encumbered.", rule)
+    else:
+        add("pledge", "Promoter pledge", "not_checked", None, PLEDGE[1], [], "Needs the annual report",
+            "Attach an annual report and read its promoter pledge note (shareholding pattern).", rule, "annual report")
+
+    rule = ("Approved auditor's-report note: adverse opinion or disclaimer high, qualified medium, a change of auditor low "
+            "(rotation is compulsory every 5-10 years, so a change alone is mild)")
+    aud = sorted(((k.split(":")[2], v) for k, v in (notes or {}).items() if k.startswith("ar:auditor:") and isinstance(v, dict)),
+                 key=lambda t: t[0])
+    if aud:
+        yr, nt = aud[-1]
+        op = nt.get("opinion") if nt.get("opinion") in ("unmodified", "qualified", "adverse", "disclaimer") else "unmodified"
+        firms = [re.sub(r"[^a-z ]", "", str(v.get("auditor", "")).lower()).replace(" llp", "").strip() for _, v in aud]
+        changed = bool(nt.get("changed")) or len(set(f for f in firms if f)) > 1
+        sev = {"adverse": "high", "disclaimer": "high", "qualified": "medium"}.get(op, "low" if changed else "ok")
+        add("auditor", "Auditor", sev, None, None, [t[0] for t in aud],
+            f"{op.capitalize()} opinion{', changed' if changed else ''} ({yr})",
+            f"{nt.get('auditor') or 'The auditor'} gave {'an' if op[0] in 'aeiou' else 'a'} {op} opinion on {yr}"
+            + (", and the auditor changed." if changed else "."), rule)
+    else:
+        add("auditor", "Auditor", "not_checked", None, None, [], "Needs the annual report",
+            "Attach an annual report and read its auditor's report.", rule, "annual report")
+    return out
+
+
+STRIP = {"high": "red", "medium": "amber", "low": "amber", "ok": "clear", "not_checked": "filing"}
+
+
+def rule_checks(hist, labels, oneoffs, issues, notes=None, radar=None):
+    """The note's rule-check strip: [{id, name, status (red | amber | clear | filing), severity, fact, rule}]; red,
+    amber (medium before low), clear, then waiting for a filing. One-off years in the last 3 (red if the latest), data
+    issues, then the forensic radar (`radar`, else computed); checks that can't run on this data are left out."""
+    out, y = [], labels[-1]
+    for o in oneoffs:
+        if o["year"] in labels[-3:]:
+            name = dict((k, w) for k, w, _, _ in ONEOFF)[o["metric"]]
+            out.append({"id": f"oneoff-{o['metric']}-{o['year']}", "name": name[0].upper() + name[1:],
+                        "status": "red" if o["year"] == y else "amber", "severity": "high" if o["year"] == y else "medium",
+                        "fact": f"{_pct(o['value'])} in {o['year']}, typically {_pct(o['typical'])}",
+                        "rule": "More than 2 sigma (1.4826 x MAD) from the company's own median, and past a floor"})
+    if issues:
+        out.append({"id": "data", "name": "Reported data", "status": "amber", "severity": "medium",
+                    "fact": f"{len(issues)} issue{'s' * (len(issues) > 1)} in the export",
+                    "rule": "Assets = liabilities, lines add to totals, PBT - tax = profit, 12-month years"})
+    for f in radar if radar is not None else forensic(hist, labels, notes):
+        if f["severity"] != "not_checked" or f["needs"]:
+            out.append({"id": f["key"], "name": f["title"], "status": STRIP[f["severity"]], "severity": f["severity"],
+                        "fact": f["fact"], "rule": f["rule"]})
     order = {"red": 0, "amber": 1, "clear": 2, "filing": 3}
-    return sorted(out, key=lambda c: order[c["status"]])
+    return sorted(out, key=lambda c: (order[c["status"]], SEVERITY.index(c["severity"])))
 
 
 def expand(assumptions, n):
