@@ -936,7 +936,7 @@ a.cell { color: var(--ink); text-decoration: none; }
 .stmt-tabs { display: flex; gap: 2px; flex-wrap: wrap; border-bottom: 1px solid var(--rule); margin-bottom: 12px; }
 .stmt-tabs a { padding: 10px 12px 9px; font-size: 14px; color: var(--ink-2); text-decoration: none; border-bottom: 2px solid transparent; white-space: nowrap; }
 .stmt-tabs a:hover { color: var(--ink); }
-.stmt-tabs a[aria-current="page"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--ink); }
+.stmt-tabs a[aria-current] { color: var(--ink); font-weight: 600; border-bottom-color: var(--ink); }
 .statements tbody tr:focus { outline: 2px solid var(--ours); outline-offset: -2px; }
 .statements tbody tr:focus th, .statements tbody tr:focus td { background: var(--ours-soft); }
 .statements .table-wrap { margin: 0 -16px; }
