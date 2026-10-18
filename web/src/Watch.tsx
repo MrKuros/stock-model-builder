@@ -11,6 +11,7 @@ export function Prices({ models, watch, onDone }: { models: ModelSummary[]; watc
   const [state, setState] = useState<'idle' | 'running' | 'done' | 'stopped' | 'offline'>('idle')
   const [step, setStep] = useState<string | null>(null)
   const [missed, setMissed] = useState<string[]>([])
+  const [checked, setChecked] = useState(0)
   const ctl = useRef<AbortController | null>(null)
   const times = [...models.filter(m => m.symbol).map(m => m.price_live ? m.price_at : null), ...watch.map(w => w.at)]
   const oldest = times.filter((t): t is string => !!t).sort()[0] ?? null
@@ -21,14 +22,14 @@ export function Prices({ models, watch, onDone }: { models: ModelSummary[]; watc
     ctl.current = c
     setState('running'); setStep(null); setMissed([])
     const miss: string[] = []
-    let stopped = false
-    streamFetch<{ step?: string; failed?: { symbol: string; text: string }; error?: string; done?: true; stopped?: boolean }>({}, c.signal, e => {
+    let stopped = false, n = 0
+    streamFetch<{ step?: string; failed?: { symbol: string; text: string }; error?: string; done?: true; stopped?: boolean; checked?: number }>({}, c.signal, e => {
       if (e.step) setStep(e.step)
       if (e.failed) { miss.push(e.failed.symbol); setMissed([...miss]) }
       if (e.error) { stopped = true; setStep(e.error) }
-      if (e.done) stopped = !!e.stopped || miss.length > 0
+      if (e.done) { stopped = !!e.stopped || miss.length > 0; n = e.checked ?? 0 }
     }, '/api/watch/prices')
-      .then(() => { setState(stopped ? 'offline' : 'done'); onDone() })
+      .then(() => { setChecked(n); setState(stopped ? 'offline' : 'done'); onDone() })
       .catch(e => { if ((e as Error).name !== 'AbortError') { setStep((e as Error).message); setState('offline') } })
   }
   useEffect(() => { if (times.length && stale) run() }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -44,6 +45,9 @@ export function Prices({ models, watch, onDone }: { models: ModelSummary[]; watc
         ? <><span className="small muted" role="status">{step ?? 'Checking prices…'}</span>
           <button type="button" className="link" onClick={() => { ctl.current?.abort(); setState('stopped') }}>Stop</button></>
         : <button type="button" className="link" onClick={run}>Refresh prices</button>}
+      {state === 'done' && <span className="small muted" role="status">{checked
+        ? `Updated ${checked} price${checked > 1 ? 's' : ''}.`
+        : `Prices are under 15 minutes old, so NSE wasn’t asked again${oldest ? `. Try after ${clock(new Date(new Date(oldest).getTime() + FRESH).toISOString())}` : ''}.`}</span>}
       {state === 'stopped' && <span className="small muted" role="status">Stopped. Prices already checked are shown; the rest are the last ones kept.</span>}
       {state === 'offline' && <span className="small warn" role="status">Couldn’t reach NSE{missed.length ? ` for ${missed.join(', ')}` : ''}.
         Showing the last prices kept{oldest ? `, from ${clock(oldest)}` : ''}. Try again in a minute.</span>}

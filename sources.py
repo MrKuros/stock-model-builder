@@ -5,8 +5,9 @@ library folder (models/_cache), so everything fetched once works offline."""
 import contextlib
 import csv
 import hashlib
-import io
+import http.client
 import http.cookiejar
+import io
 import json
 import math
 import os
@@ -39,6 +40,10 @@ class Offline(Exception):
     """The site couldn't be reached or refused, and nothing usable is cached. The message is for the user."""
 
 
+class NotFound(Offline):
+    """The site answered 404: no such page or symbol. Trying again won't change it."""
+
+
 def symbol(s):
     """An NSE symbol, strictly (A-Z, 0-9, & and -, at most 20), or ValueError: nothing else ever reaches a URL."""
     s = (s or "").strip().upper()
@@ -69,14 +74,19 @@ class Client:
         self.cache, self.hosts, self.home, self.gap, self.name = cache, hosts, home, gap, name
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
                                                   _Stay(hosts))
-        self.lock, self.last, self.warm = threading.Lock(), 0.0, False
+        # one request at a time per host, `gap` apart: a long report download from the archive host never holds up
+        # a search or a price on the main site (a stopped download still runs to its end in its thread)
+        self.locks = {h: threading.RLock() for h in hosts}
+        self.last, self.warm = dict.fromkeys(hosts, 0.0), False
 
     def path(self, url):
         return self.cache / (hashlib.sha1(url.encode()).hexdigest()[:24] + ".bin")
 
-    def get(self, url, max_age=LIST_AGE, limit=MAX_JSON, cached=False):
+    def get(self, url, max_age=LIST_AGE, limit=MAX_JSON, cached=False, check=None, stale=True):
         """(bytes, age in seconds): the cached copy while fresh (max_age None = forever), else the site's; when the site
-        fails, a stale copy is better than nothing. Offline when there's neither. cached=True never goes online."""
+        fails (or sends something `check` rejects, like a block page), a stale copy is better than nothing, unless
+        stale=False (the caller must know the site really answered). Offline when there's neither. cached=True never
+        goes online. Only what passes `check` is ever written to the cache."""
         if not allowed(url, self.hosts):
             raise Offline(f"Not fetched: {urllib.parse.urlsplit(url or '').hostname or url!r} isn't one of the sites this app reads.")
         p = self.path(url)
@@ -87,8 +97,11 @@ class Client:
             raise Offline("Not checked yet.")
         try:
             data = self.fetch(url, limit)
+            if check and not check(data):
+                raise Offline(f"{self.name} sent a page instead of data (it may be blocking automated requests). "
+                              "Try again in a minute.")
         except Offline:
-            if age is not None:
+            if age is not None and stale:
                 return p.read_bytes(), age
             raise
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -98,51 +111,64 @@ class Client:
         os.replace(tmp, p)
         return data, 0.0
 
-    def json(self, url, max_age=LIST_AGE, cached=False):
-        data, age = self.get(url, max_age, cached=cached)
+    def json(self, url, max_age=LIST_AGE, cached=False, stale=True):
+        data, age = self.get(url, max_age, cached=cached, check=_is_json, stale=stale)
         try:
             return json.loads(data), age
         except ValueError:
-            self.path(url).unlink(missing_ok=True)  # a block page cached as data: never serve it again
+            self.path(url).unlink(missing_ok=True)  # a block page cached before pages were checked: never serve it again
             raise Offline(f"{self.name} sent a page instead of data (it may be blocking automated requests). "
-                          "Try again in a minute, or upload a Export export instead.") from None
+                          "Try again in a minute.") from None
 
     def fetch(self, url, limit):
-        with self.lock:  # one request at a time per client, at least `gap` apart
-            if not self.warm:
-                self._cookies()
+        host = urllib.parse.urlsplit(url).hostname
+        if not self.warm:
+            with self.locks.get(self._home_host(), threading.RLock()):
+                if not self.warm:
+                    self._cookies()
+        with self.locks[host]:  # one request at a time per host, at least `gap` apart
             try:
                 return self._raw(url, limit, API)
             except urllib.error.HTTPError as e:
                 if e.code not in (401, 403) or not self.home:
-                    raise Offline(self._why(e)) from None
-                self._cookies()  # an expired cookie: a fresh one, then once more
+                    raise (NotFound if e.code == 404 else Offline)(self._why(e)) from None
+                with self.locks.get(self._home_host(), threading.RLock()):
+                    self._cookies()  # an expired cookie: a fresh one, then once more
                 try:
                     return self._raw(url, limit, API)
-                except OSError as e2:
+                except (OSError, http.client.HTTPException) as e2:
                     raise Offline(self._why(e2)) from None
-            except OSError as e:  # URLError, timeouts, resets
+            except (OSError, http.client.HTTPException) as e:  # URLError, timeouts, resets, a cut-off chunked body
                 raise Offline(self._why(e)) from None
+
+    def _home_host(self):
+        return urllib.parse.urlsplit(self.home or "").hostname
 
     def _cookies(self):
         """The home page's cookies, as a browser would have them. NSE's home page often refuses clients that aren't
         browsers while its API still answers, so a refusal here is ignored."""
         self.warm = True
         if self.home:
-            with contextlib.suppress(OSError, Offline):
+            with contextlib.suppress(OSError, http.client.HTTPException, Offline):
                 self._raw(self.home, 2 << 20, PAGE)
 
     def _why(self, e):
+        """The failure in plain words (no socket error numbers)."""
         if isinstance(e, urllib.error.HTTPError):
             if e.code in (401, 403):
-                return f"{self.name} refused the request (HTTP {e.code}); it sometimes blocks automated requests for a while."
+                return f"{self.name} refused the request; it sometimes blocks automated requests for a while. Try again in a few minutes."
             if e.code == 404:
-                return f"{self.name} has no such page (HTTP 404)."
-            return f"{self.name} answered HTTP {e.code} ({e.reason})."
-        return f"Couldn't reach {self.name} ({getattr(e, 'reason', None) or e}). Check the internet connection."
+                return f"{self.name} doesn’t have that page."
+            return f"{self.name} had a problem answering (error {e.code}). Try again in a minute."
+        if isinstance(e, TimeoutError) or "timed out" in str(getattr(e, "reason", e)):
+            return f"{self.name} didn’t answer in time. Try again in a minute."
+        if isinstance(e, http.client.HTTPException):
+            return f"{self.name} cut the download short. Try again."
+        return f"Couldn’t reach {self.name}. Check the internet connection."
 
     def _raw(self, url, limit, kind):
-        wait = self.last + self.gap - time.monotonic()
+        host = urllib.parse.urlsplit(url).hostname
+        wait = self.last.get(host, 0.0) + self.gap - time.monotonic()
         if wait > 0:
             time.sleep(wait)
         try:
@@ -151,10 +177,13 @@ class Client:
                     raise Offline(f"{self.name} sent the request elsewhere; not followed.")
                 data = r.read(limit + 1)
                 enc = (r.headers.get("Content-Encoding") or "").lower()
+                n = r.headers.get("Content-Length") or ""
         finally:
-            self.last = time.monotonic()
+            self.last[host] = time.monotonic()
         if len(data) > limit:
             raise Offline(f"{url.rsplit('/', 1)[-1][:60]} is over {limit >> 20} MB, so it wasn't downloaded.")
+        if n.isdigit() and int(n) != len(data):  # the connection closed early: never keep half a file
+            raise Offline(f"{self.name} cut the download short. Try again.")
         if enc in ("gzip", "deflate"):
             d = zlib.decompressobj(zlib.MAX_WBITS | 32 if enc == "gzip" else zlib.MAX_WBITS)
             try:
@@ -163,7 +192,17 @@ class Client:
                 raise Offline(f"{self.name} sent a damaged download; try again.") from None
             if len(data) > limit or d.unconsumed_tail:
                 raise Offline(f"{url.rsplit('/', 1)[-1][:60]} is over {limit >> 20} MB, so it wasn't downloaded.")
+            if not d.eof:
+                raise Offline(f"{self.name} sent a damaged download; try again.")
         return data
+
+
+def _is_json(data):
+    try:
+        json.loads(data)
+        return True
+    except ValueError:
+        return False
 
 
 # ---------- what the exchange publishes, as plain lists ----------
@@ -193,13 +232,14 @@ SERIES = ("EQ", "BE", "SM", "ST")  # main board; trade-for-trade (new listings o
 
 def quote(c, sym, max_age=PRICE_AGE, cached=False):
     """{name, price (Rs), shares (crore), face_value, industry, sector, isin, listed, as_of, age} from NSE's quote,
-    trying the series a share may trade in. cached=True: the last quote kept, however old, never online."""
+    trying the series a share may trade in (NSE answers 404 for a series it doesn't trade in). cached=True: the last
+    quote kept, however old, never online. NotFound when no series has it."""
     for series in SERIES:
         try:
             d, age = c.json(f"{NSE}/api/NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N"
                             f"&series={series}&symbol={urllib.parse.quote(sym)}", max_age, cached)
-        except Offline:
-            if cached:
+        except Offline as e:
+            if cached or isinstance(e, NotFound):
                 continue
             raise
         try:
@@ -210,7 +250,7 @@ def quote(c, sym, max_age=PRICE_AGE, cached=False):
         if meta.get("companyName"):
             break
     else:
-        raise Offline(f"NSE has no quote for {sym}. Check the symbol, or upload a Export export instead.")
+        raise NotFound(f"NSE has no company with the symbol {sym}. Check the spelling, or type its name.")
     num = lambda v: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None  # noqa: E731
     price = num(trade.get("lastPrice")) or num(meta.get("closePrice")) or num(meta.get("previousClose"))
     issued, ffmc = num(trade.get("issuedSize")), num(trade.get("ffmc"))
@@ -221,14 +261,15 @@ def quote(c, sym, max_age=PRICE_AGE, cached=False):
             "series": series, "as_of": e.get("lastUpdateTime"), "age": age}
 
 
-def filings(c, sym):
+def filings(c, sym, fresh=False):
     """Results XBRL filings: [{end, kind (annual | quarter), consolidated, url, filed}], newest first, one per period
     and basis (the latest filed). Before 2025 from the results list (XBRL from 2018-19 on; earlier rows have none);
     from the March 2025 quarter on from the integrated filings (SEBI's combined format), whose March filing holds the
-    year."""
-    out = []
+    year. fresh=True: Offline rather than an out-of-date list kept from before, when the caller asks "anything new?"."""
+    out, stale = [], not fresh
     for period in ("Annual", "Quarterly"):
-        d, _ = c.json(f"{NSE}/api/corporates-financial-results?index=equities&symbol={urllib.parse.quote(sym)}&period={period}")
+        d, _ = c.json(f"{NSE}/api/corporates-financial-results?index=equities&symbol={urllib.parse.quote(sym)}&period={period}",
+                      stale=stale)
         for x in d if isinstance(d, list) else []:
             end = _date(x.get("toDate"))
             if end and allowed(x.get("xbrl")) and x["xbrl"].endswith(".xml"):
@@ -236,7 +277,7 @@ def filings(c, sym):
                             "consolidated": x.get("consolidated") == "Consolidated", "url": x["xbrl"],
                             "filed": _date(x.get("filingDate"), "%d-%b-%Y %H:%M") or end})
     d, _ = c.json(f"{NSE}/api/integrated-filing-results?index=equities&symbol={urllib.parse.quote(sym)}"
-                  "&type=Integrated%20Filing-%20Financials")
+                  "&type=Integrated%20Filing-%20Financials", stale=stale)
     for x in (d.get("data") if isinstance(d, dict) else None) or []:
         end = _date(x.get("qe_Date"))
         if end and allowed(x.get("xbrl")) and x["xbrl"].endswith(".xml"):
@@ -295,16 +336,19 @@ def fy_of(d):
 SECTOR_LIST = "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"
 SIZE_LIST = NSE + "/api/NextApi/apiClient/marketWatchApi?functionName=getIndicesData&symbol=NIFTY%20TOTAL%20MKT"
 BAND = 10  # a candidate's market cap within 1/10x to 10x of the company's comes first
-CANDIDATES = 15  # quoted for their industry, one a second; the closest in size first
+CANDIDATES = 15  # candidates listed, the same industry first, then the closest in size
+QUOTED = 30  # same-sector companies within BAND quoted for their industry (one a second), the closest in size first
+INDUSTRY_AGE = 7 * 24 * 3600  # a quote kept this long is good enough for an industry and a size
 
 
 def universe(c):
     """{symbol: {symbol, name, sector, ffmc (free-float market cap, Rs crore, or None)}} for the Nifty Total Market
     index: about 750 companies (the Nifty 500 and the Microcap 250), sector from NSE's own classification.
     ponytail: smaller companies aren't in it, so they are added by hand on the peers list."""
-    raw, _ = c.get(SECTOR_LIST, 24 * 3600)
+    head = lambda b: b.decode("utf-8-sig", "replace").startswith("Company Name,Industry,Symbol")  # noqa: E731
+    raw, _ = c.get(SECTOR_LIST, 24 * 3600, check=head)
     text = raw.decode("utf-8-sig", "replace")
-    if not text.startswith("Company Name,Industry,Symbol"):
+    if not head(raw):  # a block page cached before pages were checked
         c.path(SECTOR_LIST).unlink(missing_ok=True)  # a block page cached as data: never serve it again
         raise Offline("NSE sent a page instead of its list of companies. Try again in a minute.")
     out = {}
@@ -324,8 +368,11 @@ def universe(c):
 def candidates(c, sym, q):
     """Peer candidates for `sym` (q = its quote), by rules: the same NSE sector, the closest in free-float market cap
     (within BAND either way first), each quoted for its industry, then same basic industry first, same industry next.
-    Yields {"step"} / {"detail"} as it goes, then {"candidates": [{symbol, name, sector, industry, basic_industry,
-    price, shares, mcap, size, why}]}."""
+    Yields {"step"} / {"detail"} as it goes, a {"note"} when none shares its industry, then {"candidates": [{symbol,
+    name, sector, industry, basic_industry, price, shares, mcap, size, why}]}. Every same-sector company within BAND
+    is quoted (up to QUOTED), so a small same-industry one isn't cut before its industry is known.
+    ponytail: the sector is the ceiling: a coal miner's real peers in Metals & Mining are never candidates; the note
+    says to add them by hand."""
     total = q["price"] * q["shares"] if q.get("price") and q.get("shares") else None
     sector, own = q.get("sector"), q.get("ffmc") or total  # NSE's index list gives free-float caps only: the first cut
     if not sector:
@@ -334,14 +381,17 @@ def candidates(c, sym, q):
     yield {"step": f"Reading NSE’s list of {sector} companies…"}
     same = [x for s, x in universe(c).items() if x["sector"] == sector and s != sym and x["ffmc"]]
     gap = (lambda x: abs(math.log(x["ffmc"] / own))) if own else (lambda x: -x["ffmc"])
-    same.sort(key=lambda x: (gap(x) > math.log(BAND) if own else 0, gap(x)))
+    out_band = (lambda x: gap(x) > math.log(BAND)) if own else (lambda x: False)  # noqa: E731
+    same.sort(key=lambda x: (out_band(x), gap(x)))
+    near = [x for x in same if not out_band(x)][:QUOTED]
+    ask = near + [x for x in same if out_band(x)][:max(0, CANDIDATES - len(near))]
     out = []
-    if same:
-        yield {"step": f"Checking the {min(len(same), CANDIDATES)} closest in size for their industry…"}
-    for i, x in enumerate(same[:CANDIDATES]):
-        yield {"detail": f"{x['name']} ({i + 1} of {min(len(same), CANDIDATES)})"}
+    if ask:
+        yield {"step": f"Checking {len(ask)} {sector} companies close in size for their industry…"}
+    for i, x in enumerate(ask):
+        yield {"detail": f"{x['name']} ({i + 1} of {len(ask)})"}
         try:
-            p = quote(c, x["symbol"], LIST_AGE)  # industry and size; a day-old price is fine for choosing
+            p = quote(c, x["symbol"], INDUSTRY_AGE)  # industry and size; a week-old quote is fine for choosing
         except Offline:
             continue  # no quote: data not fetchable, so not a candidate
         mcap = p["price"] * p["shares"] if p["price"] and p["shares"] else None
@@ -356,4 +406,8 @@ def candidates(c, sym, q):
                     "why": why + (f" · {size:.1f}x its size" if size and size >= 1 else f" · {size:.2f}x its size"
                                   if size else ""), "_tier": tier, "_gap": abs(math.log(size)) if size else gap(x)})
     out.sort(key=lambda x: (x["_tier"], x["_gap"]))
-    yield {"candidates": [{k: v for k, v in x.items() if not k.startswith("_")} for x in out]}
+    if out and out[0]["_tier"] > 1:
+        what = q.get("basic_industry") or q.get("industry")
+        yield {"note": f"No other {sector} company on NSE’s list shares {q.get('name') or sym}’s industry"
+                       f"{f' ({what})' if what else ''}, so these are the same sector only. Add its real peers yourself below."}
+    yield {"candidates": [{k: v for k, v in x.items() if not k.startswith("_")} for x in out[:CANDIDATES]]}

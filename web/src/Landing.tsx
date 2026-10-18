@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { MiniRange, latestOf, rangeWords, slugOf } from './Shell'
-import { pathOf, placed } from './route'
+import { navigate, pathOf, placed } from './route'
 import { NAMES, api, fmt, postJson, rs, when, type ModelSummary, type Parsed, type Report, type WatchList } from './lib'
-import { AddBox, FetchRun, ago, streamFetch } from './Fetch'
+import { AddBox, FetchRun, ago, pendingMerge, sameCompany, streamFetch } from './Fetch'
 import { month } from './Statements'
 import { Prices, Spark, WatchSection } from './Watch'
 
@@ -58,6 +58,7 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
   }
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [twin, setTwin] = useState<{ p: Parsed; m: ModelSummary } | null>(null) // an export of a company added by ticker
   const [over, setOver] = useState(false)
   const input = useRef<HTMLInputElement>(null)
   const [adding, setAdding] = useState<string | null>(() => { // a symbol picked in the company switcher
@@ -77,17 +78,34 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
     placed.once = true
   }, [models == null]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const run = async (label: string, req: () => Promise<Parsed>) => {
+  const run = async (label: string, req: () => Promise<Parsed>, then: (p: Parsed) => Promise<void> = p => onAdd(p)) => {
     if (busy) return // one load at a time, so a slow earlier upload can't replace a later one
     setBusy(label)
     setError(null)
-    try { await onAdd(await req()) } catch (e) { setError((e as Error).message) } finally { setBusy(null) }
+    setTwin(null)
+    try { await then(await req()) } catch (e) { setError((e as Error).message) } finally { setBusy(null) }
   }
   const upload = (f: File | undefined) => {
     if (!f) return
     const body = new FormData()
     body.append('file', f)
-    run(`Reading ${f.name}…`, () => api<Parsed>('/api/parse', { method: 'POST', body }))
+    run(`Reading ${f.name}…`, () => api<Parsed>('/api/parse', { method: 'POST', body }), async p => {
+      // the same company already added by ticker: offer to add the export's years to it rather than a second copy
+      const m = latestOf(models).find(x => x.symbol && sameCompany(x.company, p.company.name))
+      if (m) setTwin({ p, m })
+      else await onAdd(p)
+    })
+  }
+  useEffect(() => { if (twin) document.getElementById('twin-h')?.focus() }, [twin])
+  const mergeTwin = () => {
+    if (!twin) return
+    pendingMerge.push({ company: twin.m.company, parsed: twin.p })
+    navigate(pathOf(slugOf(twin.m.id), 'overview'))
+  }
+  const keepTwin = () => {
+    if (!twin) return
+    const { p } = twin
+    run('Saving it as a separate model…', async () => ({ ...p, company: { ...p.company, name: `${p.company.name} (Export export)` } }))
   }
   const sample = () => run('Loading the sample…', () => api<Parsed>('/api/sample'))
   const remove = async (m: ModelSummary) => {
@@ -113,9 +131,21 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
   )
   const err = (error || listError) && <p className="error" role="alert">{error ?? listError}</p>
   const uploadLink = <button type="button" className="link" disabled={!!busy} onClick={() => input.current?.click()}>Upload a Export export instead</button>
-  const box = () => adding
+  // the upload sits right under the box on this page, so the box itself doesn't offer it a second time
+  const box = () => twin
+    ? <section className="fetch" aria-labelledby="twin-h">
+        <h2 id="twin-h" tabIndex={-1}>You already have {twin.m.company} from NSE</h2>
+        <p className="small">This export is the same company. Adding its years to the one you have keeps a single model:
+          NSE’s filings win where both have a year, and differences over 1% are listed on its Overview.</p>
+        <div className="fetch-act">
+          <button type="button" className="primary" onClick={mergeTwin}>Add these years to it</button>
+          <button type="button" className="btn" disabled={!!busy} onClick={keepTwin}>Keep as a separate model</button>
+          <button type="button" className="link" onClick={() => setTwin(null)}>Cancel</button>
+        </div>
+      </section>
+    : adding
     ? <FetchRun key={adding} symbol={adding} onAdd={onAdd} onClose={() => setAdding(null)} upload={uploadLink} />
-    : <AddBox models={models} onAdd={setAdding} onWatch={models?.length ? watchIt : undefined} upload={uploadLink} busy={!!busy} />
+    : <AddBox models={models} onAdd={setAdding} onWatch={models?.length ? watchIt : undefined} upload={null} busy={!!busy} />
 
   if (models == null) return <main id="main" className="page" tabIndex={-1}><p className="muted pad" role="status">Opening your companies…</p></main>
 
@@ -295,13 +325,15 @@ function CheckAll({ n, onSaved }: { n: number; onSaved: (saved: { id: string; sa
   }
   const running = state === 'running'
   const found = results.filter(r => r.status === 'new').length
+  const failed = results.filter(r => r.status === 'failed').length
   return (
     <div className="check-all" aria-busy={running}>
       <div className="ca-row">
         <button type="button" className="btn" onClick={run} disabled={running}>{running ? 'Checking…' : 'Check all for new results'}</button>
         {running && <button type="button" className="link" onClick={() => { ctl.current?.abort(); setState('stopped') }}>Stop</button>}
         <span className="small muted">{running ? step ?? 'Starting…'
-          : state === 'done' ? `Done: ${found ? `new results for ${found} compan${found > 1 ? 'ies' : 'y'}, saved` : 'nothing new'}.`
+          : state === 'done' ? `Done: ${found ? `new results for ${found} compan${found > 1 ? 'ies' : 'y'}, saved` : failed ? 'nothing new found' : 'nothing new'}${failed
+            ? `; couldn’t check ${failed} compan${failed > 1 ? 'ies' : 'y'}, so try again when NSE can be reached` : ''}.`
           : state === 'stopped' ? `Stopped after ${results.filter(r => r.status !== 'skipped').length} of ${n}${found ? `; ${found} saved with new results` : ''}. The rest weren’t checked.`
           : `Asks NSE about the ${n === 1 ? 'company' : `${n} companies`} you added by ticker, about half a minute each. New results are saved next to your forecast; your assumptions never change.`}</span>
       </div>

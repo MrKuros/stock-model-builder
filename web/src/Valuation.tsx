@@ -121,7 +121,9 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
           <Field id="v-g" label="Terminal growth" term="Growth a year forever after the forecast" unit="%" value={inputs.g} onCommit={x => x != null && set('g')(x)} />
           <Field id="v-wacc" label="Discount rate (WACC)" term="The return investors need; built from the four above" unit="%" value={inputs.wacc_override} nullable fallback={pct(buildUp)}
             onCommit={set('wacc_override')} />
-          <Field id="v-price" label="Share price" term="From the export; type today’s" unit="Rs" value={inputs.price} nullable
+          <Field id="v-price" label="Share price" term={company.source?.symbol
+            ? `From NSE, ${new Date(company.source.price_at ?? company.source.fetched_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}; type today’s`
+            : 'From the export; type today’s'} unit="Rs" value={inputs.price} nullable
             fallback={market?.price != null ? String(market.price) : 'none'} onCommit={set('price')} />
           <Field id="v-shares" label="Shares" term="Number of shares, in crore" unit="cr" value={inputs.shares} nullable
             fallback={market?.shares != null ? dec2(market.shares).replace(/,/g, '') : 'none'} onCommit={set('shares')} />
@@ -435,7 +437,7 @@ function Multiples({ v, active, asOf, next }: { v: Valuation; active: Scenario; 
         {priced
           ? <>The company’s own multiples at each of its {years} reported year ends set the reference. ▲ / ▼ marks a
             multiple above the historical high or below the low.</>
-          : <>This file has no year-end share prices, so there is no history to compare with.</>}{' '}
+          : <>No year-end share prices for past years, so there is nothing to compare with.</>}{' '}
         EV = market cap + borrowings − cash − investments. Blank where the value or the earnings are zero or negative.
       </p>
       <div className="table-wrap" tabIndex={0} role="region" aria-labelledby="mult-cap">

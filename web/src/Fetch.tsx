@@ -1,14 +1,26 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { latestOf, slugOf } from './Shell'
 import { navigate, pathOf, useHref } from './route'
-import { api, postJson, type Company, type ModelDoc, type ModelSummary, type Parsed, type Report, type SourceDoc } from './lib'
+import { api, clock, postJson, type Company, type ModelDoc, type ModelSummary, type Parsed, type Report, type SourceDoc } from './lib'
 
 /** One line of /api/nse/fetch: a step in plain words, its progress, the company once its numbers are in, a kept
  * document, something that didn't work, or the end. */
 export interface FetchEvent {
   step?: string; detail?: string; company?: Parsed; report?: Report; documents?: SourceDoc[]; note?: string
   error?: string; done?: true
+  final?: boolean // trying again won't change the error (no such symbol, too few years)
+  lender?: boolean // a bank, NBFC or insurer: a Export export won't work either
 }
+
+/** A company name for matching an upload to a saved company: 'Tata Consultancy Services Ltd.' = '... Limited'
+ * (server._norm). */
+export const sameCompany = (a: string, b: string) => {
+  const n = (s: string) => s.toLowerCase().replace(/\b(limited|ltd|the|india|co|company)\b|[^a-z0-9]/g, '')
+  return n(a) === n(b)
+}
+
+/** A Export export handed from Your companies to that company's Overview, where SourceNote adds its years. */
+export const pendingMerge: { company: string; parsed: Parsed }[] = []
 
 /** POST a JSON-lines endpoint (/api/nse/fetch by default), calling `on` for each line as it arrives; aborting the
  * signal stops the server's work too. */
@@ -58,6 +70,7 @@ export function AddBox({ models, onAdd, onWatch, upload, compact, busy }: {
   const [hits, setHits] = useState<{ symbol: string; name: string }[]>([])
   const [error, setError] = useState<string | null>(null)
   const [searching, setSearching] = useState(false)
+  const [asked, setAsked] = useState<string | null>(null) // the text NSE has answered for
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
   const text = q.trim()
@@ -69,7 +82,7 @@ export function AddBox({ models, onAdd, onWatch, upload, compact, busy }: {
     const t = window.setTimeout(() => {
       setSearching(true)
       api<{ results: { symbol: string; name: string }[]; error: string | null }>('/api/nse/search', postJson({ q: text }, ctl.signal))
-        .then(r => { setHits(r.results); setError(r.error) })
+        .then(r => { setHits(r.results); setError(r.error); setAsked(text) })
         .catch(e => { if (e.name !== 'AbortError') setError((e as Error).message) })
         .finally(() => setSearching(false))
     }, 300)
@@ -79,10 +92,11 @@ export function AddBox({ models, onAdd, onWatch, upload, compact, busy }: {
   const low = text.toLowerCase()
   const saved = text.length < 1 ? [] : latestOf(models).filter(m => m.company.toLowerCase().includes(low)).slice(0, 4)
   const typed = text.toUpperCase()
+  const none = asked === text && !error && !hits.length // NSE answered: nothing by that name or symbol
   const options: Option[] = [
     ...saved.map(m => ({ key: `o-${m.id}`, kind: 'open' as const, name: m.company, href: pathOf(slugOf(m.id), 'overview') })),
     ...hits.map(h => ({ key: `a-${h.symbol}`, kind: 'add' as const, name: h.name, symbol: h.symbol })),
-    ...(SYMBOL.test(typed) && !hits.some(h => h.symbol === typed) ? [{ key: `s-${typed}`, kind: 'add' as const, name: `${typed} (by symbol)`, symbol: typed }] : []),
+    ...(SYMBOL.test(typed) && !hits.some(h => h.symbol === typed) ? [{ key: `s-${typed}`, kind: 'add' as const, name: none ? `${typed}: not found on NSE, try anyway` : `${typed} (by symbol)`, symbol: typed }] : []),
   ]
   const shown = open && text.length > 0 && options.length > 0
   const pick = (o: Option | undefined) => {
@@ -97,7 +111,7 @@ export function AddBox({ models, onAdd, onWatch, upload, compact, busy }: {
       <label htmlFor={`${id}-in`} className="add-l">Add a company: type a name or NSE symbol</label>
       <div className="add-row">
         <input id={`${id}-in`} type="text" role="combobox" autoComplete="off" spellCheck={false} value={q} disabled={busy}
-          placeholder="e.g. TCS or Hindustan Unilever" aria-expanded={shown} aria-controls={`${id}-list`} aria-autocomplete="list"
+          placeholder="e.g. TCS or Infosys" aria-expanded={shown} aria-controls={`${id}-list`} aria-autocomplete="list"
           aria-activedescendant={shown ? optId(active) : undefined} aria-describedby={`${id}-hint`}
           onChange={e => { setQ(e.target.value); setOpen(true); setActive(0) }}
           onFocus={() => setOpen(true)} onBlur={() => window.setTimeout(() => setOpen(false), 150)}
@@ -124,8 +138,8 @@ export function AddBox({ models, onAdd, onWatch, upload, compact, busy }: {
         </ul>}
       </div>
       <p className="small muted" id={`${id}-hint`} aria-live="polite">
-        {error ? <span className="bad">{error} </span> : searching ? 'Looking on NSE… ' : text.length >= 2 && !options.length ? 'Nothing on NSE matches that. ' : null}
-        Numbers come from NSE’s filings, read by rules.{onWatch ? ' Watch follows the price only, without a model.' : ''} {upload}
+        {error ? <span className="bad">{error} </span> : searching ? 'Looking on NSE… ' : text.length >= 2 && none && !saved.length ? 'Nothing on NSE matches that. ' : null}
+        {compact ? 'Press Enter to add. ' : ''}Numbers come from NSE’s filings, read by rules.{onWatch ? ' Watch follows the price only, without a model.' : ''} {upload}
       </p>
     </div>
   )
@@ -142,6 +156,7 @@ export function FetchRun({ symbol, onAdd, onClose, upload }: {
   const [notes, setNotes] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [state, setState] = useState<'running' | 'stopped' | 'failed' | 'adding'>('running')
+  const [fail, setFail] = useState<{ final?: boolean; lender?: boolean }>({})
   const [run, setRun] = useState(0)
   const got = useRef<{ p: Parsed | null; reports: Report[] }>({ p: null, reports: [] })
   const ctl = useRef<AbortController | null>(null)
@@ -150,7 +165,7 @@ export function FetchRun({ symbol, onAdd, onClose, upload }: {
     const c = new AbortController()
     ctl.current = c
     got.current = { p: null, reports: [] }
-    setSteps([]); setNotes([]); setError(null); setState('running')
+    setSteps([]); setNotes([]); setError(null); setFail({}); setState('running')
     head.current?.focus()
     const finish = async () => {
       const { p, reports } = got.current
@@ -168,7 +183,7 @@ export function FetchRun({ symbol, onAdd, onClose, upload }: {
         got.current.p = { ...got.current.p, company: { ...pc, source: pc.source && { ...pc.source, documents: e.documents } } }
       }
       if (e.report) got.current.reports.push(e.report)
-      if (e.error) { setError(e.error); setState('failed') }
+      if (e.error) { setError(e.error); setFail({ final: e.final, lender: e.lender }); setState('failed') }
       if (e.done) finish()
     }).catch(e => {
       if ((e as Error).name === 'AbortError') return
@@ -200,10 +215,12 @@ export function FetchRun({ symbol, onAdd, onClose, upload }: {
           <button type="button" className="primary" onClick={() => { setState('adding'); onAdd(got.current.p!, got.current.reports).catch(e => { setError((e as Error).message); setState('failed') }) }}>
             Add {name} without the rest</button>
           <span className="small muted">Its numbers are in; documents not yet downloaded can be attached later on the Checks page.</span></>}
-        {(state === 'stopped' || state === 'failed') && <>
-          <button type="button" className={got.current.p && state === 'stopped' ? 'btn' : 'primary'} onClick={() => setRun(r => r + 1)}>Try again</button>
-          <button type="button" className="link" onClick={onClose}>Cancel</button></>}
-        <span className="small">{upload}</span>
+        {state === 'failed' && fail.lender
+          ? <button type="button" className="btn" onClick={onClose}>Close</button>
+          : (state === 'stopped' || state === 'failed') && <>
+            <button type="button" className={(got.current.p && state === 'stopped') || fail.final ? 'btn' : 'primary'} onClick={() => setRun(r => r + 1)}>Try again</button>
+            <button type="button" className="link" onClick={onClose}>Cancel</button></>}
+        {!(state === 'failed' && fail.lender) && <span className="small">{upload}</span>}
       </div>
       {state === 'running' && <p className="small muted">About half a minute: the app asks NSE once a second. What it downloads is kept, so trying again is quick.</p>}
     </section>
@@ -228,13 +245,17 @@ export function Refresh({ doc, onCompany, onResults }: {
     setMsg('Checking the price…')
     const ctl = new AbortController()
     try {
-      const r = await api<{ price: number | null; shares: number | null; face_value: number | null; at: string }>('/api/nse/price', postJson({ symbol: s.symbol }, ctl.signal))
+      const r = await api<{ price: number | null; shares: number | null; face_value: number | null; at: string; stale: boolean }>('/api/nse/price', postJson({ symbol: s.symbol }, ctl.signal))
+      if (r.stale) { // NSE didn't answer: the cache did. Never say "updated" or "no new results" for that
+        setMsg(`Couldn’t reach NSE. The last price kept is from ${clock(r.at)}; new results weren’t checked. Try again in a minute.`)
+        return
+      }
       const m = company.market ?? { price: null, shares: null, price_hist: [], shares_hist: [] }
       const c: Company = { ...company, market: { ...m, price: r.price ?? m.price, shares: r.shares ?? m.shares, face_value: r.face_value ?? m.face_value },
         source: { ...s, price_at: r.at } }
       setMsg('Looking for new results…')
       let got: Parsed | null = null
-      await streamFetch({ symbol: s.symbol, company: c, documents: false }, ctl.signal, e => {
+      await streamFetch({ symbol: s.symbol, company: c, documents: false, fresh: true }, ctl.signal, e => {
         if (e.company) got = e.company
         if (e.error) throw new Error(e.error)
       })
@@ -248,7 +269,9 @@ export function Refresh({ doc, onCompany, onResults }: {
           : `Quarter to ${new Date(a.quarter!).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })} added. Your assumptions haven’t changed.`)
       } else {
         onCompany(null, c)
-        setMsg('Price updated. No new results.')
+        setMsg(Date.now() - new Date(r.at).getTime() > 60_000
+          ? `Price is from ${clock(r.at)} (NSE is asked at most every 15 minutes). No new results.`
+          : 'Price updated. No new results.')
       }
     } catch (e) { setMsg(`Couldn’t refresh: ${(e as Error).message}`) } finally { setBusy(false) }
   }
@@ -280,18 +303,28 @@ export function SourceNote({ company, onCompany }: { company: Company; onCompany
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const s = company.source
+  useEffect(() => { // an export handed over from Your companies ("Add these years to it")
+    const i = pendingMerge.findIndex(x => x.company === company.name)
+    if (i >= 0 && s?.symbol) merge(pendingMerge.splice(i, 1)[0].parsed)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
   if (!s?.symbol) return null
   const yrs = Object.entries(s.years)
   const nse = yrs.filter(([, w]) => w === 'NSE filing').map(([y]) => y), other = yrs.filter(([, w]) => w !== 'NSE filing').map(([y]) => y)
-  const merge = async (f: File | undefined) => {
+  const upload = async (f: File | undefined) => {
     if (!f) return
     setError(null)
     try {
       setBusy('Reading the Export export…')
       const body = new FormData()
       body.append('file', f)
-      const p = await api<Parsed>('/api/parse', { method: 'POST', body })
-      setBusy('Putting the history together…')
+      await merge(await api<Parsed>('/api/parse', { method: 'POST', body }))
+    } catch (e) { setError((e as Error).message); setBusy(null) }
+  }
+  async function merge(p: Parsed) {
+    if (!s?.symbol) return
+    setError(null)
+    try {
+      setBusy('Adding the export’s years…')
       let got: Parsed | null = null
       await streamFetch({ symbol: s.symbol, company: p.company, documents: false }, new AbortController().signal, e => {
         if (e.company) got = e.company
@@ -319,7 +352,7 @@ export function SourceNote({ company, onCompany }: { company: Company; onCompany
           <tbody>{s.mismatches.map((m, i) => <tr key={i}><td>{m.year}</td><td>{m.line}</td>
             <td className="r num">{Math.round(m.filing).toLocaleString('en-IN')}</td><td className="r num">{Math.round(m.export).toLocaleString('en-IN')}</td></tr>)}</tbody>
         </table></div>
-        <p className="small-note">Borrowings usually differ because Export counts lease liabilities as borrowings and results filings don’t; net profit because the filing’s is the owners’ share.</p>
+        <p className="small-note">Net profit is compared before the minority’s share on both sides. Where Export’s borrowings are higher, the difference is lease liabilities a filing keeps in other liabilities; they’re moved into borrowings and listed in the notes below.</p>
       </details>}
       {s.notes.length > 0 && <ul className="fetch-notes">{s.notes.map((n, i) => <li key={i}>{n}</li>)}</ul>}
       {s.documents.length > 0 && <details className="fold">
@@ -330,7 +363,7 @@ export function SourceNote({ company, onCompany }: { company: Company; onCompany
       <p className="small-note">The documents kept with this model are on <a href={href('checks', 'documents')}>Checks → Documents</a>.{' '}
         {other.length || !s.missing.length ? 'Have a Export export? ' : 'Missing years? '}
         <label className="link up-l">{busy ?? 'Add years from a Export export'}<input ref={file} type="file" accept=".xlsx" className="sr" disabled={!!busy}
-          onChange={e => { merge(e.target.files?.[0]); e.target.value = '' }} /></label>{' '}
+          onChange={e => { upload(e.target.files?.[0]); e.target.value = '' }} /></label>{' '}
         (filings still win where both have a year).</p>
       {error && <p className="error" role="alert">{error}</p>}
     </section>

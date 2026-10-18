@@ -87,6 +87,10 @@ export default function Note({ parsed, doc, setDoc, projection, provenance, chan
   const { company, years } = parsed
   const hist = parsed.hist ?? company.hist
   const name = subject(company.name)
+  // where the reported numbers came from: NSE's filings (added by ticker), a Export export, or both
+  const filed = Object.values(company.source?.years ?? {})
+  const builtFrom = !company.source?.symbol ? 'a Export.in export'
+    : filed.every(w => w === 'NSE filing') ? 'NSE results filings' : 'NSE results filings and Export.in data'
   const nameIn = name === COMPANY ? 'the company' : name
   const v = projection?.valuation ?? null
   const sv = v?.scenarios.base
@@ -122,7 +126,7 @@ export default function Note({ parsed, doc, setDoc, projection, provenance, chan
   const factTo = (k: string) => (k.startsWith('flag_') ? href('checks', k.slice(5)) : k.startsWith('in_') ? href('forecast', k.slice(3))
     : k.startsWith('oneoff_') ? href('checks', 'unusual') : href('valuation'))
   const showCagr = value != null && price != null && implied != null && bestN != null
-  const nCagr = showCagr ? cite('Reported', <>Revenue (Export export, Sales row): {runs.length} rolling {WORDS[hz] ?? hz}-year window{runs.length > 1 ? 's' : ''} from {years[0]}; fastest {bestN!.from}–{bestN!.to}.</>) : 0
+  const nCagr = showCagr ? cite('Reported', <>Reported revenue ({builtFrom}): {runs.length} rolling {WORDS[hz] ?? hz}-year window{runs.length > 1 ? 's' : ''} from {years[0]}; fastest {bestN!.from}–{bestN!.to}.</>) : 0
   const stale = !!tn && projection?.inputs_hash != null && projection.inputs_hash !== tn.inputs_hash
   // the written note's facts that the verdict already cites share its footnote (while the words match the inputs)
   if (tn && !stale) { if (nImplied) refN.set('implied_growth', nImplied); if (nCagr) refN.set(`best${hz}`, nCagr) }
@@ -164,7 +168,7 @@ export default function Note({ parsed, doc, setDoc, projection, provenance, chan
       share, bear to bull. At <span className="num mkt">Rs {rs(price)}</span> {where}.{' '}
       {implied == null
         ? <>No flat revenue growth between −30% and +80% a year gets our base case to the price.</>
-        : bestN && <>{poss(name)} fastest {WORDS[hz] ?? hz} years since {years[0]}, <Cite n={nCagr} src={`Revenue CAGR ${bestN.from}–${bestN.to}, from the Export export`}>{pc(bestN.value)}</Cite> a
+        : bestN && <>{poss(name)} fastest {WORDS[hz] ?? hz} years since {years[0]}, <Cite n={nCagr} src={`Revenue CAGR ${bestN.from}–${bestN.to}, from reported revenue`}>{pc(bestN.value)}</Cite> a
           year in {bestN.from}–{bestN.to.slice(-2)}, {bestN.value >= implied ? 'would get there' : 'would not get there'}{hz < doc.n
             ? <> (the longest run in the data; the price needs {WORDS[doc.n] ?? doc.n} years)</> : null}.</>}</>
   }
@@ -280,7 +284,7 @@ export default function Note({ parsed, doc, setDoc, projection, provenance, chan
       </details>
 
       <footer className="foot">
-        <p>Analysis, not a recommendation. Built from a Export.in export and the rules in this app; no management access
+        <p>Analysis, not a recommendation. Built from {builtFrom} and the rules in this app; no management access
           or channel checks.</p>
         <div className="key3" aria-label="How to read this note">
           <span className="s1">{value != null ? <>{rs(value)} computed by rules</> : <>Numbers in mono: computed by rules</>}</span>

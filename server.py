@@ -9,6 +9,7 @@ import statistics
 import os
 import re
 import tempfile
+import threading
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -28,9 +29,9 @@ import ai
 import model
 import sources
 
-try:  # local-only (kept out of the public repo): a Export-shaped company from Export's public page
+try:  # optional local source of older years (not in this repo)
     from handoff import export_source
-except ImportError:
+except Exception:  # noqa: BLE001  ponytail: optional; a broken one is skipped and never blocks the server starting
     export_source = None
 
 MAX_UPLOAD = 5 * 1024 * 1024  # Export exports are ~50 KB
@@ -1279,15 +1280,16 @@ def export(req: ModelRequest):
 
 CACHE = "_cache"  # what the exchange sent, models/_cache/<site>/ ("_": never a slug); prices 15 min, lists 6 h, files kept
 FETCH_YEARS, FETCH_QUARTERS = 10, 8  # annual and quarterly results filings read per company
-_clients = {}
+_clients, _clients_lock = {}, threading.Lock()
 
 
 def nse(root=None):
     """One polite client per library folder (one request a second, shared by every request)."""
     root = root or MODELS
-    if root not in _clients:
-        _clients[root] = sources.Client(root / CACHE / "nse")
-    return _clients[root]
+    with _clients_lock:  # two first requests at once must not make two clients (and twice the request rate)
+        if root not in _clients:
+            _clients[root] = sources.Client(root / CACHE / "nse")
+        return _clients[root]
 
 
 def _sym(s):
@@ -1308,6 +1310,7 @@ class SymbolRequest(BaseModel):
 class FetchRequest(SymbolRequest):
     company: Company | None = None  # Refresh: the open model's company; its years the filings don't cover are kept
     documents: bool = True  # the latest annual report and call transcript too
+    fresh: bool = False  # Refresh: "anything new?" needs NSE's answer, not a list kept from before
 
 
 @app.post("/api/nse/search")
@@ -1321,13 +1324,13 @@ def nse_search(req: SearchRequest):
 
 @app.post("/api/nse/price")
 def nse_price(req: SymbolRequest):
-    """Today's price and share count (cached 15 minutes)."""
+    """Today's price and share count (cached 15 minutes). stale: NSE didn't answer and this is the last one kept."""
     try:
         q = sources.quote(nse(), _sym(req.symbol))
     except sources.Offline as e:
         raise HTTPException(503, str(e))
     return {"price": q["price"], "shares": q["shares"], "face_value": q["face_value"], "as_of": q["as_of"],
-            "at": _ago(q["age"])}
+            "at": _ago(q["age"]), "stale": q["age"] >= sources.PRICE_AGE}
 
 
 def _ago(age):
@@ -1340,13 +1343,21 @@ def _norm(name):
 
 
 def _saved_company(name, root=None):
-    """The newest saved company whose name matches (an earlier Export upload), as a dict, or None."""
+    """The newest saved Export upload whose name matches, as a dict, or None. A version that was itself added by
+    ticker isn't one: its filed years would be compared with themselves."""
     root, want = root or MODELS, _norm(name)
-    for m in list_models(root):  # newest first
+    for m in list_models(root):  # newest first, every version
         if _norm(m["company"]) == want:
             with contextlib.suppress(HTTPException):
-                return load_model(m["id"], root).company.model_dump()
+                co = load_model(m["id"], root).company
+                if not (co.source or {}).get("symbol"):
+                    return co.model_dump()
     return None
+
+
+# NSE's basic industries (or industries) of lenders and insurers, which this model doesn't fit. ponytail: by NSE's
+# names; not the "Financial Services" sector, which also holds exchanges, depositories, AMCs and brokers that fit.
+LENDER = re.compile(r"\bbanks?\b|non banking|housing finance|microfinance|\b(life|general) insurance\b|financial institution", re.I)
 
 
 def _spans(years):
@@ -1360,17 +1371,22 @@ def _spans(years):
     return [f"{a}{'' if a == b else f' to {b}'}: {why}" for a, b, why in out]
 
 
-def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, quarters=FETCH_QUARTERS):
+def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, quarters=FETCH_QUARTERS, fresh=False):
     """Build a company from NSE's filings, step by step: yields {"step"} (plain words), {"company": payload} once the
     numbers are ready, {"report"} per document kept, {"note"} for what failed, then {"done"}. Every number comes from the
     filings by rules (model.from_filings); a Export company (the open model's, an earlier upload of the same company,
-    or Export's public page when the local adapter is installed) fills only the years the filings lack."""
+    or the optional local source) fills only the years the filings lack. fresh: Offline unless NSE itself answered
+    the filings list (Refresh and "Check all" ask what's new). A bank, NBFC or insurer stops at the quote (model.Lender)."""
     c, today = nse(), today or datetime.now()
     yield {"step": f"Finding {sym} on NSE…"}
     q = sources.quote(c, sym)
     name = q["name"]
+    kind = q.get("basic_industry") or q.get("industry") or ""
+    if LENDER.search(kind):
+        raise model.Lender(f"{name} is a lender or insurer ({kind}). Banks, NBFCs and insurers aren’t supported yet, "
+                           "because their accounts don’t fit this model, so a Export export won’t work either.")
     yield {"step": f"Listing {name}’s results filings…"}
-    fs = sources.filings(c, sym)
+    fs = sources.filings(c, sym, fresh)
     annual = [f for f in fs if f["kind"] == "annual"]
     cons = bool(annual) and any(f["consolidated"] for f in annual if f["end"] == annual[0]["end"])
     basis = "consolidated" if cons else "standalone"
@@ -1383,6 +1399,7 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
             data, _ = c.get(f["url"], None, sources.MAX_XBRL)  # a filed document never changes: cached for good
             x = model.parse_xbrl(data, mappings=mappings)
         except (sources.Offline, ValueError) as e:
+            c.path(f["url"]).unlink(missing_ok=True)  # a block page or a bad file: fetched again next time
             notes.append(f"{label} results couldn’t be read: {e}")
             return None
         fid = hashlib.sha1(data).hexdigest()[:12]
@@ -1403,23 +1420,30 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
         if (x := grab(f, f"{f['end']:%b %Y} quarter")) and x["kind"] == "quarter":
             quarters.append(x)
 
+    prev = (old or {}).get("source") or {}  # a refreshed model that was fetched before keeps saying where years came from
     other, whose = (old, "this model") if old else (_saved_company(name), "your earlier Export upload")
+    local = False
     if other is None and export_source is not None:
-        yield {"step": "Reading older years from Export’s public page…"}
+        label = getattr(export_source, "LABEL", "a local source")
+        yield {"step": f"Reading older years from {label}…"}
         try:
-            other, whose = export_source.company(sym, MODELS / CACHE), "Export’s public page"
-        except (sources.Offline, ValueError) as e:
-            notes.append(f"Export’s page couldn’t be read: {e}")
+            other, whose, local = export_source.company(sym, MODELS / CACHE), label, True
+        except Exception as e:  # noqa: BLE001  ponytail: optional local source; any failure only means no older years
+            notes.append(f"{label[:1].upper()}{label[1:]} couldn’t be read: "
+                         f"{e if isinstance(e, (sources.Offline, ValueError)) else f'its layout looks different ({type(e).__name__})'}")
     try:
         filed, skipped = model.from_filings(name, read, quarters + read, q, least=1 if other else 2)
         why = None
+    except model.Lender:
+        raise
     except ValueError as e:
         filed, skipped, why = None, [], str(e)
+    listed = sources._date((q.get("listed") or "")[:11])
     yield {"step": "Putting the history together…"}
-    filled, mism = [], []
+    filled, mism, merged = [], [], []
     if filed and other:
-        co, filled, mism = model.merge(filed, other)
-        if old or whose != "Export’s public page":
+        co, filled, mism, merged = model.merge(filed, other)
+        if not local:
             co["name"] = other["name"]  # the saved model keeps its name, so the library keeps one row for the company
     elif filed:
         co = filed
@@ -1427,22 +1451,30 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
         co = {**other, "market": {**(other.get("market") or {}), **{k: q[k] for k in ("price", "shares", "face_value") if q[k]}},
               "quarters": model.filing_quarters(quarters + read) or other.get("quarters")}
     else:
-        raise ValueError(f"{why} {name} may have listed recently. Upload a Export export instead.")
+        more = [why]
+        if listed and listed.year >= today.year - 2:
+            more.append(f"{name} listed on NSE in {listed:%b %Y}, so few results are filed yet.")
+        if notes:
+            more.append("Some filings couldn’t be read, so trying again may help.")
+        raise ValueError(" ".join([*more, "Upload a Export export instead."]))
+    notes += merged
     labels = model.labels(co["dates"])
     have = set(labels)
     no_bs = {s["year"] for s in skipped}
-    listed = sources._date((q.get("listed") or "")[:11])
     last = int(labels[-1][2:])
     gaps = [(f"FY{y}", "NSE’s results filings for these years carry no balance sheet in XBRL"
              if f"FY{y}" in no_bs else f"listed on NSE in {listed:%b %Y}, so no results before that"
              if listed and listed.year >= y else "no results filing in XBRL on NSE (it starts in 2018-19)")
             for y in range(last - FETCH_YEARS + 1, last + 1) if f"FY{y}" not in have]
-    prev = (other or {}).get("source") or {}  # a refreshed model that was fetched before keeps saying where years came from
+    if prev:  # what an earlier fetch found still holds (merge never compares a filed year with itself)
+        new = {(m["year"], m["line"]) for m in mism}
+        mism = [m for m in prev.get("mismatches") or [] if (m["year"], m["line"]) not in new] + mism
     source = {"symbol": sym, "exchange": "NSE", "basis": basis, "industry": q.get("industry"),
               "fetched_at": today.isoformat(timespec="seconds"), "price_at": _ago(q["age"]),
               "years": {y: (prev.get("years") or {}).get(y, "Export") if y in filled or not filed else "NSE filing"
                         for y in labels},
-              "missing": _spans(gaps), "from": whose if filled or (not filed and other) else None,
+              "missing": _spans(gaps), "from": (prev.get("from") if old and prev else whose)
+              if filled or (not filed and other) else None,
               "mismatches": [{**m, "filing": round(m["filing"], 2), "export": round(m["export"], 2)} for m in mism],
               "notes": notes, "documents": []}
     co["source"] = source
@@ -1487,6 +1519,7 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
             yield {"detail": f"reading {len(data) / 1048576:.1f} MB of pages"}
             yield {"report": keep_report(data, file, year, kind)}
         except (sources.Offline, ValueError) as e:
+            c.path(url).unlink(missing_ok=True)  # an unreadable or cut-off file: fetched again next time
             yield {"note": f"Couldn’t keep {what}: {e}"}
     yield {"done": True}
 
@@ -1496,18 +1529,20 @@ def nse_fetch(req: FetchRequest):
     """fetch_company as a stream of JSON lines, so the page can show each step and stop it (closing the request stops
     it at the next step; what was downloaded stays cached, so trying again is quick)."""
     sym = _sym(req.symbol)
-    return _stream(fetch_company(sym, req.company.model_dump() if req.company else None, req.documents),
+    return _stream(fetch_company(sym, req.company.model_dump() if req.company else None, req.documents, fresh=req.fresh),
                    f"building {sym}", "upload a Export export instead")
 
 
 def _stream(events, doing, instead):
-    """A generator of events as JSON lines; a failure ends the stream with {"error"} (the status line is already sent)."""
+    """A generator of events as JSON lines; a failure ends the stream with {"error"} (the status line is already sent),
+    "final" when trying again won't change it (no such symbol, too few years) and "lender" for a bank or insurer."""
     def lines():
         try:
             for ev in events:
                 yield json.dumps(jsonable_encoder(ev), allow_nan=False) + "\n"
         except (sources.Offline, ValueError) as e:
-            yield json.dumps({"error": str(e)}) + "\n"
+            yield json.dumps({"error": str(e), "final": isinstance(e, (ValueError, sources.NotFound)),
+                              "lender": isinstance(e, model.Lender)}) + "\n"
         except HTTPException as e:
             yield json.dumps({"error": str(e.detail)}) + "\n"
         except Exception as e:  # noqa: BLE001
@@ -1597,11 +1632,7 @@ def check_all(today=None):
     """Every company added by ticker, newest version each: fetch its results (fetch_company, no documents), and when
     there are new ones save today's version with them (with_results). Yields {step}, {result: {id, company, status
     new | none | skipped | failed, text}}, {done}. Stopping keeps what was saved so far."""
-    seen, todo = set(), []
-    for m in list_models(MODELS):  # newest first
-        if (s := m["id"].split("/")[0]) not in seen:
-            seen.add(s)
-            todo.append(m)
+    todo = latest_models(MODELS)
     for i, m in enumerate(todo):
         row = {"id": m["id"], "company": m["company"]}
         try:
@@ -1614,7 +1645,8 @@ def check_all(today=None):
             continue
         yield {"step": f"Checking {m['company']} ({i + 1} of {len(todo)})…"}
         try:
-            p = next(e["company"] for e in fetch_company(_sym(sym), doc.company.model_dump(), False, today) if "company" in e)
+            p = next(e["company"] for e in fetch_company(_sym(sym), doc.company.model_dump(), False, today, fresh=True)
+                     if "company" in e)
             d, years, q = with_results(doc, p["company"], p["fetched"]["filings"], today)
         except (sources.Offline, ValueError, HTTPException, StopIteration) as e:
             yield {"result": {**row, "status": "failed", "text": f"Couldn’t check: {getattr(e, 'detail', None) or e}"}}
@@ -1780,7 +1812,7 @@ def watch_prices():
 
 # ---------- peers (5.2): rules find candidates, the AI picks by business mix, rules check and compare ----------
 
-PEER_YEARS = 4  # annual filings read per peer: only FY2023 on make years; older years come from Export when it can
+PEER_YEARS = 4  # annual filings read per peer: only FY2023 on make years; older years from a Export upload when there is one
 
 
 class PeersRequest(SymbolRequest):
@@ -1846,8 +1878,8 @@ def peers_pick(req: PeersRequest):
 
 
 def peer_rows(symbols):
-    """Each peer's numbers by rules, as it comes (5.1's fetch: filings, Export for older years when the adapter or
-    an earlier upload has them; no quarters, no documents). Yields steps, then {"row"} per peer."""
+    """Each peer's numbers by rules, as it comes (5.1's fetch: filings, older years from an earlier upload or the
+    optional local source; no quarters, no documents). Yields steps, then {"row"} per peer."""
     for i, sym in enumerate(symbols):
         yield {"step": f"Reading {sym} ({i + 1} of {len(symbols)})…"}
         try:

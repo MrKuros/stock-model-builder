@@ -203,8 +203,12 @@ def _derive(rows):
     return hist
 
 
+class Lender(ValueError):
+    """A bank, NBFC or insurer: this model doesn't fit it, whatever the source, so a Export export won't help either."""
+
+
 def _not_lender(hist):
-    """ValueError for a bank, NBFC or insurer, which this model doesn't fit."""
+    """Lender (a ValueError) for a bank, NBFC or insurer, which this model doesn't fit."""
     # ponytail: heuristic, tuned on 15 real exports: lenders' loan books sit in Other Assets at 2.7-9.4x revenue;
     # non-financials stay under ~1.6x (ADANIPORTS: infra loans/advances ~1.2x). Revisit if a real lender slips under 2x.
     rev = [h for h in hist if h["revenue"]]
@@ -214,8 +218,8 @@ def _not_lender(hist):
     ir = statistics.median(h["interest"] / h["revenue"] for h in rev)
     oca = statistics.median(h["other_ca"] / h["revenue"] for h in rev)
     if all(not h["receivables"] and not h["inventory"] for h in hist) or (ir > 0.3 and wc < 0.05) or oca > 2.0:
-        raise ValueError("Looks like a bank/NBFC/insurer (loan book or interest dominates, no receivables/inventory). "
-                         "Financial companies are not supported yet.")
+        raise Lender("Looks like a bank/NBFC/insurer (loan book or interest dominates, no receivables/inventory). "
+                     "Financial companies are not supported yet.")
 
 
 def _quarters(rows):
@@ -371,8 +375,8 @@ XBRL_BS = {  # positions at the period end
     "EquityShareCapital": "share_cap", "OtherEquity": "other_equity",
     "EquityAttributableToOwnersOfParent": "equity_parent", "NonControllingInterest": "nci", "Equity": "equity",
     "BorrowingsNoncurrent": "borrowings_noncurrent", "BorrowingsCurrent": "borrowings_current",
-    # ponytail: lease liabilities as named in the Ind AS / IFRS taxonomies; the 2020 results taxonomy has no such
-    # element (leases sit in other financial liabilities), so results filings won't fill these
+    # lease liabilities as named in the Ind AS / IFRS taxonomies; the 2020 results taxonomy has no such element: its
+    # filings put leases in other financial liabilities, as a described breakdown line from FY2025 (parse_xbrl reads it)
     "LeaseLiabilitiesNoncurrent": "lease_noncurrent", "LeaseLiabilitiesCurrent": "lease_current",
     "NoncurrentLeaseLiabilities": "lease_noncurrent", "CurrentLeaseLiabilities": "lease_current",
     "TradePayablesCurrent": "payables", "TradePayablesNoncurrent": "payables_noncurrent",
@@ -403,6 +407,11 @@ XBRL_CF = {  # the financial year to date (results filings carry it for the half
     "IncreaseDecreaseInCashAndCashEquivalents": "net_change_cash",
 }
 XBRL_TAGS = {**XBRL_PL, **XBRL_BS, **XBRL_CF}
+# Results filings from FY2025 break other financial liabilities into described lines (typed-dimension contexts); the
+# ones described as lease liabilities are leases (TCS FY2026: 9,453 + 1,830 = 11,283 cr, Export's borrowings exactly)
+LEASE_LINES = {"OtherNoncurrentFinancialLiabilities": "lease_noncurrent", "OtherCurrentFinancialLiabilities": "lease_current"}
+LEASE_DESC = {"DescriptionOfOtherNoncurrentFinancialLiabilities", "DescriptionOfOtherCurrentFinancialLiabilities"}
+LEASE_RE = re.compile(r"\blease liabilit", re.I)
 XBRL_STOCKS, XBRL_CASH = set(XBRL_BS.values()) | {"borrowings"}, set(XBRL_CF.values())
 XBRL_PER_SHARE = {"eps_basic", "eps_diluted", "face_value"}
 XBRL_MAX_UNMAPPED = 300  # a results filing has ~50 non-zero unknown facts; a full annual-report instance can have 1000s
@@ -481,7 +490,7 @@ def parse_xbrl(file, mappings=None, company=None):
         units[u.get("id")] = [(m.text or "").strip() for m in u.iter(_XI + "measure")]
 
     name = symbol = nature = None
-    nums, checks = [], []
+    nums, checks, desc = [], [], {}  # desc: breakdown context -> its line's description ("Lease liabilities")
     check = lambda n, ok, d: checks.append({"name": n, "pass": ok, "detail": d})  # noqa: E731
     for e in root:
         cid = e.get("contextRef")
@@ -499,6 +508,8 @@ def parse_xbrl(file, mappings=None, company=None):
             symbol = symbol or text
         elif tag == "NatureOfReportStandaloneConsolidated":
             nature = nature or text.lower()
+        elif tag in LEASE_DESC:
+            desc[cid] = text
         elif e.get("unitRef") and e.get("{http://www.w3.org/2001/XMLSchema-instance}nil") != "true":
             try:
                 v = float(text)
@@ -527,9 +538,15 @@ def parse_xbrl(file, mappings=None, company=None):
     # an approved mapping's value goes aside and only fills a line no standard element gives (or gives as 0), so a
     # mapping approved on one filing never overrides a standard number in another
     facts, seen, mapped, mseen, unmapped, skipped_cash = {}, {}, {}, {}, {}, False
+    leases = {}
     for tag, cid, v, uid in nums:
         c, key = ctx[cid], tags.get(tag)
-        if c["dims"] or (consolidated is not None and c["basis"] not in (None, consolidated)):
+        if consolidated is not None and c["basis"] not in (None, consolidated):
+            continue
+        if c["dims"]:  # a breakdown line: only the lease liabilities inside other financial liabilities are kept
+            if (tag in LEASE_LINES and LEASE_RE.search(desc.get(cid, "")) and c["end"] in (None, end)
+                    and (s := _xbrl_scale(uid, units.get(uid, []))) and s[0] == "money"):
+                leases[LEASE_LINES[tag]] = leases.get(LEASE_LINES[tag], 0.0) + round(v * s[1], 6)
             continue
         if key in XBRL_CASH:
             if kind != "annual":
@@ -557,6 +574,8 @@ def parse_xbrl(file, mappings=None, company=None):
             unmapped.setdefault((tag, val), {"tag": tag, "value": val, "unit": unit,
                                              "context": cid if scale else f"{cid} ({uid})"})
 
+    for k, v in leases.items():
+        facts.setdefault(k, v)  # a filing that tags its leases directly keeps its own number
     for k, v in mapped.items():
         if not facts.get(k):
             facts[k], seen[k] = v, mseen[k]
@@ -739,8 +758,9 @@ def from_filings(name, annual, quarters=(), market=None, least=2):
             years[end] = r
     dates = sorted(years)
     if len(dates) < max(least, 1):
-        raise ValueError(f"Only {len(dates)} year{'s' if len(dates) != 1 else ''} of annual results with a balance sheet "
-                         "were filed in XBRL; the model needs at least two.")
+        raise ValueError(("No annual results filing in XBRL has a balance sheet" if not dates else
+                          "Only one year of annual results with a balance sheet was filed in XBRL")
+                         + "; the model needs at least two years.")
     hist = _derive([years[d] for d in dates])
     _not_lender(hist)
     m = market or {}
@@ -752,25 +772,58 @@ def from_filings(name, annual, quarters=(), market=None, least=2):
 MERGE_LINES = (("revenue", "Revenue"), ("pat", "Net profit"), ("total_assets", "Total assets"),
                ("borrowings", "Borrowings"), ("cfo", "Cash from operations"))
 MERGE_TOL = 0.01  # filings and Export a year apart by more than 1%: reported, the filing's number kept
+RESTATED = (0.05, 0.02)  # a year off by 5%+ on revenue or profit while the next year agrees within 2%: restated later
+
+
+def _line(h, k, filing):
+    """A merge line; net profit like for like: Export's is PBT less tax, a filing's pat is the owners' share."""
+    return h["pbt"] - h["tax"] if k == "pat" and filing else h.get(k)
 
 
 def merge(filed, export):
-    """Years from filings win; a Export company (an export, or its public page) fills only the years the filings
-    don't have (older ones: NSE's XBRL starts in 2018-19). -> (company, filled years, mismatches [{year, line, filing,
-    export}] on the years both have). Market data and quarters come from the filings' side when it has them."""
-    have = {d.date() for d in filed["dates"]}
+    """Years from filings win; a Export company (an export, or another source of its shape) fills only the years the
+    filings don't have (older ones: NSE's XBRL starts in 2018-19). -> (company, filled years, mismatches [{year, line,
+    filing, export}] on the years both have, notes). Years the other company itself took from filings aren't compared
+    (they'd be compared with themselves). Where Export's borrowings are higher, the difference is lease liabilities
+    the filing keeps in other liabilities: moved into borrowings (the balance sheet still ties) and said. A year off on
+    revenue or profit while the next year agrees was restated later: said, the filed number kept. Market data and
+    quarters come from the filings' side when it has them."""
+    have = {d.date(): i for i, d in enumerate(filed["dates"])}
     rows = {d: h for d, h in zip(filed["dates"], filed["hist"])}
-    filled, mism = [], []
+    whence = ((export.get("source") or {}).get("years")) or {}
+    filled, mism, notes, gaps = [], [], [], {}
     for d, h in zip(export["dates"], export["hist"]):
         if d.date() not in have:
             rows[d] = h
             filled.append(fy(d))
             continue
-        f = next(x for e, x in zip(filed["dates"], filed["hist"]) if e.date() == d.date())
+        fd = filed["dates"][have[d.date()]]
+        f = rows[fd] = dict(rows[fd])
+        extra = h["borrowings"] - f["borrowings"]  # also for a refreshed fetched year: it keeps its leases
+        if extra > MERGE_TOL * max(h["borrowings"], 1.0):
+            f["borrowings"] += extra
+            f["other_liab"] -= extra
+            notes.append(f"{fy(d)}: Rs {_inr(extra)} cr of borrowings taken from Export (lease liabilities, which "
+                         "this year’s filing keeps in other liabilities).")
+        if whence.get(fy(d), "Export") != "Export":
+            continue
+        gaps[fy(d)] = {}
         for k, line in MERGE_LINES:
-            a, b = f.get(k), h.get(k)
-            if a is not None and b is not None and abs(a - b) > MERGE_TOL * max(abs(b), 1.0):
-                mism.append({"year": fy(d), "line": line, "filing": a, "export": b})
+            a, b = _line(f, k, True), _line(h, k, False)
+            if a is not None and b is not None:
+                gaps[fy(d)][k] = (a, b)
+                if abs(a - b) > MERGE_TOL * max(abs(b), 1.0):
+                    mism.append({"year": fy(d), "line": line, "filing": a, "export": b})
+    for y, g in gaps.items():
+        nxt = gaps.get(f"FY{int(y[2:]) + 1}", {})
+        off = lambda gg, k, tol: k in gg and abs(gg[k][0] - gg[k][1]) > tol * max(abs(gg[k][1]), 1.0)  # noqa: E731
+        if (any(off(g, k, RESTATED[0]) for k in ("revenue", "pat"))
+                and all(k in nxt and not off(nxt, k, RESTATED[1]) for k in ("revenue", "pat"))):
+            k = "revenue" if off(g, "revenue", RESTATED[0]) else "pat"
+            what = "revenue" if k == "revenue" else "net profit"
+            notes.append(f"{y} looks restated later: {what} as first filed Rs {_inr(g[k][0])} cr, Rs {_inr(g[k][1])} cr "
+                         f"on Export’s restated basis. Growth and margins from {y} into FY{int(y[2:]) + 1} aren’t like "
+                         f"for like, and the defaults from history carry that break.")
     dates = sorted(rows)
     sm, fm = export.get("market") or {}, filed.get("market") or {}
     at = {d.date(): i for i, d in enumerate(export["dates"])}
@@ -781,7 +834,7 @@ def merge(filed, export):
               "price_hist": hist_of("price_hist"), "shares_hist": hist_of("shares_hist")}
     co = {"name": filed["name"], "dates": dates, "hist": _derive([rows[d] for d in dates]), "market": market,
           "quarters": filed.get("quarters") or export.get("quarters")}
-    return co, sorted(filled), mism
+    return co, sorted(filled), mism, notes
 
 
 # For checking a proposed mapping of a leftover tag (mapping_checks): the lines a tag may map to, with a one-line
@@ -1054,11 +1107,12 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
         # the product telescopes to the plain CAGR
         "growth": math.prod(h["revenue"] / p["revenue"] for p, h in gp) ** (1 / len(gp)) - 1 if gp and pos else 0.0,
         "ebitda_margin": per_rev(lambda h: h["ebitda"]),
-        # ponytail: Export folds exceptional items into Other Income; median drops a single one-off year
+        # ponytail: other income includes exceptional items (Export's way, and filing_row's); the median drops a one-off year
         "oi_pct": max(statistics.median(oi), 0.0) if oi else 0.0,
         "dep_pct": _ros((h["dep"], p["net_block"]) for p, h in pw),
-        # ponytail: capped; a company with almost no borrowings still pays interest (on lease liabilities, which
-        # results filings keep out of borrowings, or bill discounting), and Rs 400 cr on Rs 13 cr read as 3,000%
+        # ponytail: capped for every source; a company with almost no borrowings still pays interest (on bill
+        # discounting, or leases a filing before FY2025 leaves in other liabilities), and Rs 400 cr on Rs 13 cr read
+        # as 3,000%
         "int_rate": min(_ros((h["interest"], _debt(p)) for p, h in pw), INT_CAP),
         # ponytail: loss years make raw tax ratios meaningless
         "tax_rate": min(max(_ros(((h["tax"], h["pbt"]) for h in w), 0.25), 0.0), 0.5),
@@ -1099,7 +1153,8 @@ def default_ends(hist, d, g=None):
 # (ratios() key, words for the sentence, unit, floor). The floor is the smallest gap from typical worth a flag,
 # so a very steady metric (TCS tax 22-26%) can't flag a 2 pp wobble just because its spread is tiny.
 ONEOFF = (("oi_pct", "other income", " of revenue", 0.02), ("tax_rate", "tax rate", "", 0.10),
-          ("capex_pct", "capex", " of revenue", 0.05), ("ebitda_margin", "EBITDA margin", "", 0.05))
+          ("capex_pct", "capex", " of revenue", 0.05), ("ebitda_margin", "EBITDA margin", "", 0.05),
+          ("mi_pct", "minority share of profit", "", 0.05))
 
 
 def _pct(v):
@@ -1110,11 +1165,12 @@ def _pct(v):
 def detect_oneoffs(hist, labels, min_years=4):
     """Years where a metric is more than 2 sigma from the company's own median: [{year, metric, value, typical,
     note}]. sigma = 1.4826 x MAD, so the odd years themselves don't widen the band. A metric needs `min_years`
-    values; tax rate skips loss years (a rate on a loss means nothing)."""
+    values; tax rate skips loss years (a rate on a loss means nothing); minority share only counts profit years that
+    split profit (Export's years read 0, which would make every filed year look unusual)."""
     r, out = ratios(hist), []
     for key, what, unit, floor in ONEOFF:
         pts = [(labels[i], x[key]) for i, x in enumerate(r)
-               if x[key] is not None and (key != "tax_rate" or hist[i]["pbt"] > 0)]
+               if x[key] is not None and (key != "tax_rate" or hist[i]["pbt"] > 0) and (key != "mi_pct" or abs(x[key]) > 1e-9 and hist[i]["pbt"] - hist[i]["tax"] > 0)]
         if len(pts) < min_years:
             continue
         typical = statistics.median(v for _, v in pts)
@@ -1329,8 +1385,8 @@ def forensic(hist, labels, notes=None):
     else:
         sev, fact = _sev(oi / pbt, OI_SHARE), f"{_pct(oi / pbt)} of PBT, {span(3)}"
         txt = (f"Other income was {_pct(oi / pbt)} of profit before tax over {span(3)}"
-               + (" (Export folds exceptional gains into it)." if oi / pbt > OI_SHARE[2] else "."))
-        # Export folds exceptional items (gains and charges) into other income: a swing against its own median
+               + (" (it includes exceptional items)." if oi / pbt > OI_SHARE[2] else "."))
+        # other income includes exceptional items (gains and charges), from Export and filings alike: a swing against its median
         # makes reported profit growth that year say little about the business (TCS FY2026: Rs 4,526 cr of charges)
         pct = [h["other_income"] / h["revenue"] if h["revenue"] > 0 else None for h in hist]
         typ = _median_before(pct)
@@ -1339,7 +1395,7 @@ def forensic(hist, labels, notes=None):
             fact = f"{_pct(pct[-1])} of revenue in {y}" + (f", median {_pct(typ)}" if typ is not None else "")
             txt += (f" In {y} other income was Rs {_inr(last['other_income'])} cr, {_pct(pct[-1])} of revenue"
                     + (f" against a median of {_pct(typ)} in the 3 years before" if typ is not None else "")
-                    + ": Export folds exceptional items into other income, so this year's reported profit growth "
+                    + ": other income here includes exceptional items, so this year's reported profit growth "
                     "isn't the business trend (our projection uses the median).")
         add("other_income", "Other income vs PBT", sev, oi / pbt, OI_SHARE[2], labels[-3:], fact, txt,
             rule + f"; or other income negative, or {OI_SWING * 100:.0f} pp of revenue off the median of the 3 years "
@@ -2345,26 +2401,27 @@ def _quarters_sheet(wb, q, formats):
 # ---------- peers (5.2): the same measures for the company and each peer, by rules ----------
 
 PEERS = (  # key, label, kind, direction: 1 = higher ranks first, -1 = lower ranks first (less debt, cheaper)
-    ("mcap", "Market cap, Rs crore", "num", 1), ("revenue", "Revenue, Rs crore", "num", 1),
+    ("mcap", "Market cap, Rs crore", "num", 1), ("pe", "P/E", "x", -1), ("ev_ebitda", "EV/EBITDA", "x", -1),
+    ("pb", "P/B", "x", -1), ("revenue", "Revenue, Rs crore", "num", 1),
     ("g3", "Revenue growth, 3 years", "pct", 1), ("g5", "Revenue growth, 5 years", "pct", 1),
     ("ebitda_margin", "EBITDA margin", "pct", 1), ("net_margin", "Net margin", "pct", 1), ("roce", "ROCE", "pct", 1),
     ("cash_conv", "Cash conversion (CFO / net profit, 3 years)", "pct", 1), ("nd_ebitda", "Net debt / EBITDA", "x", -1),
-    ("pe", "P/E", "x", -1), ("ev_ebitda", "EV/EBITDA", "x", -1), ("pb", "P/B", "x", -1),
 )
 
 
 def peer_metrics(hist, price=None, shares=None):
     """One company's comparison measures from its reported years (the last one = hist[-1]) and a price and share
     count: size, revenue CAGRs, margins, ROCE (returns()), cash conversion, net debt / EBITDA and P/E, EV/EBITDA, P/B
-    at that price (_multiples(), minorities from the last year's profit, so the company's own EV/EBITDA can differ a
-    little from the Valuation page's, which uses the base case's). None where a number or a positive base is missing."""
+    at that price (_multiples(), minorities as the median share of profit over the last 3 years, so one exceptional
+    year doesn't inflate it; the company's own EV/EBITDA can differ a little from the Valuation page's, which uses the
+    base case's). None where a number or a positive base is missing."""
     h, n = hist[-1], len(hist)
     r = returns(h, hist[-2] if n > 1 else None)
     last3 = hist[-3:]
     cfo, pat = [x.get("cfo") for x in last3], sum(x["pat"] for x in last3)
     mcap = price * shares if price and shares and price > 0 and shares > 0 else None
-    after = h["pbt"] - h["tax"]
-    nci = max(0.0, (after - h["pat"]) / after) if after > 0 else 0.0
+    shares_mi = [max(0.0, (a - x["pat"]) / a) for x in last3 if (a := x["pbt"] - x["tax"]) > 0]
+    nci = statistics.median(shares_mi) if shares_mi else 0.0
     rev = h["revenue"] if h["revenue"] > 0 else None
     return {"mcap": mcap, "revenue": h["revenue"],
             "g3": _cagr(hist[-4]["revenue"], h["revenue"], 3) if n > 3 else None,
@@ -2384,7 +2441,8 @@ def peer_table(own, peers):
         xs = [x for p in ok if (x := p["metrics"].get(k)) is not None]
         mine = own["metrics"].get(k)
         out["median"][k] = statistics.median(xs) if xs else None
-        out["rank"][k] = None if mine is None else 1 + sum((x - mine) * way > 0 for x in xs)
+        v = (lambda x: max(x, 0.0)) if k == "nd_ebitda" else (lambda x: x)  # net cash: all tie as the least debt  # noqa: E731
+        out["rank"][k] = None if mine is None else 1 + sum((v(x) - v(mine)) * way > 0 for x in xs)
         out["of"][k] = len(xs) + (mine is not None)
     return out
 

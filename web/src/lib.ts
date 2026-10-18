@@ -55,7 +55,7 @@ export interface Source {
   fetched_at: string; price_at: string | null
   years: Record<string, string> // FY2024 -> "NSE filing" | "Export"
   missing: string[] // "FY2019 to FY2022: why"
-  from: string | null // who filled the years filings lack: "Export’s public page", "your Export export"...
+  from: string | null // who filled the years filings lack: "your Export export", "this model"...
   mismatches: { year: string; line: string; filing: number; export: number }[] // over 1%, on years both have
   notes: string[]; documents: SourceDoc[]
 }

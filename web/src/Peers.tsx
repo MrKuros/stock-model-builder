@@ -10,7 +10,7 @@ import {
 const SYMBOL = /^[A-Z0-9&-]{1,20}$/
 const MAX = 12 // peers compared at most (server.PeerFetchRequest)
 const EMPTY: PeersDoc = { symbol: null, candidates: [], proposal: null, chosen: [], approved_at: null, rows: [] }
-interface Ev { step?: string; detail?: string; note?: string; error?: string; company?: { sector: string | null }; candidates?: PeerCandidate[]; row?: PeerRow }
+interface Ev { step?: string; detail?: string; note?: string; error?: string; company?: { sector: string | null; basic_industry?: string | null }; candidates?: PeerCandidate[]; row?: PeerRow }
 interface Run { kind: 'find' | 'read'; steps: { text: string; detail?: string }[]; ctl: AbortController; stopped?: boolean }
 
 const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`
@@ -55,13 +55,20 @@ export function PeersSection({ parsed, doc, setDoc, projection, short }: {
       else { setError((e as Error).message); setRun(null) }
     }
   }
-  const find = (sym: string) => go('find', '/api/peers/candidates', { symbol: sym }, e => {
-    if (e.candidates) {
-      const cands = e.candidates
-      set(x => ({ ...x, symbol: sym, candidates: [...cands, ...x.candidates.filter(c => c.hand && !cands.some(k => k.symbol === c.symbol))], proposal: null }))
-      if (ai?.available === false && !cands.length) setNotes(n => [...n, 'No companies by rules: add peers yourself below.'])
-    }
-  })
+  const find = (sym: string) => {
+    let basic: string | null | undefined = null
+    return go('find', '/api/peers/candidates', { symbol: sym }, e => {
+      if (e.company) basic = e.company.basic_industry
+      if (e.candidates) {
+        const cands = e.candidates
+        set(x => ({ ...x, symbol: sym, candidates: [...cands, ...x.candidates.filter(c => c.hand && !cands.some(k => k.symbol === c.symbol))], proposal: null }))
+        if (ai?.available === false && !cands.length) setNotes(n => [...n, 'No companies by rules: add peers yourself below.'])
+        // AI off: rules tick the same-industry ones (at most 5) as a default you approve, instead of 15 empty boxes
+        if (ai?.available === false && !editing) setTicked(t => (t.length ? t
+          : cands.filter(c => basic && c.basic_industry === basic).slice(0, 5).map(c => c.symbol)))
+      }
+    })
+  }
   const read = (syms: string[]) => go('read', '/api/peers/fetch', { symbols: syms }, e => {
     if (e.row) { const row = e.row; set(x => ({ ...x, rows: [...x.rows.filter(r => r.symbol !== row.symbol), row] })) }
   })
@@ -102,8 +109,8 @@ export function PeersSection({ parsed, doc, setDoc, projection, short }: {
         ? <><span className="small">Stopped. {run.kind === 'read' ? 'The peers read so far are in the table.' : 'Nothing was lost; what was downloaded is kept.'}</span>
           <button type="button" className="link" onClick={() => setRun(null)}>Close</button></>
         : <><button type="button" className="btn" onClick={() => run.ctl.abort()}>Stop</button>
-          <span className="small muted">{run.kind === 'find' ? 'About 20 seconds the first time: the app asks NSE once a second and keeps the answers for 6 hours.'
-            : 'About 10 seconds a peer: NSE’s filings (kept for good) and, for older years, Export where available.'}</span></>}
+          <span className="small muted">{run.kind === 'find' ? 'Up to half a minute the first time: the app asks NSE once a second and keeps the answers, so the next time is quick.'
+            : 'About 10 seconds a peer: NSE’s filings (kept for good), and older years from a Export export of that peer when you have one.'}</span></>}
     </div>
   </div>
   const msgs = <>
@@ -127,6 +134,7 @@ export function PeersSection({ parsed, doc, setDoc, projection, short }: {
           <p className="why">{short} against {p.chosen.length} listed {p.chosen.length === 1 ? 'company' : 'companies'} in its line of business, each on its last
             reported year. Rank 1 = best: largest, fastest growing, highest margins, returns and cash conversion, least debt, cheapest multiple.</p>
           {steps}{msgs}
+          {t && <PeerWords t={t} chosen={p.chosen} short={short} />}
           {t ? <Table t={t} p={p} short={short} reading={run?.kind === 'read' && !run.stopped} retry={s => read([s])} />
             : (!run || run.stopped) && <p className="val-empty">No peer numbers yet. <button type="button" className="link" onClick={() => read(p.chosen)}>Read them from NSE</button></p>}
           <Why p={p} />
@@ -160,8 +168,9 @@ function Pick({ p, own, short, ai, typed, setTyped, find, pick, picking, ticked,
         <button type="submit" className="primary" disabled={run || !SYMBOL.test(sym)}>Find peers</button></span>
       </form>)}
     {cands.length > 0 && <>
-      {aiOff && cands.some(c => !c.hand) && <p className="peer-off">AI is off on this computer (LLM_CMD isn’t set), so tick the peers yourself. The list is NSE’s
-        {' '}{cands[0]?.sector ?? 'same-sector'} companies: the same industry first, then the closest in size.</p>}
+      {aiOff && cands.some(c => !c.hand) && <p className="peer-off">AI picking is off on this computer, so {ticked.length
+        ? 'the closest companies in the same industry are ticked for you. Untick any that don’t fit, tick others'
+        : 'tick the peers that fit'}. The list is NSE’s {cands[0]?.sector ?? 'same-sector'} companies: the same industry first, then the closest in size.</p>}
       {!aiOff && !p.proposal && own && <p><button type="button" className="primary" disabled={picking || run} onClick={pick}>
         {picking ? 'The AI is picking…' : 'Let the AI pick the closest'}</button>{' '}
         <span className="small muted">or tick them yourself below.</span></p>}
@@ -189,10 +198,10 @@ function Pick({ p, own, short, ai, typed, setTyped, find, pick, picking, ticked,
         })}</ul>
       </fieldset>
     </>}
-    <AddPeer onAdd={addHand} />
+    <AddPeer onAdd={addHand} example={cands.find(c => !c.hand)} />
     {(cands.length > 0 || ticked.length > 0) && <div className="fetch-act">
       <button type="button" className="primary" disabled={!ticked.length || ticked.length > MAX || run} onClick={approve}>
-        {!ticked.length ? 'Tick peers to compare' : `Compare with ${ticked.length === 1 ? 'this company' : `these ${ticked.length}`}`}</button>
+        {!ticked.length ? 'Compare (tick at least one)' : `Compare with ${ticked.length === 1 ? 'this company' : `these ${ticked.length}`}`}</button>
       {editing && <button type="button" className="link" onClick={cancel}>Cancel</button>}
       {own && cands.length > 0 && <button type="button" className="link small" disabled={run} onClick={() => find(own)}>Find candidates again</button>}
     </div>}
@@ -200,7 +209,7 @@ function Pick({ p, own, short, ai, typed, setTyped, find, pick, picking, ticked,
 }
 
 /** "Add a peer by name": NSE's search as the browser's own suggestion list. */
-function AddPeer({ onAdd }: { onAdd: (c: PeerCandidate) => void }) {
+function AddPeer({ onAdd, example }: { onAdd: (c: PeerCandidate) => void; example?: PeerCandidate }) {
   const id = useId()
   const [q, setQ] = useState('')
   const [found, setFound] = useState<{ q: string; hits: { symbol: string; name: string }[] }>({ q: '', hits: [] })
@@ -225,7 +234,7 @@ function AddPeer({ onAdd }: { onAdd: (c: PeerCandidate) => void }) {
   return <form className="peer-add" id="peer-add" onSubmit={e => { e.preventDefault(); add() }}>
     <label htmlFor={`${id}-q`}>Add a peer: type a name or NSE symbol</label>
     <span className="add-row">
-      <input id={`${id}-q`} type="text" list={`${id}-l`} value={q} onChange={e => { setQ(e.target.value); setMsg(null) }} placeholder="e.g. Hatsun Agro or HATSUN" autoComplete="off" spellCheck={false} />
+      <input id={`${id}-q`} type="text" list={`${id}-l`} value={q} onChange={e => { setQ(e.target.value); setMsg(null) }} placeholder={example ? `e.g. ${example.name.replace(/\s+(Limited|Ltd\.?)$/i, '')} or ${example.symbol}` : 'e.g. Infosys or INFY'} autoComplete="off" spellCheck={false} />
       <datalist id={`${id}-l`}>{hits.map(h => <option key={h.symbol} value={h.symbol}>{h.name}</option>)}</datalist>
       <button type="submit" className="btn" disabled={text.length < 1}>Add</button>
     </span>
@@ -259,8 +268,8 @@ function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; sho
         </tbody>
       </table>
     </div>
-    <p className="small-note">Numbers from each company’s NSE results filings, read by rules (older years from Export where NSE’s filings
-      have no balance sheet; hover a name for its years). Market cap and multiples at NSE prices read {ago(at)}; {short} at the price in this model.
+    <p className="small-note">Numbers from each company’s NSE results filings, read by rules; older years come from a Export export of
+      that company when you have one (hover a name to see where each year came from). Market cap and multiples at NSE prices read {ago(at)}; {short} at the price in this model.
       Growth is revenue CAGR; ROCE = EBIT / average capital employed; cash conversion = cash from operations / net profit over 3 years; EV = market cap +
       borrowings − cash − investments. Blank: not enough years, or a negative base. Leases count as debt only where the source includes them.</p>
   </>
@@ -289,9 +298,20 @@ export function PeerLine({ doc, t, short }: { doc: ModelDoc; t: PeerTable | null
   if (!p?.approved_at) return <p className="peer-line">No peers picked yet. <a href={href('valuation', 'peers')}>Compare {short} with listed peers</a></p>
   const read = t?.peers.filter(r => r.metrics && p.chosen.includes(r.symbol ?? '')).length ?? 0
   if (!t || !read) return <p className="peer-line">Peers picked, numbers not read yet. <a href={href('valuation', 'peers')}>Open the peer table</a></p>
+  return <p className="peer-line">{peerWords(t, read, short)} <a href={href('valuation', 'peers')}>Full peer table</a></p>
+}
+
+/** "Against 4 peers, TCS ranks 2nd of 5 on ROCE (...), ... and 3rd cheapest of 5 on P/E (...)." */
+function peerWords(t: PeerTable, read: number, short: string) {
   const bit = (k: string, what: string, kind: 'pct' | 'x', cheap = false) => t.rank[k] == null || t.median[k] == null ? null
     : `${cheap && t.rank[k] === 1 ? 'the cheapest' : `${ordinal(t.rank[k]!)}${cheap ? ' cheapest' : ''}`} of ${t.of[k]} on ${what} (${fmt(t.own.metrics?.[k], kind)} against a median ${fmt(t.median[k], kind)})`
   const parts = [bit('roce', 'ROCE', 'pct'), bit('g3', '3-year growth', 'pct'), bit('pe', 'P/E', 'x', true)].filter(Boolean) as string[]
-  return <p className="peer-line">Against {read} peer{read > 1 ? 's' : ''}, {short} ranks {parts.length
-    ? parts.join(parts.length > 2 ? ', ' : ' and ').replace(/, (?=[^,]*$)/, ' and ') : 'on too few measures to say'}. <a href={href('valuation', 'peers')}>Full peer table</a></p>
+  return `Against ${read} peer${read > 1 ? 's' : ''}, ${short} ranks ${parts.length
+    ? parts.join(parts.length > 2 ? ', ' : ' and ').replace(/, (?=[^,]*$)/, ' and ') : 'on too few measures to say'}.`
+}
+
+/** The same sentence above the peer table. */
+function PeerWords({ t, chosen, short }: { t: PeerTable; chosen: string[]; short: string }) {
+  const read = t.peers.filter(r => r.metrics && chosen.includes(r.symbol ?? '')).length
+  return read ? <p className="peer-line">{peerWords(t, read, short)}</p> : null
 }

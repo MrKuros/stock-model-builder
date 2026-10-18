@@ -111,6 +111,7 @@ def main():
     quarters_check(tmp, co)
     xbrl_check(co)
     filed = filings_check(co)
+    lease_check()
     review_rules_check(co)
     pins_check(co)
     peer_t = peers_check(co)
@@ -153,6 +154,15 @@ def main():
     assert found[0]["note"] == "FY2020 other income was 10.0% of revenue, typically 2.0%", found[0]["note"]
     assert abs(found[1]["value"] - 0.45) < 1e-3 and abs(found[1]["typical"] - 0.25) < 1e-3, found[1]
     assert model.detect_oneoffs(odd[3:6], labels[3:6]) == [], "fewer than 4 years: flag nothing"
+    # minority share: an exceptional year's big minority (JSW FY2026: 14% against 3-8%) is flagged, so it can be left
+    # out of the defaults; years that don't split profit (Export's) don't count
+    mi = [dict(x) for x in co["hist"]]
+    for i, share in zip(range(6, 10), (0.031, 0.036, 0.078, 0.141)):
+        mi[i]["pat"] = (mi[i]["pbt"] - mi[i]["tax"]) * (1 - share)
+    assert [(o["year"], o["metric"]) for o in model.detect_oneoffs(mi, labels)] == [("FY2025", "mi_pct")]
+    h9 = mi[-1]  # peers gross market cap up by the median share of the last 3 years (7.8%), not the last year's 14.1%
+    want = (100.0 / (1 - 0.078) + h9["borrowings"] - h9["cash"] - h9["investments"]) / h9["ebitda"]
+    assert abs(model.peer_metrics(mi, 100.0, 1.0)["ev_ebitda"] - want) < 1e-9
     # tax: a latest year near the 25% statutory rate is the normal one, not a one-off (Milky Mist: 57, 56, 48, 20%)
     mm = [dict(x, pbt=100.0, tax=t) for x, t in zip(co["hist"][-4:], (57.0, 56.0, 48.0, 20.0))]
     assert not [o for o in model.detect_oneoffs(mm, labels[-4:]) if o["metric"] == "tax_rate"], "near-statutory year"
@@ -340,6 +350,10 @@ def main():
     msg = vs10.cell(next(c.row for c in vs10["A"] if c.value == "WACC") + 1, 2).value  # the line under WACC
     assert msg.startswith("WACC must"), msg
     print("OK: parse, checks, projection, Excel formulas match Python")
+    if os.environ.get("LIVE_NET") == "1":
+        live_net_check()
+    else:
+        print("SKIP live NSE check: set LIVE_NET=1 to ask NSE itself (a handful of polite requests)")
 
 
 def quarters_check(tmp, co):
@@ -508,15 +522,65 @@ def filings_check(co):
     last4[0]["facts"]["revenue"] *= 1.02
     filed = model.from_filings("Test Industries Limited", last4, qs + annual[-4:],
                                {"price": 1650.0, "shares": 5.0, "face_value": 10.0})[0]
-    merged, filled, mism = model.merge(filed, co)
+    merged, filled, mism, notes = model.merge(filed, co)
     assert filled == model.labels(co["dates"])[:6] and merged["dates"] == co["dates"], filled
-    assert [(m["year"], m["line"]) for m in mism] == [("FY2022", "Revenue")], mism
+    assert [(m["year"], m["line"]) for m in mism] == [("FY2022", "Revenue")] and notes == [], (mism, notes)
     assert merged["hist"][5]["capex"] == co["hist"][5]["capex"] and merged["hist"][6]["revenue"] != co["hist"][6]["revenue"]
     assert merged["market"]["price"] == 1650 and merged["market"]["price_hist"][0] == 500 and merged["quarters"] == filed["quarters"]
+    # years the other side itself took from filings are never compared (a refetch compared filings with themselves)
+    fetched = dict(merged, source={"years": {y: "NSE filing" for y in model.labels(merged["dates"])[6:]}})
+    assert model.merge(filed, fetched)[2] == [], "a filed year compared with itself"
+    # net profit like for like: Export's is PBT less tax, a filing's pat the owners' share (a 10% minority isn't a gap)
+    owners = dict(filed, hist=[dict(h, pat=h["pat"] * 0.9) for h in filed["hist"]])
+    assert [m["line"] for m in model.merge(owners, co)[2]] == ["Revenue"]
+    # Export's higher borrowings are the leases a pre-FY2025 filing keeps in other liabilities: moved, balance still ties
+    lease = dict(co, hist=[dict(h, borrowings=h["borrowings"] + 30.0, other_liab=h["other_liab"] - 30.0) for h in co["hist"]])
+    m2, _, mm, nn = model.merge(filed, lease)
+    h7, f7 = m2["hist"][7], filed["hist"][1]
+    assert h7["borrowings"] == f7["borrowings"] + 30 and h7["other_liab"] == f7["other_liab"] - 30, (h7["borrowings"], f7["borrowings"])
+    assert abs(h7["share_cap"] + h7["reserves"] + h7["borrowings"] + h7["other_liab"] - h7["total_liab"]) < 1e-6
+    assert len(nn) == 4 and "lease liabilities" in nn[0] and not any(m["line"] == "Borrowings" for m in mm), (nn, mm)
+    # a year restated later: off by 15% while the next year agrees; said, the filed number kept; never the latest year
+    re_ = dict(co, hist=[dict(h, revenue=h["revenue"] * 1.15) if i == 7 else h for i, h in enumerate(co["hist"])])
+    m3, _, mm, nn = model.merge(filed, re_)
+    assert [n.split(" ")[0] for n in nn if "restated" in n] == ["FY2023"] and m3["hist"][7]["revenue"] == filed["hist"][1]["revenue"], nn
+    last = dict(co, hist=[dict(h, revenue=h["revenue"] * 1.15) if i == 9 else h for i, h in enumerate(co["hist"])])
+    assert not any("restated" in n for n in model.merge(filed, last)[3])
     # the model's defaults never read 1,000% interest off a company with almost no borrowings
     tiny = [dict(h, borrowings=0.5) for h in co["hist"]]
     assert model.default_assumptions(tiny)["int_rate"] == model.INT_CAP
     return filed
+
+
+def lease_xml(end, desc="Lease liabilities"):
+    """Shaped like TCS's FY2026 integrated filing: leases only as described lines of other financial liabilities, in
+    typed-dimension contexts (non-current 9,453 + current 1,830 cr), next to the undimensioned totals."""
+    filing = filing_xml({"revenue": 1000.0, "pbt": 100.0, "pat": 75.0, "tax": 25.0, "share_cap": 10.0, "other_equity": 500.0,
+                         "total_assets": 13000.0, "equity_and_liabilities": 13000.0, "borrowings_noncurrent": 0.0},
+                        _year_start(end), end).decode()
+    ctx = "".join(f'<xbrli:context id="{c}"><xbrli:entity><xbrli:identifier scheme="x">TESTIND</xbrli:identifier>'
+                  f'<xbrli:segment><xbrldi:typedMember xmlns:xbrldi="http://xbrl.org/2006/xbrldi" dimension="f:{c}Axis">'
+                  f'<f:Id>1</f:Id></xbrldi:typedMember></xbrli:segment></xbrli:entity><xbrli:period><xbrli:instant>'
+                  f'{end:%Y-%m-%d}</xbrli:instant></xbrli:period></xbrli:context>' for c in ("NC2", "C1", "NC3"))
+    facts = (f'<f:DescriptionOfOtherNoncurrentFinancialLiabilities contextRef="NC2">{desc}</f:DescriptionOfOtherNoncurrentFinancialLiabilities>'
+             '<f:OtherNoncurrentFinancialLiabilities contextRef="NC2" unitRef="INR" decimals="-7">94530000000</f:OtherNoncurrentFinancialLiabilities>'
+             f'<f:DescriptionOfOtherCurrentFinancialLiabilities contextRef="C1">{desc}</f:DescriptionOfOtherCurrentFinancialLiabilities>'
+             '<f:OtherCurrentFinancialLiabilities contextRef="C1" unitRef="INR" decimals="-7">18300000000</f:OtherCurrentFinancialLiabilities>'
+             '<f:DescriptionOfOtherNoncurrentFinancialLiabilities contextRef="NC3">Capital creditors</f:DescriptionOfOtherNoncurrentFinancialLiabilities>'
+             '<f:OtherNoncurrentFinancialLiabilities contextRef="NC3" unitRef="INR" decimals="-7">5000000000</f:OtherNoncurrentFinancialLiabilities>'
+             '<f:OtherNoncurrentFinancialLiabilities contextRef="I" unitRef="INR" decimals="-7">99530000000</f:OtherNoncurrentFinancialLiabilities>')
+    return filing.replace('<xbrli:unit id="INR">', ctx + '<xbrli:unit id="INR">').replace("</xbrli:xbrl>", facts + "</xbrli:xbrl>").encode()
+
+
+def lease_check():
+    """Leases described inside other financial liabilities (FY2025+ filings) are leases: in borrowings, out of other
+    liabilities, so the balance sheet still ties; another described line stays where it is."""
+    end = datetime(2026, 3, 31)
+    f = model.parse_xbrl(lease_xml(end))
+    assert f["facts"]["lease_noncurrent"] == 9453.0 and f["facts"]["lease_current"] == 1830.0, f["facts"]
+    row = model.filing_row(f["facts"])
+    assert row["borrowings"] == 11283.0 and row["other_liab"] == 13000 - 510 - 11283, row
+    assert "lease_noncurrent" not in model.parse_xbrl(lease_xml(end, "Capital creditors"))["facts"]
 
 
 def xbrl_check(co):
@@ -1369,6 +1433,7 @@ def library_check(root, co, scenarios):
     thesis_check(server, root, data)
     reimport_check(server, root, co, data)
     fetch_api_check(server, root, co, data)
+    net_check(server, co)
     peers_api_check(server, root, co, data)
     track_check(server, root, co, data)
     watch_check(server, data)
@@ -2389,17 +2454,20 @@ def _no_dimension(path):
 
 
 class _Resp(io.BytesIO):
-    def __init__(self, url, body):
+    def __init__(self, url, body, headers=None):
         super().__init__(body)
-        self.url, self.headers = url, {}
+        self.url, self.headers = url, headers or {}
 
     def geturl(self):
         return self.url
 
 
 def _fake_socket(net, calls, online):
-    """An opener class for sources.Client: answers from `net` (url or its start -> body), logs every url in `calls`,
-    fails like a dropped connection when online[0] is False or nothing matches. Everything above it is the real client."""
+    """An opener class for sources.Client: answers from `net` (url or its start -> body; an int is that HTTP error, a
+    (bytes, headers) pair sends those headers, an exception is raised), logs every url in `calls`, fails like a
+    dropped connection when online[0] is False or nothing matches. Everything above it is the real client."""
+    import urllib.error  # noqa: PLC0415
+
     class Opener:
         def open(self, req, timeout):
             url = req.full_url
@@ -2407,7 +2475,12 @@ def _fake_socket(net, calls, online):
             body = next((v for k, v in net.items() if url.startswith(k)), None) if online[0] else None
             if body is None:
                 raise OSError("no network")
-            return _Resp(url, body if isinstance(body, bytes) else json.dumps(body).encode())
+            if isinstance(body, int):
+                raise urllib.error.HTTPError(url, body, "error", {}, None)
+            if isinstance(body, Exception):
+                raise body
+            body, headers = body if isinstance(body, tuple) else (body, None)
+            return _Resp(url, body if isinstance(body, bytes) else json.dumps(body).encode(), headers)
     return Opener
 
 
@@ -2474,6 +2547,13 @@ def fetch_api_check(server, root, co, data):
             r = client.post("/api/nse/fetch", json={"symbol": "TESTIND", **body})
             assert r.status_code == 200 and r.headers["content-type"].startswith("application/x-ndjson"), r.text
             return [json.loads(x) for x in r.text.splitlines()]
+        # the optional local source of older years failing in an unexpected way is a note, never the end of the fetch
+        server.export_source = type("Broken", (), {"LABEL": "a local source",
+                                                     "company": staticmethod(lambda sym, cache: {}["no layout"])})
+        ev = fetch(documents=False)
+        server.export_source = None
+        assert ev[-1] == {"done": True} and any("A local source couldn’t be read: its layout looks different (KeyError)"
+                                               in n for n in next(e for e in ev if "company" in e)["company"]["company"]["source"]["notes"]), ev
         ev = fetch()
         assert [e for e in ev if "error" in e] == [] and ev[-1] == {"done": True}, ev
         steps = [e["step"] for e in ev if "step" in e]
@@ -2503,10 +2583,15 @@ def fetch_api_check(server, root, co, data):
             os.utime(f, (0, 0))
         again = fetch(documents=False)
         assert next(e for e in again if "company" in e)["company"]["hist"] == p["hist"] and again[-1] == {"done": True}, again
-        assert client.post("/api/nse/price", json={"symbol": "TESTIND"}).status_code == 200 and len(calls) > n
+        r = client.post("/api/nse/price", json={"symbol": "TESTIND"})
+        assert r.status_code == 200 and r.json()["stale"] is True and len(calls) > n, r.text  # never "price updated"
+        # Refresh asks "anything new?": an old list kept from before isn't an answer, so it says NSE wasn't reached
+        e = fetch(documents=False, fresh=True, company=p["company"])
+        assert "error" in e[-1] and "Couldn’t reach NSE" in e[-1]["error"] and not e[-1]["final"], e[-1]
         # nothing cached and no network: a plain error, in the stream and as a 503
         e = fetch(symbol="OTHER")
-        assert len(e) == 2 and "Couldn't reach NSE" in e[-1]["error"], e
+        assert len(e) == 2 and "Couldn’t reach NSE" in e[-1]["error"] and "Errno" not in e[-1]["error"], e
+        assert e[-1]["final"] is False and e[-1]["lender"] is False, e
         r = client.post("/api/nse/price", json={"symbol": "OTHER"})
         assert r.status_code == 503 and "internet" in r.json()["detail"], r.text
         online[0] = True
@@ -2531,6 +2616,14 @@ def fetch_api_check(server, root, co, data):
         assert len(got.company.dates) == 4 and got.company.name == "Tracked Co" and got.reviewed_at is None
         lines = [json.loads(x) for x in client.post("/api/track/check").text.splitlines()]
         assert {e["result"]["company"]: e["result"]["status"] for e in lines if "result" in e}["Tracked Co"] == "none", lines
+        # offline with lists older than 6 hours: "couldn't check", never "no new results"
+        for f in (root / server.CACHE / "nse").glob("*.bin"):
+            os.utime(f, (0, 0))
+        online[0] = False
+        lines = [json.loads(x) for x in client.post("/api/track/check").text.splitlines()]
+        res = {e["result"]["company"]: e["result"] for e in lines if "result" in e}
+        assert res["Tracked Co"]["status"] == "failed" and "Couldn’t reach NSE" in res["Tracked Co"]["text"], res
+        online[0] = True
         # caps: a list over the size cap is refused, not truncated; a block page is never cached as data
         big = sources.Client(root / "_cache" / "t", gap=0.0)
         big.opener = Opener()
@@ -2562,6 +2655,120 @@ def fetch_api_check(server, root, co, data):
     finally:
         server.MODELS, ai.llm, server.export_source = models, llm, adapter
         server._clients.clear()
+
+
+def net_check(server, co):
+    """The polite client's failures: plain words (no socket errors); NSE's 404 for a series it doesn't trade in moves on
+    to the next series, and no series at all is a plain "no company with that symbol"; a bank stops at the quote; a cut
+    download or a block page is never cached (and never replaces a good copy); a filing that can't be read is fetched
+    again next time. Nothing here calls the LLM."""
+    import gzip  # noqa: PLC0415
+    import http.client  # noqa: PLC0415
+    import urllib.error  # noqa: PLC0415
+    import sources  # noqa: PLC0415
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    root = Path(tempfile.mkdtemp())
+    api, arch = sources.NSE + "/api/", "https://nsearchives.nseindia.com/"
+    quote = api + "NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N&series="
+
+    def q(name, basic="Widgets"):
+        return {"equityResponse": [{"metaData": {"companyName": name}, "tradeInfo": {"lastPrice": 50.0, "issuedSize": 5e7},
+                                    "secInfo": {"basicIndustry": basic, "industryInfo": basic}}]}
+    d = co["dates"][-1]
+    net = {**{quote + f"{s}&symbol=ZZQQX": 404 for s in sources.SERIES}, quote + "EQ&symbol=NEWBE": 404,
+           quote + "BE&symbol=NEWBE": q("New BE Limited"), quote + "EQ&symbol=HDFCBANK": q("HDFC Bank Limited", "Private Sector Bank"),
+           quote + "EQ&symbol=BADX": q("Bad X Limited"),
+           api + "corporates-financial-results?index=equities&symbol=BADX&period=Annual": [
+               {"toDate": f"{d:%d-%b-%Y}", "period": "Annual", "consolidated": "Consolidated", "xbrl": f"{arch}x/BAD.xml"}],
+           api + "corporates-financial-results?index=equities&symbol=BADX&period=Quarterly": [],
+           api + "integrated-filing-results?index=equities&symbol=BADX": {"data": []},
+           f"{arch}x/BAD.xml": b"<html>Access Denied</html>"}
+    calls, online = [], [True]
+    client, models, llm, adapter = TestClient(server.app), server.MODELS, ai.llm, server.export_source
+    server.MODELS, ai.llm, server.export_source = root, None, None
+    server._clients.clear()
+    try:
+        c = server.nse()
+        c.opener, c.gap = _fake_socket(net, calls, online)(), 0.0
+        # no such symbol: every series asked once, then plain words; marked final (trying again won't change it)
+        try:
+            sources.quote(c, "ZZQQX")
+            raise AssertionError("expected NotFound")
+        except sources.NotFound as e:
+            assert str(e) == "NSE has no company with the symbol ZZQQX. Check the spelling, or type its name.", e
+        assert sum("ZZQQX" in u for u in calls) == len(sources.SERIES), calls
+        assert sources.quote(c, "NEWBE")["series"] == "BE", "a 404 on EQ moves on to the next series"
+        lines = lambda sym: [json.loads(x) for x in client.post("/api/nse/fetch", json={"symbol": sym}).text.splitlines()]  # noqa: E731
+        e = lines("ZZQQX")[-1]
+        assert e["final"] and not e["lender"] and "no company with the symbol" in e["error"], e
+        # a bank stops at the quote: no filings asked for, and no "upload a Export export" (it won't work either)
+        n = len(calls)
+        e = lines("HDFCBANK")[-1]
+        assert e["lender"] and e["final"] and "Private Sector Bank" in e["error"] and len(calls) == n + 1, (e, calls[n:])
+        assert not server.LENDER.search("Insurance Distributors") and not server.LENDER.search("Exchange and Data Platform")
+        # a filing that comes back as a block page: said, not kept, asked again next time
+        e = lines("BADX")
+        assert "trying again may help" in e[-1]["error"] and not c.path(f"{arch}x/BAD.xml").exists(), e
+        # failures in plain words
+        for err, want in ((urllib.error.URLError(ConnectionRefusedError(111, "Connection refused")), "Couldn’t reach NSE. Check"),
+                          (urllib.error.URLError(TimeoutError("timed out")), "didn’t answer in time"),
+                          (http.client.IncompleteRead(b"x", 10), "cut the download short")):
+            assert want in c._why(err) and "Errno" not in c._why(err), c._why(err)
+        # a cut download (short of its Content-Length, a gzip without its end, a broken chunked body) is never cached
+        t = sources.Client(root / "_cache" / "t", gap=0.0, home=None)
+        t.opener = _fake_socket(net, calls, online)()
+        z = gzip.compress(b"x" * 5000)
+        net.update({api + "short": (b"abc", {"Content-Length": "1000"}), api + "gz": (z[:-12], {"Content-Encoding": "gzip"}),
+                    api + "chunk": http.client.IncompleteRead(b"ab", 100)})
+        for u in ("short", "gz", "chunk"):
+            try:
+                t.get(api + u, None)
+                raise AssertionError(f"expected Offline for {u}")
+            except sources.Offline as err:
+                assert not t.path(api + u).exists() and "Errno" not in str(err), (u, err)
+        # a block page sent with 200 never replaces the last good copy, so cached reads still have it
+        net[api + "good"] = {"price": 3500}
+        assert t.json(api + "good")[0] == {"price": 3500}
+        os.utime(t.path(api + "good"), (0, 0))
+        net[api + "good"] = b"<html>Please wait...</html>"
+        got, age = t.json(api + "good")
+        assert got == {"price": 3500} and age > 3600 and t.json(api + "good", cached=True)[0] == {"price": 3500}
+        try:
+            t.json(api + "good", stale=False)
+            raise AssertionError("stale=False: the site must have answered")
+        except sources.Offline:
+            pass
+        # two first requests at once share one client
+        import threading  # noqa: PLC0415
+        server._clients.clear()
+        got, gate = [], threading.Barrier(2)
+        ts = [threading.Thread(target=lambda: (gate.wait(), got.append(server.nse(root / "race")))) for _ in range(2)]
+        [x.start() for x in ts]
+        [x.join() for x in ts]
+        assert got[0] is got[1]
+    finally:
+        server.MODELS, ai.llm, server.export_source = models, llm, adapter
+        server._clients.clear()
+
+
+def live_net_check():
+    """LIVE_NET=1 only (never in the commit hook): NSE's real answers still have the shapes the rules read. A handful
+    of polite requests for TCS into a throwaway cache. ponytail: TCS only; add a BE-series or SME name when those matter."""
+    import sources  # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as tmp:
+        c = sources.Client(Path(tmp))
+        assert any(x["symbol"] == "TCS" for x in sources.search(c, "tcs")), "search"
+        q = sources.quote(c, "TCS")
+        assert q["price"] and q["price"] > 0 and q["shares"] and q["shares"] > 0 and q["industry"], q
+        fs = sources.filings(c, "TCS")
+        annual = [f for f in fs if f["kind"] == "annual"]
+        assert annual and all(sources.allowed(f["url"]) and f["url"].endswith(".xml") for f in fs), fs[:3]
+        x = model.parse_xbrl(c.get(annual[0]["url"], None, sources.MAX_XBRL)[0])
+        assert x["kind"] == "annual" and x["facts"].get("revenue") and x["facts"].get("pat"), x["kind"]
+        assert sources.universe(c), "the sector list"
+    print("OK: live NSE shapes (search, quote, filings, one XBRL, sector list)")
 
 
 def track_check(server, root, co, data):
@@ -2664,6 +2871,8 @@ def peers_check(co):
     assert t["rank"]["pe"] == 2 and t["of"]["pe"] == 3, "P/E: lower ranks first (A 10x is cheaper)"
     assert t["rank"]["roce"] == 2 and t["of"]["roce"] == 4, "ROCE: higher first; a tie with A shares 2nd behind C"
     assert t["rank"]["g3"] is None and t["of"]["g3"] == 3 and t["median"]["mcap"] is None, t
+    cash = model.peer_table({"metrics": {"nd_ebitda": -0.6}}, [{"metrics": {"nd_ebitda": x}} for x in (-0.8, -1.5, -0.2, 0.5)])
+    assert cash["rank"]["nd_ebitda"] == 1, "net cash ties as the least debt, however much cash"
     return t
 
 
@@ -2741,7 +2950,7 @@ def peers_api_check(server, root, co, data):
         cands = ev[-1]["candidates"]
         assert [x["symbol"] for x in cands] == ["PEERA", "FAR", "PEERB", "PEERC"], cands  # Widgets x2 (near size first), Machines, rest
         assert cands[0]["why"] == "Same industry (Widgets) · 2.5x its size" and cands[2]["why"].startswith("Same industry group (Machines)"), cands
-        assert ev[1]["company"]["sector"] == sector and any("Checking the" in e.get("step", "") for e in ev), ev
+        assert ev[1]["company"]["sector"] == sector and any("close in size for their industry" in e.get("step", "") for e in ev), ev
         # no LLM_CMD: a plain 503, and the candidates still work (tick by hand)
         r = client.post("/api/peers/pick", json={"symbol": "TESTIND"})
         assert r.status_code == 503 and "LLM_CMD" in r.json()["detail"], r.text
