@@ -3,6 +3,7 @@ import Ruler from './Ruler'
 import { SEV, bySeverity } from './Evidence'
 import { AiOffNote, FlagNoteView, useAi } from './Sources'
 import { FundStrip } from './Fundamentals'
+import { PeerLine } from './Peers'
 import { useHref } from './route'
 import {
   api, fmt, money, postJson, rs, when, type Cagr, type Impact, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
@@ -217,6 +218,7 @@ export default function Note({ parsed, doc, setDoc, projection, provenance }: Pr
       {provenance}
 
       <FundStrip parsed={parsed} />
+      <PeerLine doc={doc} t={projection?.peers} short={shortName(company.name)} />
 
       {value != null && (
         <section className="instrument" aria-labelledby="ruler-h">

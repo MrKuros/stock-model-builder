@@ -3,9 +3,12 @@ and call transcripts. A polite client: browser-like headers, a cookie from the h
 second, small timeouts, an allow-list of hosts (redirects never leave it), size caps, and a local cache under the
 library folder (models/_cache), so everything fetched once works offline."""
 import contextlib
+import csv
 import hashlib
+import io
 import http.cookiejar
 import json
+import math
 import os
 import re
 import tempfile
@@ -203,10 +206,11 @@ def quote(c, sym, max_age=PRICE_AGE):
         raise Offline(f"NSE has no quote for {sym}. Check the symbol, or upload a Export export instead.")
     num = lambda v: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None  # noqa: E731
     price = num(trade.get("lastPrice")) or num(meta.get("closePrice")) or num(meta.get("previousClose"))
-    issued = num(trade.get("issuedSize"))
+    issued, ffmc = num(trade.get("issuedSize")), num(trade.get("ffmc"))
     return {"name": str(meta["companyName"])[:200], "price": price, "shares": issued and issued / 1e7,
             "face_value": num(trade.get("faceValue")), "industry": sec.get("industryInfo") or sec.get("basicIndustry"),
-            "sector": sec.get("sector"), "isin": meta.get("isinCode"), "listed": sec.get("listingDate"),
+            "basic_industry": sec.get("basicIndustry"), "sector": sec.get("sector"), "ffmc": ffmc and ffmc / 1e7,
+            "isin": meta.get("isinCode"), "listed": sec.get("listingDate"),
             "series": series, "as_of": e.get("lastUpdateTime"), "age": age}
 
 
@@ -277,3 +281,72 @@ def documents(c, sym, today=None):
 def fy_of(d):
     """The Indian financial year a date falls in: 14 Oct 2026 -> FY2027."""
     return f"FY{d.year + 1 if d.month > 3 else d.year}"
+
+
+# ---------- peers (5.2): companies in the same NSE sector, close in size, by rules ----------
+
+SECTOR_LIST = "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"
+SIZE_LIST = NSE + "/api/NextApi/apiClient/marketWatchApi?functionName=getIndicesData&symbol=NIFTY%20TOTAL%20MKT"
+BAND = 10  # a candidate's market cap within 1/10x to 10x of the company's comes first
+CANDIDATES = 15  # quoted for their industry, one a second; the closest in size first
+
+
+def universe(c):
+    """{symbol: {symbol, name, sector, ffmc (free-float market cap, Rs crore, or None)}} for the Nifty Total Market
+    index: about 750 companies (the Nifty 500 and the Microcap 250), sector from NSE's own classification.
+    ponytail: smaller companies aren't in it, so they are added by hand on the peers list."""
+    raw, _ = c.get(SECTOR_LIST, 24 * 3600)
+    text = raw.decode("utf-8-sig", "replace")
+    if not text.startswith("Company Name,Industry,Symbol"):
+        c.path(SECTOR_LIST).unlink(missing_ok=True)  # a block page cached as data: never serve it again
+        raise Offline("NSE sent a page instead of its list of companies. Try again in a minute.")
+    out = {}
+    for r in csv.DictReader(io.StringIO(text)):
+        sym = (r.get("Symbol") or "").strip()
+        if SYMBOL.fullmatch(sym):
+            out[sym] = {"symbol": sym, "name": (r.get("Company Name") or sym).strip()[:120],
+                        "sector": (r.get("Industry") or "").strip(), "ffmc": None}
+    d, _ = c.json(SIZE_LIST)
+    for x in ((d.get("data") if isinstance(d, dict) else None) or {}).get("data") or []:
+        v = x.get("ffmc") if isinstance(x, dict) else None
+        if x.get("symbol") in out and isinstance(v, (int, float)) and v > 0:
+            out[x["symbol"]]["ffmc"] = v / 1e7
+    return out
+
+
+def candidates(c, sym, q):
+    """Peer candidates for `sym` (q = its quote), by rules: the same NSE sector, the closest in free-float market cap
+    (within BAND either way first), each quoted for its industry, then same basic industry first, same industry next.
+    Yields {"step"} / {"detail"} as it goes, then {"candidates": [{symbol, name, sector, industry, basic_industry,
+    price, shares, mcap, size, why}]}."""
+    total = q["price"] * q["shares"] if q.get("price") and q.get("shares") else None
+    sector, own = q.get("sector"), q.get("ffmc") or total  # NSE's index list gives free-float caps only: the first cut
+    if not sector:
+        yield {"candidates": []}
+        return
+    yield {"step": f"Reading NSE’s list of {sector} companies…"}
+    same = [x for s, x in universe(c).items() if x["sector"] == sector and s != sym and x["ffmc"]]
+    gap = (lambda x: abs(math.log(x["ffmc"] / own))) if own else (lambda x: -x["ffmc"])
+    same.sort(key=lambda x: (gap(x) > math.log(BAND) if own else 0, gap(x)))
+    out = []
+    if same:
+        yield {"step": f"Checking the {min(len(same), CANDIDATES)} closest in size for their industry…"}
+    for i, x in enumerate(same[:CANDIDATES]):
+        yield {"detail": f"{x['name']} ({i + 1} of {min(len(same), CANDIDATES)})"}
+        try:
+            p = quote(c, x["symbol"], LIST_AGE)  # industry and size; a day-old price is fine for choosing
+        except Offline:
+            continue  # no quote: data not fetchable, so not a candidate
+        mcap = p["price"] * p["shares"] if p["price"] and p["shares"] else None
+        size = mcap / total if mcap and total else None  # what the page shows: full market caps
+        tier = 0 if p["basic_industry"] and p["basic_industry"] == q.get("basic_industry") else \
+            1 if p["industry"] and p["industry"] == q.get("industry") else 2
+        why = (f"Same industry ({p['basic_industry']})" if tier == 0 else f"Same industry group ({p['industry']})"
+               if tier == 1 else f"Same sector ({sector}), industry {p['basic_industry'] or p['industry'] or 'not given'}")
+        out.append({"symbol": x["symbol"], "name": p["name"], "sector": sector, "industry": p["industry"],
+                    "basic_industry": p["basic_industry"], "price": p["price"], "shares": p["shares"],
+                    "mcap": mcap, "size": size,
+                    "why": why + (f" · {size:.1f}x its size" if size and size >= 1 else f" · {size:.2f}x its size"
+                                  if size else ""), "_tier": tier, "_gap": abs(math.log(size)) if size else gap(x)})
+    out.sort(key=lambda x: (x["_tier"], x["_gap"]))
+    yield {"candidates": [{k: v for k, v in x.items() if not k.startswith("_")} for x in out]}

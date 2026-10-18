@@ -18,7 +18,7 @@ export const SECTIONS: Partial<Record<Page, [string, string][]>> = {
   fundamentals: [['growth', 'Growth'], ['charts', 'Charts'], ['ratios', 'Key ratios']],
   forecast: [['inputs', 'Inputs'], ['draft', 'From documents'], ['projection', 'Projection']],
   valuation: [['inputs', 'Inputs'], ['worth', 'Value by case'], ['hinges', 'What moves it'], ['gap', 'Close the gap'],
-    ['sure', 'How sure'], ['multiples', 'Multiples']],
+    ['sure', 'How sure'], ['multiples', 'Multiples'], ['peers', 'Against peers']],
   checks: [['flags', 'Warning signs'], ['unusual', 'Unusual years'], ['documents', 'Documents'], ['audit', 'Audit trail']],
 }
 

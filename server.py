@@ -176,6 +176,31 @@ class Report(BaseModel):
     model_config = ConfigDict(extra="allow")  # keep unknown keys from older saves instead of dropping them on save
 
 
+class PeerRow(BaseModel):
+    """One peer's comparison measures (model.peer_metrics), read from its NSE filings by rules when you compared; or
+    why it couldn't be read (error)."""
+    symbol: str = Field(pattern=r"^[A-Z0-9&-]{1,20}$")
+    name: str = Field("", max_length=200)
+    year: str | None = Field(None, max_length=20)  # its last reported year
+    price: FiniteFloat | None = None
+    at: str | None = Field(None, max_length=40)  # when its price was read
+    source: str | None = Field(None, max_length=300)  # which years came from where, in words
+    metrics: dict[str, FiniteFloat | None] | None = None
+    error: str | None = Field(None, max_length=500)
+
+
+class Peers(BaseModel):
+    """5.2: the peer set. Rules list candidates, the AI's picks are a proposal (checked by rules), you tick and approve
+    them (chosen, approved_at), and rules read each one's numbers (rows). Saved in the document; no version change
+    (older documents simply have none)."""
+    symbol: str | None = Field(None, pattern=r"^[A-Z0-9&-]{1,20}$")  # this company's NSE symbol, for the candidates
+    candidates: list[dict] = Field([], max_length=40)  # words and sizes, as rules found them
+    proposal: dict | None = None  # {picks [{symbol, name, reason, basis, checks, pass}], checks, basis, made_at, ai}
+    chosen: list[str] = Field([], max_length=12)
+    approved_at: str | None = None
+    rows: list[PeerRow] = Field([], max_length=12)
+
+
 NEW_DRIVERS = ("cogs_pct", "dpo")  # added in 3.4; scenarios saved before lack them
 
 
@@ -196,6 +221,7 @@ class ModelRequest(BaseModel):
     # AI explanations of forensic flags (4.3), one per flag key, rebuilt by the client from the approved flag_note
     # proposals: {key, year, proposal, summary, file, page, quote, from_numbers, ai}. Words only: no number reads them
     flag_notes: list[dict] = []
+    peers: Peers | None = None  # 5.2; the table is rebuilt from rows at today's inputs on every projection and export
 
     @model_validator(mode="after")
     def _new_drivers(self):
@@ -234,6 +260,17 @@ class ModelRequest(BaseModel):
                 raise HTTPException(422, f"Those {s} assumptions make the numbers too large to project. "
                                          "Try smaller values.")
         return co, sc, n, out
+
+    def peer_table(self, co):
+        """The company against its saved peers (model.peer_table) at this model's price and share count; None
+        without peers. Rules only: the peers' rows were read when you compared, nothing is fetched here."""
+        if not (self.peers and self.peers.rows):
+            return None
+        m, v = co.get("market") or {}, self.valuation
+        own = {"name": co["name"], "symbol": self.peers.symbol or (co.get("source") or {}).get("symbol"),
+               "year": model.labels(co["dates"])[-1],
+               "metrics": model.peer_metrics(co["hist"], v.price or m.get("price"), v.shares or m.get("shares"))}
+        return model.peer_table(own, [r.model_dump() for r in self.peers.rows])
 
     def dcf(self, co, sc, n, out):
         ex = {s: model.expand(sc[s], n) for s in model.SCENARIOS}
@@ -1184,14 +1221,14 @@ def refresh(req: DefaultsRequest):
 def project(req: ModelRequest):
     co, sc, n, out = req.projection()
     return {"years": [model.fy(d, True) for d in model.projected_dates(co, n)], "scenarios": out,
-            "valuation": req.dcf(co, sc, n, out), "inputs_hash": inputs_hash(req)}
+            "valuation": req.dcf(co, sc, n, out), "inputs_hash": inputs_hash(req), "peers": req.peer_table(co)}
 
 
 @app.post("/api/export")
 def export(req: ModelRequest):
     co, sc, n, _ = req.projection()
     safe = re.sub(r"[^\w\- ]+", "", co["name"], flags=re.ASCII).strip() or "company"  # headers are latin-1
-    return Response(model.to_excel(co, sc, n, req.active, req.valuation.model_dump()),
+    return Response(model.to_excel(co, sc, n, req.active, req.valuation.model_dump(), req.peer_table(co)),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{safe} model.xlsx"'})
 
@@ -1280,7 +1317,7 @@ def _spans(years):
     return [f"{a}{'' if a == b else f' to {b}'}: {why}" for a, b, why in out]
 
 
-def fetch_company(sym, old=None, documents=True, today=None):
+def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, quarters=FETCH_QUARTERS):
     """Build a company from NSE's filings, step by step: yields {"step"} (plain words), {"company": payload} once the
     numbers are ready, {"report"} per document kept, {"note"} for what failed, then {"done"}. Every number comes from the
     filings by rules (model.from_filings); a Export company (the open model's, an earlier upload of the same company,
@@ -1294,8 +1331,8 @@ def fetch_company(sym, old=None, documents=True, today=None):
     annual = [f for f in fs if f["kind"] == "annual"]
     cons = bool(annual) and any(f["consolidated"] for f in annual if f["end"] == annual[0]["end"])
     basis = "consolidated" if cons else "standalone"
-    ann = [f for f in annual if f["consolidated"] == cons][:FETCH_YEARS]
-    qtr = [f for f in fs if f["kind"] == "quarter" and f["consolidated"] == cons][:FETCH_QUARTERS]
+    ann = [f for f in annual if f["consolidated"] == cons][:years]
+    qtr = [f for f in fs if f["kind"] == "quarter" and f["consolidated"] == cons][:quarters]
     notes, read, mappings = [], [], load_mappings(MODELS)
 
     def grab(f, label):
@@ -1416,18 +1453,122 @@ def nse_fetch(req: FetchRequest):
     """fetch_company as a stream of JSON lines, so the page can show each step and stop it (closing the request stops
     it at the next step; what was downloaded stays cached, so trying again is quick)."""
     sym = _sym(req.symbol)
-    old = req.company.model_dump() if req.company else None
+    return _stream(fetch_company(sym, req.company.model_dump() if req.company else None, req.documents),
+                   f"building {sym}", "upload a Export export instead")
 
+
+def _stream(events, doing, instead):
+    """A generator of events as JSON lines; a failure ends the stream with {"error"} (the status line is already sent)."""
     def lines():
         try:
-            for ev in fetch_company(sym, old, req.documents):
+            for ev in events:
                 yield json.dumps(jsonable_encoder(ev), allow_nan=False) + "\n"
         except (sources.Offline, ValueError) as e:
             yield json.dumps({"error": str(e)}) + "\n"
-        except Exception as e:  # noqa: BLE001  mid-stream: the status line is already sent, so say it in the stream
-            yield json.dumps({"error": f"Something went wrong building {sym}: {type(e).__name__}. Try again, or "
-                                       "upload a Export export instead."}) + "\n"
+        except Exception as e:  # noqa: BLE001
+            yield json.dumps({"error": f"Something went wrong {doing}: {type(e).__name__}. Try again, or {instead}."}) + "\n"
     return StreamingResponse(lines(), media_type="application/x-ndjson")
+
+
+# ---------- peers (5.2): rules find candidates, the AI picks by business mix, rules check and compare ----------
+
+PEER_YEARS = 4  # annual filings read per peer: only FY2023 on make years; older years come from Export when it can
+
+
+class PeersRequest(SymbolRequest):
+    notes: dict = {}  # pick: the model's approved notes; segment names from an annual-report note go to the AI
+
+
+class PeerFetchRequest(BaseModel):
+    symbols: list[str] = Field(min_length=1, max_length=12)
+
+
+def peer_candidates(sym):
+    """Yields progress, {"company": what NSE says this company is}, then {"candidates"} (sources.candidates)."""
+    c = nse()
+    yield {"step": f"Finding {sym}’s sector on NSE…"}
+    q = sources.quote(c, sym, sources.LIST_AGE)
+    yield {"company": {k: q[k] for k in ("name", "sector", "industry", "basic_industry")} | {"symbol": sym}}
+    if not q["sector"]:
+        yield {"note": f"NSE gives no sector for {sym}, so there are no candidates by rules. Add peers yourself below."}
+    yield from sources.candidates(c, sym, q)
+
+
+@app.post("/api/peers/candidates")
+def peers_candidates(req: SymbolRequest):
+    """Rule candidates as a stream of JSON lines (each quote is a request, one a second; cached for 6 hours)."""
+    return _stream(peer_candidates(_sym(req.symbol)), "finding peers", "add peers yourself")
+
+
+def _segments(notes):
+    """{year, names} from the newest approved annual-report segments note, or None."""
+    segs = sorted((k, v) for k, v in (notes or {}).items() if k.startswith("ar:segments:") and isinstance(v, dict))
+    if not segs:
+        return None
+    k, v = segs[-1]
+    names = [str(r.get("label"))[:80] for r in v.get("rows") or [] if isinstance(r, dict) and r.get("label")][:12]
+    return {"year": k.removeprefix("ar:segments:"), "names": names} if names else None
+
+
+@app.post("/api/peers/pick")
+def peers_pick(req: PeersRequest):
+    """The AI picks 4 to 8 of the rule candidates by business mix; rules check each pick. A proposal: nothing is used
+    until you approve the set. The candidates are listed again by rules from the cache, never taken from the request."""
+    if not ai.available():
+        raise HTTPException(503, ai.NOT_SET)
+    sym = _sym(req.symbol)
+    try:
+        ev = list(peer_candidates(sym))
+    except sources.Offline as e:
+        raise HTTPException(503, str(e))
+    own, cands = next(e["company"] for e in ev if "company" in e), ev[-1]["candidates"]
+    if not cands:
+        raise HTTPException(422, f"No candidates by rules for {sym}, so there is nothing for the AI to pick from. "
+                                 "Add peers yourself.")
+    seg = _segments(req.notes)
+    try:
+        reply = ai.pick_peers(own, cands, seg)
+    except ai.LLMError as e:
+        raise HTTPException(502, str(e))
+    picks, count = ai.peer_checks(reply, own, cands, seg)
+    return {"candidates": cands, "proposal": {
+        "id": hashlib.sha1(json.dumps(reply, sort_keys=True).encode()).hexdigest()[:12], "kind": "peers",
+        "picks": picks, "checks": [count], "basis": "segments" if seg else "classification",
+        "made_at": datetime.now().isoformat(timespec="seconds"), "ai": True}}
+
+
+def peer_rows(symbols):
+    """Each peer's numbers by rules, as it comes (5.1's fetch: filings, Export for older years when the adapter or
+    an earlier upload has them; no quarters, no documents). Yields steps, then {"row"} per peer."""
+    for i, sym in enumerate(symbols):
+        yield {"step": f"Reading {sym} ({i + 1} of {len(symbols)})…"}
+        try:
+            payload = None
+            for ev in fetch_company(sym, documents=False, years=PEER_YEARS, quarters=0):
+                if "step" in ev or "detail" in ev:  # its own steps, as this peer's progress
+                    yield {"detail": (ev.get("detail") or ev["step"]).rstrip("…")}
+                payload = ev.get("company", payload)
+            co, src = payload["company"], payload["company"]["source"]
+            m = co["market"]
+            yrs = {}
+            for y, w in src["years"].items():
+                yrs.setdefault(w, []).append(y)
+            yield {"row": {"symbol": sym, "name": co["name"], "year": payload["years"][-1], "price": m.get("price"),
+                           "at": src["price_at"], "source": "; ".join(f"{_spans_text(v)}: {w}" for w, v in yrs.items()),
+                           "metrics": model.peer_metrics(payload["hist"], m.get("price"), m.get("shares"))}}
+        except (sources.Offline, ValueError) as e:  # fetch_company's upload advice is for adding a company, not a peer
+            yield {"row": {"symbol": sym, "name": sym, "error": str(e).replace(" Upload a Export export instead.", "")[:500]}}
+
+
+def _spans_text(ys):
+    return ys[0] if len(ys) == 1 else f"{ys[0]} to {ys[-1]}"
+
+
+@app.post("/api/peers/fetch")
+def peers_fetch(req: PeerFetchRequest):
+    """peer_rows as a stream of JSON lines; closing the request stops it after the current peer's request."""
+    syms = list(dict.fromkeys(_sym(s) for s in req.symbols))
+    return _stream(peer_rows(syms), "reading the peers", "try again later")
 
 
 # ---------- local model library: models/<company-slug>/<YYYY-MM-DD>.json, one file per company per day ----------

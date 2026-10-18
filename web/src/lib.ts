@@ -178,6 +178,30 @@ export interface OneOffNote {
 }
 /** POST /api/mappings/approve | reject: the decided proposal and the filings re-read by rules with mappings.json. */
 export interface Decided { proposal: Proposal; filings: Filing[]; missing: string[] }
+/** A company rules found on NSE as a possible peer (server.peer_candidates): same sector, close in size; or one you added. */
+export interface PeerCandidate {
+  symbol: string; name: string; why: string; sector?: string; industry?: string | null; basic_industry?: string | null
+  price?: number | null; shares?: number | null; mcap?: number | null; size?: number | null; hand?: boolean
+}
+/** One AI pick with the rule checks it passed or failed (ai.peer_checks). */
+export interface PeerPick { symbol: string; name: string; reason: string; basis: string; checks: Check[]; pass: boolean }
+/** POST /api/peers/pick: the AI's picks as a proposal; nothing is used until you approve the set. */
+export interface PeerProposal { id: string; kind: 'peers'; picks: PeerPick[]; checks: Check[]; basis: 'segments' | 'classification'; made_at: string; ai: true }
+/** One peer's measures (model.peer_metrics) as rules read them when you compared, or why they couldn't be read. */
+export interface PeerRow {
+  symbol: string | null; name: string; year?: string | null; price?: number | null; at?: string | null; source?: string | null
+  metrics?: Record<string, number | null> | null; error?: string | null
+}
+/** doc.peers (5.2): candidates, the AI's proposal, the set you approved and each peer's numbers. */
+export interface PeersDoc {
+  symbol: string | null; candidates: PeerCandidate[]; proposal: PeerProposal | null; chosen: string[]
+  approved_at: string | null; rows: PeerRow[]
+}
+/** /api/project's peers (model.peer_table): the company against its peers at this model's price; ranks 1 = best. */
+export interface PeerTable {
+  own: PeerRow; peers: PeerRow[]; median: Record<string, number | null>; rank: Record<string, number | null>
+  of: Record<string, number>; columns: [key: string, label: string, kind: 'num' | 'pct' | 'x', way: 1 | -1][]
+}
 /** What the client holds and saves. The API takes it as is (it ignores excluded_years and saved_at). */
 export interface ModelDoc {
   version: 6
@@ -199,6 +223,7 @@ export interface ModelDoc {
   assumption_sources: AssumptionSources // 4.2
   flag_notes: FlagNote[] // 4.3: approved explanations of forensic flags
   reviewed_at: string | null // "Mark as reviewed"; cleared when the model changes
+  peers?: PeersDoc | null // 5.2, optional: documents saved before it have none
 }
 /** What a sentence of the note rests on: a computed fact's key, a citation id ("C1"), or a quote the model gave. */
 export type NoteRef = string | { file: string; page: number; quote: string }
@@ -256,6 +281,7 @@ export interface Opened { id?: string; doc?: ModelDoc; parsed: Parsed }
 export interface Projection {
   years: string[]; scenarios: Record<Scenario, Row[]>; valuation: Valuation
   inputs_hash?: string // what the numbers come from (server.inputs_hash); a note with another hash is stale
+  peers?: PeerTable | null // null until peers are compared
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

@@ -113,6 +113,7 @@ def main():
     filed = filings_check(co)
     review_rules_check(co)
     pins_check(co)
+    peer_t = peers_check(co)
     m = co["market"]
     assert m["price"] == 1600 and m["shares"] == 5.0 and m["shares_hist"] == [5.0] * 10, m
     assert m["price_hist"][0] == 500 and m["price_hist"][-1] is None and len(m["price_hist"]) == 10, m
@@ -266,9 +267,11 @@ def main():
             _same(ws, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ex[s].items()}}, (s, j))
         _same_valuation(ws.parent["Valuation"], model.valuation(projs, co["hist"], None, ex["base"], co["market"], ex), s)
         _same_quarters(ws.parent["Quarters"], co["quarters"])
-    for i, s in enumerate(model.SCENARIOS):  # a company built from filings exports the same live formulas
+    # a company built from filings exports the same live formulas; with peers, a Peers sheet of values beside them
+    peer_t = model.peer_table(dict(peer_t["own"], metrics=model.peer_metrics(filed["hist"], 1650.0, 5.0)), peer_t["peers"])
+    for i, s in enumerate(model.SCENARIOS):
         (tmp / f"filed-{s}").mkdir()
-        (tmp / f"filed-{s}" / "model.xlsx").write_bytes(model.to_excel(filed, seeded, n=5, active=s))
+        (tmp / f"filed-{s}" / "model.xlsx").write_bytes(model.to_excel(filed, seeded, n=5, active=s, peers=peer_t))
         wsf = recalc(tmp / f"filed-{s}" / "model.xlsx", tmp / f"filed-{s}" / "calc")
         pf = model.project(filed["hist"], ex[s], 5)
         for j, c in enumerate(pf):
@@ -276,6 +279,7 @@ def main():
         for j, h in enumerate(filed["hist"]):
             _same(wsf, rows, 2 + j, {k: h[k] for k in ("ebitda", *RETURNS)}, ("filed hist", j))
         _same_quarters(wsf.parent["Quarters"], filed["quarters"])
+        _same_peers(wsf.parent["Peers"], peer_t)
     edge = {s: dict(p) for s, p in seeded.items()}
     edge["base"].update(int_rate={"start": 0.3, "end": None}, mi_pct={"start": -0.1, "end": None})
     edge["bear"]["capex_pct"] = {"start": 0.4, "end": None}
@@ -1243,7 +1247,7 @@ def library_check(root, co, scenarios):
           "valuation": model.VALUATION}
     up = server.ModelDoc.model_validate(v4).model_dump(mode="json")
     assert up == {**v4, "version": 6, "company": {**v4["company"], "quarters": None, "source": None}, "filings": [], "proposals": [],
-                  "notes": {}, "reports": [], "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None}, up
+                  "notes": {}, "reports": [], "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None}, up
     # saved before 3.4: no COGS line in the company, no cogs_pct / dpo in the scenarios. They come back as 0 (days stay
     # on revenue, payables stay in other liabilities) and the model projects exactly as it did
     pre = {k: {"start": x, "end": None} for k, x in PINS["synthetic"]["defaults"].items()}
@@ -1276,8 +1280,8 @@ def library_check(root, co, scenarios):
     v5 = {"version": 5, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
           "excluded_years": ["FY2020"], "saved_at": None, "valuation": val, "filings": [], "proposals": [],
           "notes": {}, "reports": []}
-    assert server.ModelDoc.model_validate(v5).model_dump(mode="json") == {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None}
-    data = {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None}
+    assert server.ModelDoc.model_validate(v5).model_dump(mode="json") == {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None}
+    data = {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None}
     assert server.restatements(co, root) is None, "nothing saved yet: no comparison"
     doc = server.ModelDoc.model_validate(data)
     mid, at = server.save_model(doc, root, now=datetime(2026, 10, 15, 12, 41, 5))
@@ -1365,6 +1369,7 @@ def library_check(root, co, scenarios):
     thesis_check(server, root, data)
     reimport_check(server, root, co, data)
     fetch_api_check(server, root, co, data)
+    peers_api_check(server, root, co, data)
 
 
 def reimport_check(server, root, co, data):
@@ -2381,6 +2386,29 @@ def _no_dimension(path):
             z.writestr(n, b)
 
 
+class _Resp(io.BytesIO):
+    def __init__(self, url, body):
+        super().__init__(body)
+        self.url, self.headers = url, {}
+
+    def geturl(self):
+        return self.url
+
+
+def _fake_socket(net, calls, online):
+    """An opener class for sources.Client: answers from `net` (url or its start -> body), logs every url in `calls`,
+    fails like a dropped connection when online[0] is False or nothing matches. Everything above it is the real client."""
+    class Opener:
+        def open(self, req, timeout):
+            url = req.full_url
+            calls.append(url)
+            body = next((v for k, v in net.items() if url.startswith(k)), None) if online[0] else None
+            if body is None:
+                raise OSError("no network")
+            return _Resp(url, body if isinstance(body, bytes) else json.dumps(body).encode())
+    return Opener
+
+
 def fetch_api_check(server, root, co, data):
     """5.1: add a company by ticker, offline: NSE's answers are recorded fixtures served through the client's own
     cache, size-cap, allow-list and politeness code (only the socket is fake). Search, price and fetch never call the
@@ -2417,23 +2445,7 @@ def fetch_api_check(server, root, co, data):
            for i, x in enumerate(d) if i >= len(d) - 4},
     }
     calls, online = [], [True]
-
-    class Resp(io.BytesIO):
-        def __init__(self, url, body):
-            super().__init__(body)
-            self.url, self.headers = url, {}
-
-        def geturl(self):
-            return self.url
-
-    class Opener:  # the socket: everything above it (cache, caps, allow-list, gap) is the real client
-        def open(self, req, timeout):
-            url = req.full_url
-            calls.append(url)
-            body = next((v for k, v in net.items() if url.startswith(k)), None) if online[0] else None
-            if body is None:
-                raise OSError("no network")
-            return Resp(url, body if isinstance(body, bytes) else json.dumps(body).encode())
+    Opener = _fake_socket(net, calls, online)
 
     client, models, llm, adapter = TestClient(server.app), server.MODELS, ai.llm, server.export_source
     server.MODELS, ai.llm, server.export_source = root, None, None  # never the real library, the LLM or Export
@@ -2532,6 +2544,171 @@ def fetch_api_check(server, root, co, data):
     finally:
         server.MODELS, ai.llm, server.export_source = models, llm, adapter
         server._clients.clear()
+
+
+def peers_check(co):
+    """5.2 by rules: each measure from the reported years and a price, the peers' median (the company left out), ranks
+    1 = best in each measure's direction (ties share), None where a base is missing."""
+    h = co["hist"]
+    m = model.peer_metrics(h, 2000.0, 5.0)
+    near = lambda a, b: a is not None and abs(a - b) < 1e-9 * max(1, abs(b))  # noqa: E731
+    assert near(m["mcap"], 10000) and near(m["revenue"], h[-1]["revenue"]), m
+    assert near(m["g3"], (h[-1]["revenue"] / h[-4]["revenue"]) ** (1 / 3) - 1) and abs(m["g5"] - 0.12) < 1e-6, m
+    assert near(m["pe"], 10000 / h[-1]["pat"]) and near(m["net_margin"], h[-1]["pat"] / h[-1]["revenue"]), m
+    assert near(m["cash_conv"], sum(x["cfo"] for x in h[-3:]) / sum(x["pat"] for x in h[-3:])), m
+    assert near(m["roce"], model.returns(h[-1], h[-2])["roce"]) and near(m["nd_ebitda"], model.returns(h[-1], h[-2])["nd_ebitda"])
+    assert set(m) == {k for k, *_ in model.PEERS}, m
+    short = model.peer_metrics(h[-4:], None, None)  # four filed years, no price: no 5-year growth, no multiples
+    assert short["g5"] is None and short["g3"] is not None and short["pe"] is None and short["mcap"] is None, short
+    loss = [dict(x, pat=-5.0) for x in h]
+    assert model.peer_metrics(loss, 100.0, 1.0)["pe"] is None and model.peer_metrics(loss, 100.0, 1.0)["cash_conv"] is None
+    own = {"name": "Own", "symbol": "OWN", "year": "FY2025", "metrics": {"pe": 20.0, "roce": 0.3, "g3": None}}
+    peers = [{"symbol": "A", "metrics": {"pe": 10.0, "roce": 0.3, "g3": 0.1}}, {"symbol": "B", "metrics": {"pe": 30.0, "roce": 0.2, "g3": 0.2}},
+             {"symbol": "C", "metrics": {"pe": None, "roce": 0.5, "g3": 0.3}}, {"symbol": "D", "error": "no filings"}]
+    t = model.peer_table(own, peers)
+    assert t["median"]["pe"] == 20.0 and t["median"]["roce"] == 0.3 and t["median"]["g3"] == 0.2, t["median"]
+    assert t["rank"]["pe"] == 2 and t["of"]["pe"] == 3, "P/E: lower ranks first (A 10x is cheaper)"
+    assert t["rank"]["roce"] == 2 and t["of"]["roce"] == 4, "ROCE: higher first; a tie with A shares 2nd behind C"
+    assert t["rank"]["g3"] is None and t["of"]["g3"] == 3 and t["median"]["mcap"] is None, t
+    return t
+
+
+def _same_peers(ps, t):
+    """The Peers sheet holds the table's values: the company, each peer, the median and the ranks."""
+    keys = [k for k, *_ in model.PEERS]
+    rows = [t["own"], *t["peers"]]
+    for i, p in enumerate(rows):
+        r = 4 + i
+        assert ps.cell(r, 2).value == p.get("symbol"), (r, ps.cell(r, 2).value)
+        for j, k in enumerate(keys):
+            want, got = (p.get("metrics") or {}).get(k), ps.cell(r, 4 + j).value
+            assert (want is None and got is None) or abs(got - want) < 1e-9 * max(1, abs(want)), (p.get("symbol"), k, got, want)
+    r = 4 + len(rows)
+    assert ps.cell(r, 1).value == "Peer median" and str(ps["A1"].value).startswith("Peers at export"), ps["A1"].value
+    for j, k in enumerate(keys):
+        want = t["median"][k]
+        assert (want is None and ps.cell(r, 4 + j).value is None) or abs(ps.cell(r, 4 + j).value - want) < 1e-9 * max(1, abs(want))
+        assert ps.cell(r + 1, 4 + j).value == (None if t["rank"][k] is None else f"{t['rank'][k]} of {t['of'][k]}")
+
+
+def peers_api_check(server, root, co, data):
+    """5.2 through the API, offline (fixtures under the real client, like fetch_api_check): candidates by rules (same
+    sector, size, industry first), AI picks checked by rules (no invented ticker, not itself, data there, basis it was
+    given, one plain line), each peer's numbers read by rules, the table on /api/project and a Peers sheet on export.
+    Project, export, save and reopen with peers make no LLM call and no request."""
+    import sources  # noqa: PLC0415
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    nse, arch = sources.NSE + "/api/", "https://nsearchives.nseindia.com/"
+    d = co["dates"]
+    sector = "Capital Goods"
+    csv = "Company Name,Industry,Symbol,Series,ISIN Code\n" + "".join(f"{n},{sec},{sym},EQ,X\n" for n, sec, sym in (
+        ("Test Industries Ltd.", sector, "TESTIND"), ("Peer A Ltd.", sector, "PEERA"), ("Peer B Ltd.", sector, "PEERB"),
+        ("Peer C Ltd.", sector, "PEERC"), ("Far Ltd.", sector, "FAR"), ("No Quote Ltd.", sector, "NOQUOTE"),
+        ("Bank Ltd.", "Financial Services", "BANKX")))
+    caps = {"TESTIND": 8000, "PEERA": 20000, "PEERB": 6000, "PEERC": 9000, "FAR": 900000, "NOQUOTE": 8000, "BANKX": 8000}
+
+    def q(name, basic, industry, cap, price=100.0):
+        return {"equityResponse": [{"metaData": {"companyName": name}, "tradeInfo": {"lastPrice": price, "issuedSize": cap / price * 1e7,
+                "faceValue": 10, "ffmc": cap * 0.5e7}, "secInfo": {"sector": sector, "industryInfo": industry, "basicIndustry": basic,
+                "listingDate": "01-Jan-2010 00:00:00"}, "lastUpdateTime": "16-Oct-2026 16:00:00"}]}
+    quote = nse + "NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N&series=EQ&symbol="
+    filed = [{"toDate": f"{x:%d-%b-%Y}", "period": "Annual", "consolidated": "Consolidated", "filingDate": f"{x:%d-%b-%Y} 10:00",
+              "xbrl": f"{arch}corporate/xbrl/A{x.year}.xml"} for x in d[-4:]]
+    net = {
+        sources.SECTOR_LIST: csv.encode(),
+        sources.SIZE_LIST: {"data": {"data": [{"symbol": "NIFTY TOTAL MKT"}, *({"symbol": k, "ffmc": v * 0.5e7} for k, v in caps.items())]}},
+        quote + "TESTIND": q("Test Industries Limited", "Widgets", "Machines", 8000),
+        quote + "PEERA": q("Peer A Limited", "Widgets", "Machines", 20000, 1650.0),
+        quote + "PEERB": q("Peer B Limited", "Gadgets", "Machines", 6000),
+        quote + "PEERC": q("Peer C Limited", "Pumps", "Engines", 9000),
+        quote + "FAR": q("Far Limited", "Widgets", "Machines", 900000),
+        **{f"{nse}corporates-financial-results?index=equities&symbol=PEERA&period={k}": v for k, v in (("Annual", filed), ("Quarterly", []))},
+        nse + "integrated-filing-results?index=equities&symbol=PEERA": {"data": []},
+        **{f"{arch}corporate/xbrl/A{x.year}.xml": filing_xml(filing_facts(co, i), _year_start(x), x)
+           for i, x in enumerate(d) if i >= len(d) - 4},
+    }
+    calls, online = [], [True]
+    client, models, llm, adapter, env = TestClient(server.app), server.MODELS, ai.llm, server.export_source, os.environ.pop("LLM_CMD", None)
+    server.MODELS, server.export_source = root / "peers", None
+    server._clients.clear()
+    try:
+        c = server.nse()
+        c.opener, c.gap = _fake_socket(net, calls, online)(), 0.0
+        for bad in ("../X", "TCS?x=1"):
+            assert client.post("/api/peers/candidates", json={"symbol": bad}).status_code == 422
+            assert client.post("/api/peers/fetch", json={"symbols": ["PEERA", bad]}).status_code == 422
+        assert client.post("/api/peers/fetch", json={"symbols": [f"P{i}" for i in range(13)]}).status_code == 422
+        assert not calls, calls
+        # candidates: same sector only, not itself, no quote = not fetchable = left out, same industry first, then size
+        ev = [json.loads(x) for x in client.post("/api/peers/candidates", json={"symbol": "TESTIND"}).text.splitlines()]
+        assert not [e for e in ev if "error" in e], ev
+        cands = ev[-1]["candidates"]
+        assert [x["symbol"] for x in cands] == ["PEERA", "FAR", "PEERB", "PEERC"], cands  # Widgets x2 (near size first), Machines, rest
+        assert cands[0]["why"] == "Same industry (Widgets) · 2.5x its size" and cands[2]["why"].startswith("Same industry group (Machines)"), cands
+        assert ev[1]["company"]["sector"] == sector and any("Checking the" in e.get("step", "") for e in ev), ev
+        # no LLM_CMD: a plain 503, and the candidates still work (tick by hand)
+        r = client.post("/api/peers/pick", json={"symbol": "TESTIND"})
+        assert r.status_code == 503 and "LLM_CMD" in r.json()["detail"], r.text
+        n_calls = len(calls)
+        reply = {"picks": [{"symbol": "PEERA", "reason": "Makes the same widgets for the same buyers.", "basis": "classification"},
+                           {"symbol": "FAKEX", "reason": "Similar.", "basis": "classification"},
+                           {"symbol": "TESTIND", "reason": "Itself.", "basis": "classification"},
+                           {"symbol": "PEERB", "reason": "Same machine segment.", "basis": "segments"},
+                           {"symbol": "PEERC", "reason": "A good one to buy.", "basis": "classification"},
+                           {"symbol": "peera", "reason": "Again.", "basis": "classification"}]}
+        count = fake_llm(root / "llm-peers", reply)
+        r = client.post("/api/peers/pick", json={"symbol": "TESTIND"}).json()
+        picks = {x["symbol"]: x for x in r["proposal"]["picks"]}
+        fail = {s: [c["name"] for c in x["checks"] if not c["pass"]] for s, x in picks.items()}
+        assert fail == {"PEERA": [], "FAKEX": ["On the candidate list", "Data available"], "TESTIND": ["On the candidate list", "Not the company itself", "Data available"],
+                        "PEERB": ["Source stated"], "PEERC": ["One plain line"]}, fail
+        assert r["proposal"]["checks"][0]["pass"] is False and "tick 3 more" in r["proposal"]["checks"][0]["detail"], r["proposal"]["checks"]
+        prompt = (root / "llm-peers" / "prompt-0.txt").read_text()
+        assert "PEERA | Peer A Limited | Widgets" in prompt and "BANKX" not in prompt and "segments above" in prompt and count() == 1
+        # the pick lists the candidates again from the cache; only the one without a quote is asked again
+        assert all("symbol=NOQUOTE" in u for u in calls[n_calls:]), calls[n_calls:]
+        # with an approved segments note the segments basis is honest, and the names reach the prompt
+        notes = {"ar:segments:FY2025": {"rows": [{"label": "Widgets"}, {"label": "Spares"}]}}
+        r = client.post("/api/peers/pick", json={"symbol": "TESTIND", "notes": notes}).json()
+        assert [c["pass"] for c in next(x for x in r["proposal"]["picks"] if x["symbol"] == "PEERB")["checks"]] == [True] * 5
+        assert "Widgets; Spares" in (root / "llm-peers" / "prompt-1.txt").read_text() and r["proposal"]["basis"] == "segments"
+        os.environ.pop("LLM_CMD")
+        # each peer read by rules, row by row; one that can't be read says why
+        ev = [json.loads(x) for x in client.post("/api/peers/fetch", json={"symbols": ["PEERA", "NOQUOTE"]}).text.splitlines()]
+        rows = [e["row"] for e in ev if "row" in e]
+        a = rows[0]
+        assert a["symbol"] == "PEERA" and a["year"] == model.fy(d[-1]) and a["price"] == 1650.0 and not a.get("error"), a
+        assert abs(a["metrics"]["revenue"] - co["hist"][-1]["revenue"]) < 1e-3 and abs(a["metrics"]["g3"] - 0.12) < 1e-5, a["metrics"]
+        assert abs(a["metrics"]["mcap"] - 20000) < 1e-6 and a["metrics"]["g5"] is None and "NSE filing" in a["source"], a
+        assert rows[1]["symbol"] == "NOQUOTE" and rows[1]["error"] and rows[1].get("metrics") is None, rows[1]
+        # the table at this model's price; Excel's Peers sheet; save and reopen; no LLM call, no request
+        ai.llm, n_calls = None, len(calls)
+        peers = {"symbol": "TESTIND", "candidates": cands, "proposal": r["proposal"], "chosen": ["PEERA", "NOQUOTE"],
+                 "approved_at": "2026-10-18T10:00:00", "rows": rows}
+        doc = dict(data, peers=peers, valuation=dict(model.VALUATION, price=2000.0, shares=5.0))
+        t = client.post("/api/project", json=doc).json()["peers"]
+        want = model.peer_metrics(server.ModelRequest.model_validate(doc).upgraded()["hist"], 2000.0, 5.0)
+        assert t["own"]["metrics"] == want and t["own"]["symbol"] == "TESTIND" and len(t["peers"]) == 2, t["own"]
+        assert t["median"]["revenue"] == a["metrics"]["revenue"] and t["of"]["revenue"] == 2, t
+        assert client.post("/api/project", json=data).json()["peers"] is None
+        x = client.post("/api/export", json=doc)
+        assert x.status_code == 200
+        _same_peers(openpyxl.load_workbook(io.BytesIO(x.content))["Peers"], t)
+        assert "Peers" not in openpyxl.load_workbook(io.BytesIO(client.post("/api/export", json=data).content)).sheetnames
+        saved = client.post("/api/models", json=doc).json()
+        back = client.get(f"/api/models/{saved['id']}").json()["doc"]
+        assert back["peers"]["chosen"] == ["PEERA", "NOQUOTE"] and back["peers"]["rows"][0]["metrics"] == a["metrics"], back["peers"]
+        assert len(calls) == n_calls, calls[n_calls:]
+        bad = dict(doc, peers=dict(peers, rows=[dict(a, symbol="../x")]))
+        assert client.post("/api/project", json=bad).status_code == 422
+    finally:
+        server.MODELS, ai.llm, server.export_source = models, llm, adapter
+        server._clients.clear()
+        os.environ.pop("LLM_CMD", None)
+        if env is not None:
+            os.environ["LLM_CMD"] = env
 
 
 def _blank(tmp):

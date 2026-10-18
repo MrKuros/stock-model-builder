@@ -36,6 +36,7 @@ interface Props {
 export default function Workspace({ route, models, parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, save, notice, onRetry }: Props) {
   const { company, years: histYears, drivers } = parsed
   const { n, scenarios, valuation, filings, notes, flag_notes, assumption_sources, excluded_years } = doc
+  const peers = doc.peers ?? null
   const slug = route.slug!
   // any change to what the numbers come from puts the note back to draft; an input changed without a new source
   // (a strip, a typed value) is yours: its source flips to "manual"
@@ -60,11 +61,11 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   useEffect(() => {
     const ctl = new AbortController()
     // the words' sources go too: they don't move a number, only the note's inputs hash (stale words)
-    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation, filings, notes, flag_notes, assumption_sources, excluded_years }, ctl.signal))
+    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation, filings, notes, flag_notes, assumption_sources, excluded_years, peers }, ctl.signal))
       .then(p => { setProjection(p); setError(null) })
       .catch(e => { if (e.name !== 'AbortError') { setProjection(null); setError(e.message) } })
     return () => ctl.abort()
-  }, [company, scenarios, n, valuation, filings, notes, flag_notes, assumption_sources, excluded_years])
+  }, [company, scenarios, n, valuation, filings, notes, flag_notes, assumption_sources, excluded_years, peers])
 
   // A filing attached or removed changes the history (payables, leases, cash-flow capex) and so the defaults; like
   // excluding a year, it never changes the assumptions by itself. The upgraded defaults are offered in one click.
@@ -126,7 +127,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const exportXlsx = async () => {
     setExporting(true)
     try {
-      const res = await fetch('/api/export', postJson({ company, scenarios, active: doc.active, n, valuation, filings, notes }))
+      const res = await fetch('/api/export', postJson({ company, scenarios, active: doc.active, n, valuation, filings, notes, peers }))
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? 'Export failed. Try again.')
       const url = URL.createObjectURL(await res.blob())
       const link = Object.assign(document.createElement('a'), { href: url, download: `${company.name} model.xlsx` })

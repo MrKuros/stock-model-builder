@@ -1108,3 +1108,34 @@ a.cov-open { color: var(--ink); text-decoration: none; }
 .split2 > .sec { margin-top: 0; }
 .sens-wrap, .mult .table-wrap { margin: 0; }
 .statements > p.muted, .statements > .scroll-hint { margin: 10px 0 2px; }
+
+/* ---------- peers (5.2) ---------- */
+#peers { display: grid; gap: 10px; }
+#peers > .why, #peers > p { margin: 0; }
+.peer-acts { display: flex; gap: 14px; flex-wrap: wrap; }
+.peer-off { padding: 10px 14px; border-left: 3px solid var(--market); background: var(--market-soft); border-radius: 0 6px 6px 0; font-size: 14px; }
+.peer-sym, .peer-add { display: grid; gap: 6px; max-width: 560px; }
+.peer-sym label, .peer-add label { font-size: 14px; font-weight: 600; }
+.peer-prop { display: grid; gap: 6px; font-size: 14px; }
+.peer-prop p { margin: 0; }
+.peer-list { border: 1px solid var(--rule); border-radius: 8px; background: var(--panel); padding: 6px 0; margin: 0; min-width: 0; }
+.peer-list legend { font: 600 13px var(--ui); padding: 0 8px; margin-left: 10px; color: var(--ink-2); }
+.peer-list ul { list-style: none; margin: 0; padding: 0; }
+.peer-list li { border-top: 1px solid var(--rule); }
+.peer-list li:first-child { border-top: 0; }
+.peer-list li.on { background: color-mix(in srgb, var(--ours-soft) 55%, transparent); }
+.peer-list label { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; align-items: start; padding: 9px 14px; cursor: pointer; font-size: 14px; line-height: 1.4; min-height: 44px; }
+.peer-list input { width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--ours); }
+.peer-list .tag { border: 1px solid var(--rule-2); color: var(--ink-2); margin-left: 4px; }
+.peer-why { display: block; margin-top: 3px; color: var(--ink); font-family: var(--prose); }
+.peer-rej { margin: 0; padding: 4px 18px 12px 34px; display: grid; gap: 6px; font-size: 13.5px; }
+.peer-wrap { margin: 0; }
+.peer-table th:first-child { min-width: 170px; }
+.peer-table thead th { white-space: normal; vertical-align: bottom; min-width: 68px; font-size: 12px; }
+.peer-table thead th:first-child { text-align: left; }
+.peer-table tbody th .tag { border: 1px solid var(--rule-2); color: var(--ink-3); margin: 0 0 0 4px; }
+.peer-table tr.is-own th, .peer-table tr.is-own td { color: var(--ours); font-weight: 600; background: var(--ours-soft); }
+.peer-table tr.is-miss td.peer-err { text-align: left; white-space: normal; color: var(--ink-2); font: 13px var(--ui); }
+.peer-table tr.peer-rank td { font: 12px var(--num); color: var(--ink-2); }
+.peer-line { margin: 14px 0 0; font-size: 14px; color: var(--ink-2); line-height: 1.5; }
+.peer-line a { white-space: nowrap; }

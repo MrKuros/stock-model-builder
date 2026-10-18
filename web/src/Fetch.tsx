@@ -10,9 +10,10 @@ export interface FetchEvent {
   error?: string; done?: true
 }
 
-/** POST /api/nse/fetch, calling `on` for each line as it arrives; aborting the signal stops the server's work too. */
-export async function streamFetch(body: unknown, signal: AbortSignal, on: (e: FetchEvent) => void) {
-  const res = await fetch('/api/nse/fetch', postJson(body, signal))
+/** POST a JSON-lines endpoint (/api/nse/fetch by default), calling `on` for each line as it arrives; aborting the
+ * signal stops the server's work too. */
+export async function streamFetch<E = FetchEvent>(body: unknown, signal: AbortSignal, on: (e: E) => void, url = '/api/nse/fetch') {
+  const res = await fetch(url, postJson(body, signal))
   if (!res.ok || !res.body) {
     const b = await res.json().catch(() => null)
     throw new Error(typeof b?.detail === 'string' ? b.detail : `Server error (${res.status}). Try again.`)

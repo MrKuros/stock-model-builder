@@ -1059,3 +1059,87 @@ def thesis_checks(v, facts, cites, texts):
         out = [{"name": c["name"], "pass": None, "detail": f"The text of {', '.join(sorted(gone))} isn't on this machine "
                 "any more; those quotes were checked when approved."} if c["name"] == "Quotes on page" else c for c in out]
     return out
+
+
+# ---------- peers (5.2): rules list the candidates; the model picks by business mix; rules check every pick ----------
+
+PEER_PICKS = (4, 8)
+PEER_REASON = 160  # characters: one line
+BASES = {"segments": "its annual report’s segments and NSE’s classification",
+         "classification": "NSE’s industry classification only"}
+
+
+def _size(x):
+    return "size unknown" if x.get("size") is None else f"{x['size']:.2f}x its market cap"
+
+
+def peers_prompt(own, cands, segments):
+    seg = (f"Its business segments, from its annual report (a note you approved, {segments['year']}): "
+           f"{'; '.join(segments['names'])}.\n" if segments else "")
+    lines = "\n".join(f"{x['symbol']} | {x['name']} | {x.get('basic_industry') or x.get('industry') or 'not given'} | "
+                      f"{_size(x)}" for x in cands)
+    return (f"Pick listed peers for comparing {own['name']} (NSE: {own['symbol']}) in an analyst's table.\n"
+            f"NSE classifies it as: sector {own.get('sector') or 'not given'}; industry {own.get('industry') or 'not given'}; "
+            f"basic industry {own.get('basic_industry') or 'not given'}.\n{seg}"
+            f"Candidates, from NSE's list of companies in the same sector (symbol | name | basic industry | size):\n{lines}\n\n"
+            f"Pick the {PEER_PICKS[0]} to {PEER_PICKS[1]} candidates whose business mix is most like {own['name']}'s: what "
+            "they sell, to whom, and how they earn. A closer business beats a closer size. Use only symbols from the list, "
+            "exactly as written. For each, one plain line (at most 140 characters, no figures, not advice: never the words "
+            "buy or sell) saying why, and the basis you relied on: \"segments\" if the reason rests on the segments above, "
+            "else \"classification\".\n"
+            'JSON: {"picks": [{"symbol": "ABC", "reason": "...", "basis": "classification"}]}')
+
+
+def _peers_shape(v):
+    picks = v.get("picks") if isinstance(v, dict) else None
+    if not isinstance(picks, list) or not picks:
+        return 'expected {"picks": [...]} with at least one pick'
+    if not all(isinstance(x, dict) and all(isinstance(x.get(k), str) for k in ("symbol", "reason", "basis")) for x in picks):
+        return "each pick needs symbol, reason and basis as strings"
+    return None
+
+
+def pick_peers(own, cands, segments=None):
+    """The model's picks as given: {"picks": [{symbol, reason, basis}]} (checked by peer_checks, never used as is)."""
+    return ask_json(peers_prompt(own, cands, segments), _peers_shape)
+
+
+def peer_checks(reply, own, cands, segments=None):
+    """Every pick checked by rules: on the candidate list (no invented ticker), not the company itself, NSE data
+    there (a quote with price and share count), the basis it claims was sent, one plain line. Returns the picks
+    [{symbol, name, reason, basis, checks, pass}] (repeats dropped) and the proposal's own check (how many passed)."""
+    by = {x["symbol"]: x for x in cands}
+    picks, seen = [], set()
+    for x in reply["picks"]:
+        sym = x["symbol"].strip().upper()[:24]
+        if sym in seen:
+            continue
+        seen.add(sym)
+        c, reason, basis = by.get(sym), " ".join(x["reason"].split()), x["basis"].strip().lower()
+        w = wording_check(reason)
+        line_ok = 0 < len(reason) <= PEER_REASON and w["pass"]
+        checks = [
+            {"name": "On the candidate list", "pass": c is not None,
+             "detail": f"Listed on NSE in {c['sector']}: {c['why']}." if c else
+             f"{sym} isn't one of the {len(cands)} candidates rules found, so it is rejected (no invented tickers)."},
+            {"name": "Not the company itself", "pass": sym != own["symbol"],
+             "detail": "A different company." if sym != own["symbol"] else "That's the company being compared."},
+            {"name": "Data available", "pass": bool(c and c.get("price") and c.get("shares")),
+             "detail": "NSE quotes its price and share count; its results are read when you compare." if c and c.get("price")
+             and c.get("shares") else "No NSE price or share count, so no multiples."},
+            {"name": "Source stated", "pass": basis in BASES and (basis != "segments" or bool(segments)),
+             "detail": f"From {BASES[basis]}." if basis in BASES and (basis != "segments" or segments)
+             else f'It cites "{basis[:30]}", which it wasn’t given.'},
+            {"name": "One plain line", "pass": line_ok, "detail": "One line, no recommendation wording." if line_ok
+             else "No reason given." if not reason else f"{len(reason)} characters; at most {PEER_REASON}."
+             if len(reason) > PEER_REASON else w["detail"]},
+        ]
+        picks.append({"symbol": sym, "name": c["name"] if c else sym, "reason": reason[:300], "basis": basis[:30],
+                      "checks": checks, "pass": all(k["pass"] for k in checks)})
+    ok = sum(p["pass"] for p in picks)
+    lo, hi = min(PEER_PICKS[0], len(cands)), PEER_PICKS[1]
+    count = {"name": f"{PEER_PICKS[0]} to {PEER_PICKS[1]} peers", "pass": lo <= ok <= hi,
+             "detail": f"{ok} pick{'' if ok == 1 else 's'} passed every rule" + (
+                 "." if lo <= ok <= hi else f"; tick {lo - ok} more yourself." if ok < lo
+                 else f"; only the first {hi} are ticked.")}
+    return picks, count

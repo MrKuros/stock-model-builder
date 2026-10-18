@@ -2253,16 +2253,98 @@ def _quarters_sheet(wb, q, formats):
     qs.freeze_panes = qs.cell(top + 1, 2)
 
 
+# ---------- peers (5.2): the same measures for the company and each peer, by rules ----------
+
+PEERS = (  # key, label, kind, direction: 1 = higher ranks first, -1 = lower ranks first (less debt, cheaper)
+    ("mcap", "Market cap, Rs crore", "num", 1), ("revenue", "Revenue, Rs crore", "num", 1),
+    ("g3", "Revenue growth, 3 years", "pct", 1), ("g5", "Revenue growth, 5 years", "pct", 1),
+    ("ebitda_margin", "EBITDA margin", "pct", 1), ("net_margin", "Net margin", "pct", 1), ("roce", "ROCE", "pct", 1),
+    ("cash_conv", "Cash conversion (CFO / net profit, 3 years)", "pct", 1), ("nd_ebitda", "Net debt / EBITDA", "x", -1),
+    ("pe", "P/E", "x", -1), ("ev_ebitda", "EV/EBITDA", "x", -1), ("pb", "P/B", "x", -1),
+)
+
+
+def peer_metrics(hist, price=None, shares=None):
+    """One company's comparison measures from its reported years (the last one = hist[-1]) and a price and share
+    count: size, revenue CAGRs, margins, ROCE (returns()), cash conversion, net debt / EBITDA and P/E, EV/EBITDA, P/B
+    at that price (_multiples(), minorities from the last year's profit, so the company's own EV/EBITDA can differ a
+    little from the Valuation page's, which uses the base case's). None where a number or a positive base is missing."""
+    h, n = hist[-1], len(hist)
+    r = returns(h, hist[-2] if n > 1 else None)
+    last3 = hist[-3:]
+    cfo, pat = [x.get("cfo") for x in last3], sum(x["pat"] for x in last3)
+    mcap = price * shares if price and shares and price > 0 and shares > 0 else None
+    after = h["pbt"] - h["tax"]
+    nci = max(0.0, (after - h["pat"]) / after) if after > 0 else 0.0
+    rev = h["revenue"] if h["revenue"] > 0 else None
+    return {"mcap": mcap, "revenue": h["revenue"],
+            "g3": _cagr(hist[-4]["revenue"], h["revenue"], 3) if n > 3 else None,
+            "g5": _cagr(hist[-6]["revenue"], h["revenue"], 5) if n > 5 else None,
+            "ebitda_margin": rev and h["ebitda"] / rev, "net_margin": rev and h["pat"] / rev, "roce": r["roce"],
+            "cash_conv": sum(cfo) / pat if n >= 3 and pat > 0 and None not in cfo else None,
+            "nd_ebitda": r["nd_ebitda"], **_multiples(mcap, _debt(h) - h["cash"] - h["investments"], h, min(nci, 0.99))}
+
+
+def peer_table(own, peers):
+    """The company ({name, symbol, year, metrics}) against its peers (the same, or {symbol, error}): per measure the
+    peers' median (the company left out) and the company's rank among everyone that has it, 1 = best (PEERS'
+    direction; ties share a rank), `of` = how many were ranked."""
+    ok = [p for p in peers if p.get("metrics")]
+    out = {"own": own, "peers": peers, "median": {}, "rank": {}, "of": {}, "columns": PEERS}
+    for k, _, _, way in PEERS:
+        xs = [x for p in ok if (x := p["metrics"].get(k)) is not None]
+        mine = own["metrics"].get(k)
+        out["median"][k] = statistics.median(xs) if xs else None
+        out["rank"][k] = None if mine is None else 1 + sum((x - mine) * way > 0 for x in xs)
+        out["of"][k] = len(xs) + (mine is not None)
+    return out
+
+
+def _peers_sheet(wb, t, at, formats):
+    """'Peers' sheet: the peer table as values at export (no formulas: the peers' numbers aren't in this workbook)."""
+    ps = wb.create_sheet("Peers")
+    ps["A1"] = (f"Peers at export, {at:%d %b %Y}: values, not formulas. Each company's last reported year; market cap "
+                "and multiples at the NSE price when its data was fetched (this company: the price in this model). "
+                "Rank 1 = best: largest, fastest growth, highest margins, returns and cash conversion, least debt, "
+                "cheapest multiple. Median = the peers', this company left out.")
+    ps["A1"].font = Font(italic=True, color="808080")
+    top, bold = 3, Font(bold=True)
+    for j, h in enumerate(["Company", "Symbol", "Year", *(label for _, label, _, _ in PEERS)]):
+        ps.cell(top, 1 + j, h).font = bold
+    rows = [t["own"], *t["peers"]]
+    for i, p in enumerate(rows):
+        r = top + 1 + i
+        ps.cell(r, 1, p.get("name") or p.get("symbol")).data_type = "s"
+        ps.cell(r, 2, p.get("symbol"))
+        ps.cell(r, 3, p.get("year") or p.get("error"))
+        for j, (k, _, kind, _) in enumerate(PEERS):
+            c = ps.cell(r, 4 + j, (p.get("metrics") or {}).get(k))
+            c.number_format = formats[kind]
+        for j in range(3 + len(PEERS)):
+            ps.cell(r, 1 + j).font = Font(bold=i == 0)
+    r = top + 1 + len(rows)
+    ps.cell(r, 1, "Peer median").font = bold
+    ps.cell(r + 1, 1, f"{t['own'].get('name')}: rank").font = bold
+    for j, (k, _, kind, _) in enumerate(PEERS):
+        ps.cell(r, 4 + j, t["median"][k]).number_format = formats[kind]
+        ps.cell(r + 1, 4 + j, None if t["rank"][k] is None else f"{t['rank'][k]} of {t['of'][k]}")
+    ps.column_dimensions["A"].width = 34
+    for j in range(2 + len(PEERS)):
+        ps.column_dimensions[get_column_letter(2 + j)].width = 13
+    ps.freeze_panes = ps.cell(top + 1, 2)
+
+
 def col(j):
     """Valuation sheet column for explicit year j (B = first projected year)."""
     return get_column_letter(2 + j)
 
 
-def to_excel(co, scenarios, n=5, active="base", val=None):
+def to_excel(co, scenarios, n=5, active="base", val=None, peers=None, at=None):
     """Workbook bytes: historicals as values, projections as live formulas, inputs in blue.
     scenarios: {"base"|"bull"|"bear": {key: {"start", "end"}}}. Each scenario's per-year inputs (from expand())
     sit on the Scenarios sheet; the Model sheet's driver cells pick one with CHOOSE on the selector in B3.
-    val: VALUATION-shaped inputs for the Valuation sheet (None = defaults). co may carry upgrade()'s filings data."""
+    val: VALUATION-shaped inputs for the Valuation sheet (None = defaults). co may carry upgrade()'s filings data.
+    peers: peer_table()'s result, written as values on a Peers sheet (at = the export time)."""
     wb = openpyxl.Workbook()
     cogs, used = on_cogs(co["hist"]), (co.get("sources") or {}).get("used") or {}
     ws = wb.active
@@ -2343,6 +2425,8 @@ def to_excel(co, scenarios, n=5, active="base", val=None):
                      formats, head_fill)
     if co.get("quarters"):
         _quarters_sheet(wb, co["quarters"], formats)
+    if peers:
+        _peers_sheet(wb, peers, at or datetime.now(), formats)
     cash_proj = f"{get_column_letter(2 + nh)}{rows['cash']}:{get_column_letter(1 + len(headers))}{rows['cash']}"
     ws.conditional_formatting.add(cash_proj, CellIsRule(operator="lessThan", formula=["0"],
                                                         font=Font(color="C00000", bold=True),

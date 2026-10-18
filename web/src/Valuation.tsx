@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { niceTicks } from './Chart'
 import { BreakEvens, Bridge, Change, Prose, Tornado, avg, shortName } from './Note'
+import { PeersSection } from './Peers'
 import { PageHead, Toc } from './Shell'
 import { useHref } from './route'
 import {
@@ -231,6 +232,8 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
           </p>
         </details>
       </>}
+
+      <PeersSection parsed={parsed} doc={doc} setDoc={setDoc} projection={projection} short={short} />
     </>
   )
 }
