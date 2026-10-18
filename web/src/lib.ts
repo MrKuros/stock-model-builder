@@ -224,6 +224,25 @@ export interface ModelDoc {
   flag_notes: FlagNote[] // 4.3: approved explanations of forensic flags
   reviewed_at: string | null // "Mark as reviewed"; cleared when the model changes
   peers?: PeersDoc | null // 5.2, optional: documents saved before it have none
+  track?: TrackRecord[] // 5.3, optional: the base forecast as it stood each time new annual results came in
+}
+/** server.track_record: what the base case said before new results replaced the company (rules only). */
+export interface TrackRecord {
+  last: string; dates: string[]; years: string[]; drivers: Record<string, number[]>; lines: Record<string, (number | null)[]>
+  made_at: string | null; recorded_at: string; new_years: string[]; values: Record<Scenario, number | null>
+  price: number | null; implied: number | null; growth: number; flags: { id: string; name: string }[]; note: boolean; kept: string[]
+}
+export interface TrackDriver { key: string; label: string; forecast: number; actual: number; diff: number; err: number | null; hit: boolean; tol: number }
+export interface TrackLine { key: string; label: string; forecast: number; actual: number; err: number | null }
+export interface TrackProposal { key: string; label: string; year: string; forecast: number; actual: number; current: number; proposed: number | null; unusual?: true } // proposed null: an unusual year, nothing proposed
+/** /api/project's tracking: each saved forecast against the years now reported, the hit rate per input, the rules
+ * proposals the latest results raise, and the value range etc. before (was) and now. */
+export interface Tracking {
+  records: { last: string; made_at: string | null; years: { year: string; drivers: TrackDriver[]; lines: TrackLine[] }[] }[]
+  hit_rate: { key: string; label: string; hits: number; scored: number }[]
+  proposals: TrackProposal[]
+  was: Pick<TrackRecord, 'last' | 'made_at' | 'recorded_at' | 'new_years' | 'values' | 'price' | 'implied' | 'flags' | 'note'>
+  now: { values: Record<Scenario, number | null>; price: number | null; implied: number | null; flags: { id: string; name: string }[] }
 }
 /** What a sentence of the note rests on: a computed fact's key, a citation id ("C1"), or a quote the model gave. */
 export type NoteRef = string | { file: string; page: number; quote: string }
@@ -275,6 +294,8 @@ export interface ModelSummary {
   // the coverage row (server._coverage); missing on an old server
   price?: number | null; values?: Record<Scenario, number | null>; implied?: number | null; growth?: number
   why?: string | null; flags?: number; reviewed_at?: string | null
+  symbol?: string | null // NSE symbol when it was added by ticker
+  new_results?: string[] | null // 5.3: years reported since you last marked it reviewed
 }
 /** GET /api/models/{id}: the document plus what the dashboard derives from the company. */
 export interface Opened { id?: string; doc?: ModelDoc; parsed: Parsed }
@@ -282,6 +303,7 @@ export interface Projection {
   years: string[]; scenarios: Record<Scenario, Row[]>; valuation: Valuation
   inputs_hash?: string // what the numbers come from (server.inputs_hash); a note with another hash is stale
   peers?: PeerTable | null // null until peers are compared
+  tracking?: Tracking | null // null until new results have come in after a forecast
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

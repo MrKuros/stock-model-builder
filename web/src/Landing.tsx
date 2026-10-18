@@ -2,19 +2,20 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { MiniRange, latestOf, rangeWords, slugOf } from './Shell'
 import { pathOf, placed } from './route'
 import { NAMES, api, fmt, rs, when, type ModelSummary, type Parsed, type Report } from './lib'
-import { AddBox, FetchRun } from './Fetch'
+import { AddBox, FetchRun, streamFetch } from './Fetch'
 
 interface Props {
   models: ModelSummary[] | null
   error: string | null
   onAdd: (p: Parsed, reports?: Report[]) => Promise<void> // saves the new company and opens its Overview
   onDeleted: (id: string) => void
+  onChecked: (saved: { id: string; saved_at: string }[]) => void // "Check all for new results" saved these versions
 }
 
 /** Your companies: every saved model with its price against our value range, and the add-a-company panel (a name or
  * NSE symbol, or a Export export). With an empty library it is the first-run screen, then straight to the Overview.
  * /?add=TCS (the company switcher's box) starts adding that symbol here. */
-export default function Landing({ models, error: listError, onAdd, onDeleted }: Props) {
+export default function Landing({ models, error: listError, onAdd, onDeleted, onChecked }: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [over, setOver] = useState(false)
@@ -136,6 +137,7 @@ export default function Landing({ models, error: listError, onAdd, onDeleted }: 
         <h2 id="library-head" ref={libHead} tabIndex={-1} className="label sec-label">
           <span>Companies · <b>price against our value range</b></span><span>newest first</span>
         </h2>
+        {latest.some(m => m.symbol) && <CheckAll n={latest.filter(m => m.symbol).length} onSaved={onChecked} />}
         <div className="legend" aria-hidden="true">
           <span><i className="lg-band" />Our value range, cautious (bear) to hopeful (bull)</span>
           <span><i className="lg-mkt" />Today’s price</span>
@@ -149,7 +151,7 @@ export default function Landing({ models, error: listError, onAdd, onDeleted }: 
                     {m.reviewed_at ? ' · reviewed' : ' · draft'}{latest ? '' : ' · older version'}</span></span>
                 <MiniRange price={m.price ?? null} bear={m.values?.bear ?? null} base={m.values?.base ?? null} bull={m.values?.bull ?? null} />
                 <span className="pf">{coverText(m)}</span>
-                <span className="fl">{m.flags == null ? '' : m.flags ? `${m.flags} warning sign${m.flags > 1 ? 's' : ''}` : 'No warning signs'}</span>
+                <span className="fl">{latest && m.new_results?.length ? <><span className="tag prop">New {m.new_results.join(', ')} results</span></> : null}{m.flags == null ? '' : m.flags ? `${m.flags} warning sign${m.flags > 1 ? 's' : ''}` : 'No warning signs'}</span>
               </a>
               <button type="button" className="link lib-del" disabled={!!busy} onClick={() => remove(m)}
                 aria-label={`Delete ${m.company}, saved ${m.saved_at ? when(m.saved_at) : 'earlier'}`}>Delete</button>
@@ -173,4 +175,50 @@ function coverText(m: ModelSummary): ReactNode {
     return <>{where}<br /><span className="muted">Priced for <span className="num mkt">{fmt(m.implied, 'pct')}</span> growth a year / ours <span className="num ours">{fmt(m.growth, 'pct')}</span></span></>
   if (m.price == null) return <>Base <span className="num ours">Rs {rs(m.values.base)}</span>, no price</>
   return <>Base <span className="num ours">Rs {rs(m.values.base)}</span>, no growth rate reaches the price</>
+}
+
+interface CheckResult { id: string; company: string; status: 'new' | 'none' | 'skipped' | 'failed'; text: string; saved_at?: string }
+
+/** "Check all for new results": every company added by ticker, one after another (NSE once a second). New results
+ * are saved as today's version with the forecast they replace kept for comparison; assumptions never change. Stop
+ * keeps what was saved so far. */
+function CheckAll({ n, onSaved }: { n: number; onSaved: (saved: { id: string; saved_at: string }[]) => void }) {
+  const [state, setState] = useState<'idle' | 'running' | 'done' | 'stopped' | 'failed'>('idle')
+  const [step, setStep] = useState<string | null>(null)
+  const [results, setResults] = useState<CheckResult[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const ctl = useRef<AbortController | null>(null)
+  useEffect(() => () => ctl.current?.abort(), [])
+  const run = () => {
+    const c = new AbortController()
+    ctl.current = c
+    setState('running'); setResults([]); setError(null); setStep(null)
+    const saved: { id: string; saved_at: string }[] = []
+    streamFetch<{ step?: string; result?: CheckResult; error?: string; done?: true }>({}, c.signal, e => {
+      if (e.step) setStep(e.step)
+      if (e.result) { setResults(r => [...r, e.result!]); if (e.result.status === 'new') saved.push({ id: e.result.id, saved_at: e.result.saved_at! }) }
+      if (e.error) { setError(e.error); setState('failed') }
+      if (e.done) setState('done')
+    }, '/api/track/check')
+      .catch(e => { if ((e as Error).name !== 'AbortError') { setError((e as Error).message); setState('failed') } })
+      .finally(() => { if (saved.length) onSaved(saved) })
+  }
+  const running = state === 'running'
+  const found = results.filter(r => r.status === 'new').length
+  return (
+    <div className="check-all" aria-busy={running}>
+      <div className="ca-row">
+        <button type="button" className="btn" onClick={run} disabled={running}>{running ? 'Checking…' : 'Check all for new results'}</button>
+        {running && <button type="button" className="link" onClick={() => { ctl.current?.abort(); setState('stopped') }}>Stop</button>}
+        <span className="small muted">{running ? step ?? 'Starting…'
+          : state === 'done' ? `Done: ${found ? `new results for ${found} compan${found > 1 ? 'ies' : 'y'}, saved` : 'nothing new'}.`
+          : state === 'stopped' ? `Stopped after ${results.filter(r => r.status !== 'skipped').length} of ${n}${found ? `; ${found} saved with new results` : ''}. The rest weren’t checked.`
+          : `Asks NSE about the ${n === 1 ? 'company' : `${n} companies`} you added by ticker, about half a minute each. New results are saved next to your forecast; your assumptions never change.`}</span>
+      </div>
+      {results.length > 0 && <ul className="ca-list" aria-live="polite">{results.map(r => (
+        <li key={r.id} className={r.status}><b>{r.company}</b>: {r.status === 'new'
+          ? <>{r.text} <a href={pathOf(slugOf(r.id), 'overview', '', null, 'changed')}>See what changed</a></> : r.text}</li>))}</ul>}
+      {error && <p className="error" role="alert">{error} Refresh on each company works too.</p>}
+    </div>
+  )
 }

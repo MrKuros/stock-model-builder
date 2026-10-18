@@ -222,6 +222,10 @@ class ModelRequest(BaseModel):
     # proposals: {key, year, proposal, summary, file, page, quote, from_numbers, ai}. Words only: no number reads them
     flag_notes: list[dict] = []
     peers: Peers | None = None  # 5.2; the table is rebuilt from rows at today's inputs on every projection and export
+    # 5.3, optional (no version bump): the base forecast as it stood each time new annual results came in
+    # (model.forecast_record + track_record), oldest first, scored against the actuals on every projection.
+    # ponytail: untyped dicts, only ever written by track_record; every reader takes them with .get
+    track: list[dict] = Field([], max_length=model.MAX_TRACK)
 
     @model_validator(mode="after")
     def _new_drivers(self):
@@ -1082,6 +1086,7 @@ def _thesis_facts(doc: "ModelDoc"):
     for o in oneoffs:
         if o["year"] in labels[-3:]:
             f[f"oneoff_{o['metric']}_{o['year']}"] = f"Unusual year: {o['note']}"
+    f.update(_track_facts(doc, co, v))
 
     props = {p.get("id"): p for p in doc.proposals}
     reports = {r.id: r for r in doc.reports}
@@ -1139,6 +1144,42 @@ def _thesis_facts(doc: "ModelDoc"):
                 cite(f"Annual-report note, {x.get('topic')} {x.get('year')}, {row.get('label')}{amt}.",
                      dict(row, file=x.get("file")), rep)
     return co["name"], f, cites
+
+
+def _track_facts(doc, co, v):
+    """What the latest results changed, for the note (5.3): each line and missed driver against the forecast made
+    before them, the value range and the growth the price needed then, warning signs lit or cleared since. {} until
+    a forecast has been scored against reported years."""
+    t = tracking(doc, co, v)
+    s = next((r for r in reversed(t["records"]) if r["years"]), None) if t else None
+    if not s:
+        return {}
+    y, was, now, f = s["years"][-1], t["was"], t["now"], {}
+    yr, made = y["year"], (s["made_at"] or "")[:10]
+    since = f" (forecast saved {made})" if made else ""
+    for x in y["lines"]:
+        if x["err"] is not None:
+            f[f"trk_{x['key']}"] = (f"{x['label']} {yr}: {model._cr(x['actual'])} reported against our earlier forecast of "
+                                    f"{model._cr(x['forecast'])}{since}, {_pc(abs(x['err']))} {'above' if x['err'] > 0 else 'below'} it")
+    show = lambda k, x: f"{x:.0f} days" if k in ("dso", "dio", "dpo") else _pc(x)  # noqa: E731
+    for x in y["drivers"]:
+        if not x["hit"] or x["key"] in ("growth", "ebitda_margin"):
+            f[f"trk_in_{x['key']}"] = (f"{x['label']} {yr}: {show(x['key'], x['actual'])} reported against the "
+                                       f"{show(x['key'], x['forecast'])} we assumed ({'inside' if x['hit'] else 'outside'} our tolerance)")
+    for k, x in (was.get("values") or {}).items():
+        if x is not None:
+            f[f"was_value_{k}"] = f"Our {k} value before the {yr} results: {_rs(x)} a share"
+    if was.get("implied") is not None:
+        f["was_implied"] = f"Flat revenue growth the price needed before the {yr} results: {_pc(was['implied'])} a year"
+    if was.get("price"):
+        f["was_price"] = f"Share price when the forecast before the {yr} results was saved: {_rs(was['price'])}"
+    ids = lambda xs: {x.get("id"): x.get("name") for x in xs or [] if isinstance(x, dict)}  # noqa: E731
+    old, cur = ids(was.get("flags")), ids(now["flags"])
+    if lit := [n for k, n in cur.items() if k not in old]:
+        f["trk_flags_new"] = f"Warning signs lit since the {yr} results came in: {', '.join(lit)}"
+    if gone := [n for k, n in old.items() if k not in cur]:
+        f["trk_flags_gone"] = f"Warning signs that cleared with the {yr} results: {', '.join(gone)}"
+    return f
 
 
 @app.post("/api/note/write")
@@ -1220,8 +1261,9 @@ def refresh(req: DefaultsRequest):
 @app.post("/api/project")
 def project(req: ModelRequest):
     co, sc, n, out = req.projection()
+    v = req.dcf(co, sc, n, out)
     return {"years": [model.fy(d, True) for d in model.projected_dates(co, n)], "scenarios": out,
-            "valuation": req.dcf(co, sc, n, out), "inputs_hash": inputs_hash(req), "peers": req.peer_table(co)}
+            "valuation": v, "inputs_hash": inputs_hash(req), "peers": req.peer_table(co), "tracking": tracking(req, co, v)}
 
 
 @app.post("/api/export")
@@ -1470,6 +1512,126 @@ def _stream(events, doing, instead):
     return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
+# ---------- tracking new results (5.3): rules only, no AI ----------
+
+def _lit(req, co):
+    """The warning signs lit now (red and amber rule checks): [{id, name}]."""
+    labels = model.labels(co["dates"])
+    checks = model.rule_checks(co["hist"], labels, model.detect_oneoffs(co["hist"], labels),
+                               model.data_checks(req.company.model_dump()), req.notes)
+    return [{"id": c["id"], "name": c["name"]} for c in checks if c["status"] in ("red", "amber")]
+
+
+def track_record(doc: "ModelDoc", new_years=(), now=None):
+    """The base forecast as it stands, before new results replace the company: model.forecast_record plus the value
+    range, the growth the price needs, the lit warning signs and whether a note was written."""
+    co, sc, n, out = doc.projection()
+    ex = {s: model.expand(sc[s], n) for s in model.SCENARIOS}
+    cover = _coverage(out, co, ex, doc.valuation.model_dump())
+    return {**model.forecast_record(co, ex["base"], out["base"]), "made_at": doc.saved_at,
+            "recorded_at": (now or datetime.now()).isoformat(timespec="seconds"), "new_years": list(new_years),
+            "values": cover["values"], "price": cover["price"], "implied": cover["implied"], "growth": cover["growth"],
+            "flags": _lit(doc, co), "note": bool(doc.note), "kept": []}
+
+
+def with_results(doc: "ModelDoc", company, filings=(), now=None):
+    """The document with a refreshed company when it brings new reported years or a later quarter, else None. New
+    years first record the forecast they replace (track_record); the assumptions never change here. Returns (doc or
+    None, new year labels, the new last quarter end or None)."""
+    new = Company.model_validate(company)
+    have = {str(d)[:7] for d in doc.company.dates}
+    years = [y for y, d in zip(model.labels(new.dates), new.dates) if str(d)[:7] not in have and d > doc.company.dates[-1]]
+    q_end = lambda c: c.quarters.dates[-1] if c.quarters and c.quarters.dates else None  # noqa: E731
+    q = q_end(new) if q_end(new) and (not q_end(doc.company) or q_end(new) > q_end(doc.company)) else None
+    if not years and not q:
+        return None, [], None
+    d = doc.model_copy(deep=True)
+    if years and not any(r.get("last") == model.labels(doc.company.dates)[-1] for r in d.track):
+        d.track = [*d.track, track_record(doc, years, now)][-model.MAX_TRACK:]
+    d.company = new.model_copy(update={"name": doc.company.name})  # the library keeps one row per company
+    d.reviewed_at = None  # new numbers: back to draft, as any change of filings does in the app
+    ids = {f.id for f in d.filings}
+    d.filings = [*d.filings, *(Filing.model_validate(f) for f in filings if f["id"] not in ids)]
+    return d, years, q
+
+
+def tracking(req, co, v):
+    """The saved forecasts scored against the years now reported (model.track), the rules proposals the latest results
+    raise (model.track_proposals, against today's rule defaults) and what changed since: value range, the growth the
+    price needs, warning signs. None until a forecast has been recorded."""
+    if not req.track:
+        return None
+    labels = model.labels(co["dates"])
+    try:
+        d = model.default_assumptions(co["hist"], exclude=set(req.excluded_years), labels=labels)
+    except ValueError:
+        d = {}
+    scored = model.track(req.track, co)
+    base = {k: p.model_dump() for k, p in req.scenarios["base"].items()}
+    rec, sv = req.track[-1], v["scenarios"]
+    odd = {(o["metric"], o["year"]) for o in model.detect_oneoffs(co["hist"], labels)}
+    return {**scored, "proposals": model.track_proposals(scored, req.track, base, d, odd),
+            "was": {k: rec.get(k) for k in ("last", "made_at", "recorded_at", "new_years", "values", "price", "implied", "flags", "note")},
+            "now": {"values": {s: sv[s]["per_share"] for s in model.SCENARIOS}, "price": v["price"],
+                    "implied": sv["base"].get("implied_growth"), "flags": _lit(req, co)}}
+
+
+class ApplyRequest(BaseModel):
+    doc: ModelDoc
+    company: Company
+    filings: list[Filing] = []
+
+
+@app.post("/api/track/apply")
+def track_apply(req: ApplyRequest):
+    """Refresh found results: the document with the new company, its filings and (for new years) the forecast they
+    replace, recorded. Nothing is fetched and no assumption changes; the client saves it as usual."""
+    d, years, q = with_results(req.doc, req.company.model_dump(mode="json"), [f.model_dump() for f in req.filings])
+    return {"doc": d and d.model_dump(mode="json"), "years": years, "quarter": q and q.isoformat()[:10]}
+
+
+def check_all(today=None):
+    """Every company added by ticker, newest version each: fetch its results (fetch_company, no documents), and when
+    there are new ones save today's version with them (with_results). Yields {step}, {result: {id, company, status
+    new | none | skipped | failed, text}}, {done}. Stopping keeps what was saved so far."""
+    seen, todo = set(), []
+    for m in list_models(MODELS):  # newest first
+        if (s := m["id"].split("/")[0]) not in seen:
+            seen.add(s)
+            todo.append(m)
+    for i, m in enumerate(todo):
+        row = {"id": m["id"], "company": m["company"]}
+        try:
+            doc = load_model(m["id"])
+        except HTTPException:
+            continue
+        sym = (doc.company.source.get("symbol") if doc.company.source else None)
+        if not sym:
+            yield {"result": {**row, "status": "skipped", "text": "From a Export export, so there is no NSE symbol to check."}}
+            continue
+        yield {"step": f"Checking {m['company']} ({i + 1} of {len(todo)})…"}
+        try:
+            p = next(e["company"] for e in fetch_company(_sym(sym), doc.company.model_dump(), False, today) if "company" in e)
+            d, years, q = with_results(doc, p["company"], p["fetched"]["filings"], today)
+        except (sources.Offline, ValueError, HTTPException, StopIteration) as e:
+            yield {"result": {**row, "status": "failed", "text": f"Couldn’t check: {getattr(e, 'detail', None) or e}"}}
+            continue
+        if d is None:
+            yield {"result": {**row, "status": "none", "text": "No new results."}}
+            continue
+        mid, at = save_model(d, now=today)
+        what = f"{', '.join(years)} results" if years else f"the quarter to {q:%b %Y}"
+        yield {"result": {**row, "id": mid, "saved_at": at, "status": "new",
+                          "text": f"Added {what}. Your assumptions haven’t changed."}}
+    yield {"done": True}
+
+
+@app.post("/api/track/check")
+def track_check():
+    """check_all as JSON lines; closing the request stops it after the company in hand."""
+    return _stream(check_all(), "checking for new results", "use Refresh on each company")
+
+
 # ---------- peers (5.2): rules find candidates, the AI picks by business mix, rules check and compare ----------
 
 PEER_YEARS = 4  # annual filings read per peer: only FY2023 on make years; older years come from Export when it can
@@ -1654,15 +1816,29 @@ def list_models(root=None):
             checks = model.rule_checks(co["hist"], labels, model.detect_oneoffs(co["hist"], labels),
                                        model.data_checks(doc.company.model_dump()), doc.notes)
             cover = _coverage(projs, co, ex, doc.valuation.model_dump())
+            rec = doc.track[-1] if doc.track else {}
         except Exception:  # noqa: BLE001
             continue  # ponytail: skip any unreadable file, never fail the whole list
         out.append({"id": model_id, "company": doc.company.name, "active": doc.active, "n": n,
                     "saved_at": doc.saved_at, "year": model.fy(model.projected_dates(co, n)[-1], True),
                     "revenue": last if last is not None and math.isfinite(last) else None,
                     "flags": sum(c["status"] in ("red", "amber") for c in checks), "reviewed_at": doc.reviewed_at,
+                    # results that came in since you last marked it reviewed (5.3)
+                    "symbol": (doc.company.source or {}).get("symbol"),
+                    "new_results": rec.get("new_years") if rec and _before(doc.reviewed_at, rec.get("recorded_at")) else None,
                     **cover})
     # ponytail: parses and projects every file per listing; fine for hundreds, add an index file past that
     return sorted(out, key=lambda m: m["saved_at"] or "", reverse=True)
+
+
+def _before(a, b):
+    """ISO time a (or none) earlier than b. The browser writes UTC ("...Z"), the server local time without a zone, so
+    both are compared as local times."""
+    t = lambda x: (lambda d: d.astimezone().replace(tzinfo=None) if d.tzinfo else d)(datetime.fromisoformat(x))  # noqa: E731
+    try:
+        return not a or bool(b) and t(a) < t(b)
+    except ValueError:
+        return False
 
 
 def _coverage(projs, co, ex, val):

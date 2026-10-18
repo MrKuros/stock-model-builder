@@ -1247,7 +1247,7 @@ def library_check(root, co, scenarios):
           "valuation": model.VALUATION}
     up = server.ModelDoc.model_validate(v4).model_dump(mode="json")
     assert up == {**v4, "version": 6, "company": {**v4["company"], "quarters": None, "source": None}, "filings": [], "proposals": [],
-                  "notes": {}, "reports": [], "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None}, up
+                  "notes": {}, "reports": [], "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None, "track": []}, up
     # saved before 3.4: no COGS line in the company, no cogs_pct / dpo in the scenarios. They come back as 0 (days stay
     # on revenue, payables stay in other liabilities) and the model projects exactly as it did
     pre = {k: {"start": x, "end": None} for k, x in PINS["synthetic"]["defaults"].items()}
@@ -1280,8 +1280,8 @@ def library_check(root, co, scenarios):
     v5 = {"version": 5, "company": company, "n": 7, "active": "bear", "scenarios": scenarios,
           "excluded_years": ["FY2020"], "saved_at": None, "valuation": val, "filings": [], "proposals": [],
           "notes": {}, "reports": []}
-    assert server.ModelDoc.model_validate(v5).model_dump(mode="json") == {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None}
-    data = {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None}
+    assert server.ModelDoc.model_validate(v5).model_dump(mode="json") == {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None, "track": []}
+    data = {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None, "track": []}
     assert server.restatements(co, root) is None, "nothing saved yet: no comparison"
     doc = server.ModelDoc.model_validate(data)
     mid, at = server.save_model(doc, root, now=datetime(2026, 10, 15, 12, 41, 5))
@@ -1370,6 +1370,7 @@ def library_check(root, co, scenarios):
     reimport_check(server, root, co, data)
     fetch_api_check(server, root, co, data)
     peers_api_check(server, root, co, data)
+    track_check(server, root, co, data)
 
 
 def reimport_check(server, root, co, data):
@@ -2513,6 +2514,22 @@ def fetch_api_check(server, root, co, data):
         m = next(e["company"] for e in ev if "company" in e)
         assert m["company"]["name"] == "Test Industries Ltd" and len(m["company"]["dates"]) == 10, m["company"]["name"]
         assert list(m["company"]["source"]["years"].values()).count("Export") == 6 and m["company"]["source"]["from"] == "this model"
+        # 5.3 check all for new results: a company added by ticker before its latest year gets it (forecast recorded,
+        # saved as today's version, assumptions as they were); an upload is skipped; checking again finds nothing new
+        pc = p["company"]
+        mine = server.ModelDoc.model_validate(dict(data, company=dict(pc, name="Tracked Co", dates=pc["dates"][:-1], hist=pc["hist"][:-1]),
+                                                   filings=[], excluded_years=[]))
+        server.save_model(mine, root, now=datetime(2026, 10, 1, 9, 0))
+        server.save_model(server.ModelDoc.model_validate(data), root, now=datetime(2026, 10, 1, 9, 0))  # an upload
+        lines = [json.loads(x) for x in client.post("/api/track/check").text.splitlines()]
+        res = {e["result"]["company"]: e["result"] for e in lines if "result" in e}
+        assert lines[-1] == {"done": True} and res["Tracked Co"]["status"] == "new", lines
+        assert model.fy(d[-1]) in res["Tracked Co"]["text"] and res["Test Industries Ltd"]["status"] == "skipped", res
+        got = server.load_model(res["Tracked Co"]["id"], root)
+        assert [r["new_years"] for r in got.track] == [[model.fy(d[-1])]] and got.scenarios == mine.scenarios, got.track
+        assert len(got.company.dates) == 4 and got.company.name == "Tracked Co" and got.reviewed_at is None
+        lines = [json.loads(x) for x in client.post("/api/track/check").text.splitlines()]
+        assert {e["result"]["company"]: e["result"]["status"] for e in lines if "result" in e}["Tracked Co"] == "none", lines
         # caps: a list over the size cap is refused, not truncated; a block page is never cached as data
         big = sources.Client(root / "_cache" / "t", gap=0.0)
         big.opener = Opener()
@@ -2544,6 +2561,82 @@ def fetch_api_check(server, root, co, data):
     finally:
         server.MODELS, ai.llm, server.export_source = models, llm, adapter
         server._clients.clear()
+
+
+def track_check(server, root, co, data):
+    """5.3: a synthetic company with a forecast, then one new year, then another. Each set of results records the
+    forecast it replaces; scores per driver (hit within one step), lines, the running hit rate across forecasts, rules
+    proposals (and none for a driver you kept or already moved), what changed, the note's diff facts. Applying,
+    projecting, exporting, saving, reopening and listing never call the LLM and never change an assumption."""
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    client, models, llm = TestClient(server.app), server.MODELS, ai.llm
+    server.MODELS, ai.llm = root, None  # never the real library; any LLM call would fail
+    full = server._company_payload(co)["company"]
+    cut = lambda k: dict(full, name="Tracked Synth", dates=full["dates"][:k], hist=full["hist"][:k], quarters=None)  # noqa: E731
+    labs, r = model.labels(co["dates"]), model.ratios(co["hist"])
+    base = {k: {"start": x, "end": None} for k, x in model.default_assumptions(co["hist"][:8]).items()}
+    base |= {"growth": {"start": 0.06, "end": None}, "ebitda_margin": {"start": r[8]["ebitda_margin"], "end": None}}
+    doc = dict(data, company=cut(8), scenarios=dict.fromkeys(model.SCENARIOS, base), n=5, excluded_years=[], filings=[],
+               valuation=dict(model.VALUATION), saved_at="2026-05-01T10:00:00", track=[])
+    try:
+        assert client.post("/api/project", json=doc).json()["tracking"] is None, "no forecast recorded yet"
+        a = client.post("/api/track/apply", json={"doc": doc, "company": cut(9)}).json()
+        assert a["years"] == [labs[8]] and a["quarter"] is None, a
+        d1 = a["doc"]
+        assert d1["scenarios"] == doc["scenarios"] and d1["company"]["name"] == "Tracked Synth", "assumptions never move"
+        rec = d1["track"][0]
+        proj = model.project(co["hist"][:8], model.expand(base, 5), 5)
+        assert rec["last"] == labs[7] and rec["new_years"] == [labs[8]] and rec["made_at"] == "2026-05-01T10:00:00", rec
+        assert rec["dates"][0][:7] == str(co["dates"][8])[:7] and rec["lines"]["revenue"] == [x["revenue"] for x in proj], rec
+        assert rec["drivers"]["growth"] == [0.06] * 5 and "debt_change" not in rec["drivers"] and rec["values"]["base"] > 0
+        again = client.post("/api/track/apply", json={"doc": d1, "company": cut(9)}).json()
+        assert again["doc"] is None and again["years"] == [], "the same results twice: nothing new"
+        d2 = client.post("/api/track/apply", json={"doc": d1, "company": cut(10)}).json()["doc"]
+        assert [x["last"] for x in d2["track"]] == [labs[7], labs[8]], d2["track"]
+        t = client.post("/api/project", json=d2).json()["tracking"]
+        first, second = t["records"]
+        assert [y["year"] for y in first["years"]] == labs[8:10] and [y["year"] for y in second["years"]] == [labs[9]]
+        g = next(x for x in first["years"][0]["drivers"] if x["key"] == "growth")
+        assert g["forecast"] == 0.06 and abs(g["actual"] - r[8]["growth"]) < 1e-12 and not g["hit"], g
+        assert abs(g["diff"] - (r[8]["growth"] - 0.06)) < 1e-12 and abs(g["err"] - g["diff"] / 0.06) < 1e-12, g
+        m = next(x for x in first["years"][0]["drivers"] if x["key"] == "ebitda_margin")
+        assert m["hit"] and abs(m["diff"]) < 1e-12, m
+        rev = first["years"][0]["lines"][0]
+        assert rev["key"] == "revenue" and rev["forecast"] == proj[0]["revenue"] and rev["actual"] == co["hist"][8]["revenue"]
+        rate = {x["key"]: (x["hits"], x["scored"]) for x in t["hit_rate"]}
+        assert rate["growth"] == (0, 3) and rate["ebitda_margin"][1] == 3, rate  # forecast 1 covers 2 years, forecast 2 one
+        want = model.default_assumptions(co["hist"])["growth"]
+        assert t["proposals"] == [{"key": "growth", "label": "Revenue growth", "year": labs[9], "forecast": 0.06,
+                                   "actual": r[9]["growth"], "current": 0.06, "proposed": want}], t["proposals"]
+        assert t["was"]["values"] == d2["track"][1]["values"] and t["now"]["values"]["base"] is not None, t["was"]
+        # a miss in a year flagged unusual for that driver proposes nothing (leave the year out instead)
+        odd = model.track_proposals(t, d2["track"], {k: v for k, v in base.items()}, model.default_assumptions(co["hist"]),
+                                    {("growth", labs[9])})
+        assert [(p["key"], p["proposed"], p.get("unusual")) for p in odd] == [("growth", None, True)], odd
+        # keep yours: not proposed again for these results; accept it: the base now matches, nothing left to propose
+        kept = dict(d2, track=[*d2["track"][:-1], dict(d2["track"][-1], kept=["growth"])])
+        assert client.post("/api/project", json=kept).json()["tracking"]["proposals"] == []
+        took = dict(d2, scenarios={s: dict(base, growth={"start": want, "end": None}) for s in model.SCENARIOS})
+        assert client.post("/api/project", json=took).json()["tracking"]["proposals"] == []
+        # numbers don't depend on the record; the note gets the diff facts; save, reopen, list, export: no LLM
+        plain = client.post("/api/project", json=dict(d2, track=[])).json()
+        assert plain["scenarios"] == client.post("/api/project", json=d2).json()["scenarios"]
+        facts = server._thesis_facts(server.ModelDoc.model_validate(d2))[1]
+        assert {"trk_revenue", "trk_in_growth", "was_value_base"} <= facts.keys() and "outside" in facts["trk_in_growth"], facts
+        assert "Rs" in facts["trk_revenue"] and labs[9] in facts["trk_revenue"]
+        sid = client.post("/api/models", json=d2).json()["id"]
+        back = client.get(f"/api/models/{sid}").json()["doc"]
+        assert back["track"] == d2["track"] and client.post("/api/export", json=back).status_code == 200
+        row = next(m for m in server.list_models(root) if m["id"] == sid)
+        assert row["new_results"] == [labs[9]], row
+        client.post("/api/models", json=dict(back, reviewed_at="2099-01-01T00:00:00"))
+        assert next(m for m in server.list_models(root) if m["id"] == sid)["new_results"] is None, "reviewed since"
+        server.delete_model(sid, root)
+        assert client.post("/api/project", json=dict(doc, track=[{}] * 21)).status_code == 422, "at most 20 forecasts"
+    finally:
+        server.MODELS, ai.llm = models, llm
 
 
 def peers_check(co):

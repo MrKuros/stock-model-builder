@@ -207,8 +207,8 @@ export function BottomNav({ here }: { here: Here }) {
 }
 
 /** A long page's sections as chips (phones; the sidebar lists them on desktop). */
-export function Toc({ page }: { page: Page }) {
-  const s = SECTIONS[page]
+export function Toc({ page, extra = [] }: { page: Page; extra?: [string, string][] }) {
+  const s = SECTIONS[page] && [...extra, ...SECTIONS[page]!]
   if (!s) return null
   return <nav className="toc" aria-label="On this page">{s.map(([id, t]) => <a key={id} href={`#${id}`}>{t}</a>)}</nav>
 }

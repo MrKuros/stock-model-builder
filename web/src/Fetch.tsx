@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { latestOf, slugOf } from './Shell'
 import { navigate, pathOf, useHref } from './route'
-import { api, postJson, type Company, type ModelSummary, type Parsed, type Report, type SourceDoc } from './lib'
+import { api, postJson, type Company, type ModelDoc, type ModelSummary, type Parsed, type Report, type SourceDoc } from './lib'
 
 /** One line of /api/nse/fetch: a step in plain words, its progress, the company once its numbers are in, a kept
  * document, something that didn't work, or the end. */
@@ -207,12 +207,17 @@ export function FetchRun({ symbol, onAdd, onClose, upload }: {
 }
 
 /** The context bar's price line for a company added by ticker: when the price was checked, and Refresh (today's price,
- * then any new results; assumptions never change by themselves). */
-export function Refresh({ company, onCompany }: { company: Company; onCompany: (p: Parsed | null, c: Company) => void }) {
+ * then any new results; assumptions never change by themselves). New annual results first record the forecast they
+ * replace (/api/track/apply), so the Overview can show what came in against it. */
+export function Refresh({ doc, onCompany, onResults }: {
+  doc: ModelDoc; onCompany: (p: Parsed | null, c: Company) => void; onResults: (p: Parsed, d: ModelDoc) => void
+}) {
   useMinute()
+  const href = useHref()
+  const company = doc.company
   const s = company.source
   const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState<string | null>(null)
+  const [msg, setMsg] = useState<ReactNode>(null)
   if (!s?.symbol) return null
   const run = async () => {
     setBusy(true)
@@ -230,12 +235,13 @@ export function Refresh({ company, onCompany }: { company: Company; onCompany: (
         if (e.error) throw new Error(e.error)
       })
       const p = got as Parsed | null
-      const lastQ = (x: Company) => x.quarters?.dates.at(-1) ?? ''
-      const newYears = p ? p.company.dates.filter(d => !c.dates.includes(d)) : []
-      const newQ = p && lastQ(p.company) > lastQ(c)
-      if (p && (newYears.length || newQ)) {
-        onCompany({ ...p, company: { ...p.company, name: company.name } }, { ...p.company, name: company.name })
-        setMsg(`New results added (${newYears.length ? `${newYears.length} year${newYears.length > 1 ? 's' : ''}` : `quarter to ${new Date(lastQ(p.company)).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })}`}). Your assumptions haven’t changed.`)
+      const a = p && await api<{ doc: ModelDoc | null; years: string[]; quarter: string | null }>('/api/track/apply',
+        postJson({ doc: { ...doc, company: c }, company: p.company, filings: p.fetched?.filings ?? [] }, ctl.signal))
+      if (p && a?.doc) {
+        onResults({ ...p, company: a.doc.company }, a.doc)
+        setMsg(a.years.length
+          ? <>New {a.years.join(', ')} results added. Your assumptions haven’t changed. <a href={href('overview', 'changed')}>See what changed</a></>
+          : `Quarter to ${new Date(a.quarter!).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })} added. Your assumptions haven’t changed.`)
       } else {
         onCompany(null, c)
         setMsg('Price updated. No new results.')

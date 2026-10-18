@@ -14,7 +14,7 @@ export function niceTicks(lo: number, hi: number) {
 }
 
 /** Other scenarios, drawn as thin pencil markers over the projected bars. */
-export interface Alt { name: string; values: (number | null)[] }
+export interface Alt { name: string; values: (number | null)[]; label?: string } // label: the legend's words, else name
 interface Props { title: string; years: string[]; values: (number | null)[]; nHist: number; others?: Alt[] }
 
 const finite = (v: number | null): v is number => v != null && Number.isFinite(v)
@@ -48,7 +48,7 @@ export default function Chart({ title, years, values, nHist, others = [] }: Prop
         height={H}
         role="img"
         aria-label={`${title}: ${years.map((yr, i) => `${yr} ${money(values[i])}${others
-          .filter(o => finite(o.values[i])).map(o => ` (${o.name} ${money(o.values[i])})`).join('')}`).join(', ')}`}
+          .filter(o => finite(o.values[i])).map(o => ` (${o.label ?? o.name} ${money(o.values[i])})`).join('')}`).join(', ')}`}
         onPointerMove={e => {
           const r = e.currentTarget.getBoundingClientRect()
           const i = Math.floor((e.clientX - r.left - M.left) / band)
@@ -95,7 +95,7 @@ export default function Chart({ title, years, values, nHist, others = [] }: Prop
         {/* value labels last, so the other scenarios' markers never strike through the number */}
         {values.map((v, i) => finite(v) && labelled.has(i) && (
           <text key={years[i]} className={i >= nHist ? 'bar-label proj' : 'bar-label'}
-            y={v >= 0 ? Math.min(y(v), y(0)) - 6 : Math.max(y(v), y(0)) + 14}
+            y={v >= 0 ? Math.min(y(v), y(0), ...others.filter(o => i < nHist && finite(o.values[i])).map(o => y(o.values[i]!) - 4)) - 6 : Math.max(y(v), y(0)) + 14}
             {...(narrow && i === years.length - 1 ? { x: x(i) + bw / 2, textAnchor: 'end' } : { x: x(i), textAnchor: 'middle' })}>
             {money(v)}
           </text>
@@ -109,7 +109,7 @@ export default function Chart({ title, years, values, nHist, others = [] }: Prop
           {others.map(o => (
             <span key={o.name}>
               <svg width="18" height="8" className={`alt alt-${o.name}`}><line className="alt-mark" x1="1" x2="17" y1="4" y2="4" /></svg>
-              {o.name}
+              {o.label ?? o.name}
             </span>
           ))}
         </p>

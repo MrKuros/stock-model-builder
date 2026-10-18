@@ -256,6 +256,10 @@ export default function App() {
     loadList()
     navigate(pathOf(slugOf(r.id), 'overview'))
   }
+  const checked = (saved: { id: string; saved_at: string }[]) => { // other tabs on those companies reload them
+    for (const r of saved) channel?.postMessage({ type: 'saved', id: r.id, saved_at: r.saved_at } satisfies Msg)
+    loadList()
+  }
   const deleted = (id: string) => {
     channel?.postMessage({ type: 'deleted', id } satisfies Msg)
     if (lastId() === id) remember(null)
@@ -301,7 +305,7 @@ export default function App() {
                     <p className="purpose">{missing}</p><p><a className="btn" href="/">See all your companies</a></p></div>
                 : <p className="muted pad" role="status">Opening {route.slug.replace(/-/g, ' ')}…</p>}
             </main>
-          : <Landing models={models} error={listError} onAdd={add} onDeleted={deleted} />}
+          : <Landing models={models} error={listError} onAdd={add} onDeleted={deleted} onChecked={checked} />}
       </div>
     </div>
   )

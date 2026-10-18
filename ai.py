@@ -944,6 +944,9 @@ def thesis_prompt(name, facts, cites):
             "facts), call it a bet on the cycle or a return to past results, not something the business has never done.\n"
             "- If a citation's description or quote mentions a sale, slump sale, demerger, transfer to a joint venture or "
             "deconsolidation, say in words which business leaves the base from next year and that our base still includes it.\n"
+            "- If there are trk_ and was_ facts, new results came in since our earlier forecast: make one thesis point what "
+            "they changed (what came in against what we forecast, and our value or the growth the price needs before and "
+            "now), and point what_to_watch at the next results.\n"
             "- Rank risks by the rule checks: Red, then Amber, then the rest. Mention the auditor only if the opinion is "
             "modified or the auditor changed.\n"
             '- "refs" lists the fact keys or citation ids behind the point, at least one each.\n\n'

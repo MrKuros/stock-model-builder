@@ -48,6 +48,7 @@ function Cite({ n, src, children, plain, uid }: { n: number; src: string; childr
 
 interface Props {
   parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null
+  changed?: ReactNode // right under the verdict: new results against your forecast (5.3)
   provenance?: ReactNode // right under the verdict: where the numbers come from, for a company added by ticker
 }
 
@@ -81,7 +82,7 @@ export function Prose({ text, refs, tn, refN, uid }: { text: string; refs: NoteR
 
 /** Overview: the verdict first, then the business in five numbers, price against value, the checks, the thesis and
  * risks next to the key numbers, and where to go deeper. The how-it-is-valued detail lives on Valuation. */
-export default function Note({ parsed, doc, setDoc, projection, provenance }: Props) {
+export default function Note({ parsed, doc, setDoc, projection, provenance, changed }: Props) {
   const href = useHref()
   const { company, years } = parsed
   const hist = parsed.hist ?? company.hist
@@ -215,6 +216,7 @@ export default function Note({ parsed, doc, setDoc, projection, provenance }: Pr
           </div>}
         </aside>}
       </section>
+      {changed}
       {provenance}
 
       <FundStrip parsed={parsed} />
@@ -606,6 +608,8 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
     </div>
   )
   const nCites = tn ? Object.keys(tn.cites).length : 0
+  const rec = doc.track?.[doc.track.length - 1]
+  const after = tn && rec && rec.recorded_at > tn.written_at ? rec : null // new results since the note was written (5.3)
   return (
     <section className="sec thesis" aria-labelledby="thesis-h">
       <h2 id="thesis-h" ref={head} tabIndex={-1} className="label sec-label"><span>Thesis · <b>3 points</b></span>
@@ -623,8 +627,11 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
         {button('Write the note')}
       </div>}
       {tn && <>
-        {stale && <p className="stale-note">Written for earlier inputs: the model has changed since {when(tn.written_at)}, so
-          some numbers below may no longer match. Rewrite to bring the words up to date.</p>}
+        {stale && <p className="stale-note">{after
+          ? <>Written before the {after.new_years.join(', ')} results came in ({when(tn.written_at)}), so some numbers below may
+            no longer match. Rewrite it with the new results.</>
+          : <>Written for earlier inputs: the model has changed since {when(tn.written_at)}, so some numbers below may no longer
+            match. Rewrite to bring the words up to date.</>}</p>}
         <p className="headline">{P(tn.headline, [], 'h')}</p>
         {tn.thesis.map((p, i) => {
           const rows = p.refs.map(r => ({ r, s: refSource(tn, r) }))
@@ -650,7 +657,7 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
         <p className="small-note">AI-written {when(tn.written_at)} from the facts on this page{nCites ? ` and ${nCites} approved quote${nCites > 1 ? 's' : ''}` : ''},
           checked against the model: every number matches one the app computed or a cited quote{tn.rounds > 1 ? ' (passed on the retry)' : ''}.
           Analysis, not a recommendation.</p>
-        {button('Rewrite thesis')}
+        {button(after ? 'Rewrite the note with the new results' : 'Rewrite thesis')}
       </>}
     </section>
   )

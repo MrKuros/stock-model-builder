@@ -2,7 +2,8 @@ import type { ReactNode } from 'react'
 import { useWidth } from './Ruler'
 import { PageHead, Toc } from './Shell'
 import { useHref } from './route'
-import { fmt, money, shortYear, type Parsed, type Row } from './lib'
+import { forecastOf } from './Tracking'
+import { fmt, money, shortYear, type Parsed, type Row, type Tracking } from './lib'
 
 /** Fundamentals: what the company reported, before any forecast. Everything here derives from the parsed history
  * (parsed.hist, parsed.ratios) and the forensic radar's lit flags; nothing is computed on the server for it. */
@@ -92,19 +93,21 @@ function Spark({ v, lit }: { v: S; lit?: boolean }) {
 interface Line { v: S; cls?: 'alt' | 'out' | 'flag'; name?: string }
 /** A small chart drawn at its real width: bars (one or two series side by side) or lines from zero, an optional dashed
  * median, every year's value in the accessible name. */
-function Plot({ years, lines, kind, show, refLine, label, neg }: {
+function Plot({ years, lines, kind, show, refLine, label, neg, marks }: {
   years: string[]; lines: Line[]; kind: 'bars' | 'lines'; show: (x: number) => string; refLine?: number | null; label: string; neg?: boolean
+  marks?: S // pencil ticks: what you forecast for a year before it was reported (5.3)
 }) {
   const [box, w] = useWidth<HTMLDivElement>(420)
   const H = 150, L = 6, R = 6, T = 18, B = 20, n = years.length
-  const all = lines.flatMap(l => l.v).filter(fin)
+  const all = [...lines.flatMap(l => l.v), ...(marks ?? [])].filter(fin)
   const hi0 = Math.max(0, ...all), lo = Math.min(0, ...all)
   const hi = kind === 'lines' ? hi0 + (hi0 - lo) * 0.14 : hi0
   const y = (v: number) => T + (1 - (v - lo) / (hi - lo || 1)) * (H - T - B)
   const band = (w - L - R) / n, x = (i: number) => L + (i + 0.5) * band
   const every = Math.ceil(36 / band)
-  const name = `${label}: ${years.map((yr, i) => `${yr} ${lines.map(l => (fin(l.v[i]) ? show(l.v[i]!) : 'none')).join(' and ')}`).join(', ')}`
+  const name = `${label}: ${years.map((yr, i) => `${yr} ${lines.map(l => (fin(l.v[i]) ? show(l.v[i]!) : 'none')).join(' and ')}${fin(marks?.[i]) ? ` (you forecast ${show(marks![i]!)})` : ''}`).join(', ')}`
   const lastV = lines[0].v[n - 1]
+  const lift = fin(marks?.[n - 1]) ? y(marks![n - 1]!) - 4 : Infinity // the last value's label sits above a pencil tick
   return (
     <div className="plot" ref={box}>
       {all.length === 0 ? <p className="small dim">Not in this export.</p> :
@@ -124,11 +127,14 @@ function Plot({ years, lines, kind, show, refLine, label, neg }: {
           return <g key={j} className={l.cls}>
             <polyline className="ln" points={pts.map(p => p.join(',')).join(' ')} />
             {pts.map((p, i) => <circle key={i} className="dt" cx={p[0]} cy={p[1]} r="2.4" />)}
-            {fin(l.v[n - 1]) && <text className="tv" x={x(n - 1)} y={y(l.v[n - 1]!) + (j ? 14 : -7)} textAnchor="end">{show(l.v[n - 1]!)}</text>}
+            {fin(l.v[n - 1]) && <text className="tv" x={x(n - 1)} y={j ? y(l.v[n - 1]!) + 14 : Math.min(y(l.v[n - 1]!), lift) - 7} textAnchor="end">{show(l.v[n - 1]!)}</text>}
           </g>
         })}
         {kind === 'bars' && lines.length === 1 && fin(lastV) && <text className="tv" x={x(n - 1)} textAnchor="end"
-          y={lastV >= 0 ? y(lastV) - 5 : y(0) - 5}>{show(lastV)}</text>}
+          y={lastV >= 0 ? Math.min(y(lastV), lift) - 5 : y(0) - 5}>{show(lastV)}</text>}
+        {marks?.map((v, i) => fin(v) && <g key={`f${i}`} className="fc">
+          <line className="fc-halo" x1={x(i) - band * 0.42} x2={x(i) + band * 0.42} y1={y(v)} y2={y(v)} />
+          <line className="fc-mark" x1={x(i) - band * 0.42} x2={x(i) + band * 0.42} y1={y(v)} y2={y(v)} /></g>)}
         {years.map((yr, i) => ((n - 1 - i) % every ? null : <text key={yr} className="tx" x={x(i)} y={H - 5} textAnchor="middle">{shortYear(yr)}</text>))}
       </svg>}
       {lines.length > 1 && <p className="key2" aria-hidden="true">{lines.map(l => <span key={l.name}><i className={`k-${l.cls ?? 'ink'}`} />{l.name}</span>)}</p>}
@@ -136,7 +142,7 @@ function Plot({ years, lines, kind, show, refLine, label, neg }: {
   )
 }
 
-export default function Fundamentals({ parsed }: { parsed: Parsed }) {
+export default function Fundamentals({ parsed, tracking }: { parsed: Parsed; tracking?: Tracking | null }) {
   const href = useHref()
   const f = series(parsed)
   const { hist, years, n, col, revenue, pat, cfo, margin, long } = f
@@ -160,16 +166,21 @@ export default function Fundamentals({ parsed }: { parsed: Parsed }) {
   const payout5 = div(sum(dividend.slice(-5)), sum(fcf.slice(-5)))
   const pos = nc.filter(x => fin(x) && x >= 0).length, ncN = nc.filter(fin).length
   const dsoNow = dso[n - 1], dsoThen = n > 3 ? dso[n - 4] : null
+  // what you forecast for years that are now reported (the newest forecast for each), as pencil ticks
+  const fRev = forecastOf(tracking, 'revenue'), fEb = forecastOf(tracking, 'ebitda'), fPat = forecastOf(tracking, 'pat')
+  const fc = (m: Record<string, number>) => (Object.keys(m).length ? years.map(y => m[y] ?? null) : undefined)
+  const fYears = Object.keys(fRev)
+  const fMargin = fc(Object.fromEntries(fYears.filter(y => fEb[y] != null && fRev[y]).map(y => [y, fEb[y] / fRev[y]])))
   const cards: { id: string; title: string; big: string; says: ReactNode; chart: ReactNode; to: string; table: string; lit?: string | null }[] = [
     { id: 'revenue', title: 'Revenue', big: `Rs ${money(revenue[n - 1])} cr`, to: st(PL, 'revenue'), table: 'Profit & loss',
       says: g != null ? <>Grew {pc(g)} a year over {word(long)} years{long > 3 && g3 != null ? <>; {pc(g3)} in the last three</> : null}.</> : <>Sales as reported.</>,
-      chart: <Plot years={years} kind="bars" lines={[{ v: revenue }]} show={money} label="Revenue by year, Rs crore" /> },
+      chart: <Plot years={years} kind="bars" lines={[{ v: revenue }]} show={money} label="Revenue by year, Rs crore" marks={fc(fRev)} /> },
     { id: 'margin', title: 'Operating margin', big: pc(margin[n - 1]), to: st(PL, 'ebitda'), table: 'Profit & loss',
       says: <>Operating profit before depreciation (EBITDA) as a share of sales{mx.length ? <>: between {pc(Math.min(...mx))} and {pc(Math.max(...mx))} in {word(mx.length)} years</> : null}.</>,
-      chart: <Plot years={years} kind="lines" lines={[{ v: margin }]} show={pc} refLine={med(margin)} label="Operating margin by year" /> },
+      chart: <Plot years={years} kind="lines" lines={[{ v: margin }]} show={pc} refLine={med(margin)} label="Operating margin by year" marks={fMargin} /> },
     { id: 'profit', title: 'Net profit', big: `Rs ${money(pat[n - 1])} cr`, to: st(PL, 'pat'), table: 'Profit & loss',
       says: <>{gp != null ? <>{pc(gp)} a year over {word(long)} years. </> : null}Net margin {pc(div(pat[n - 1], revenue[n - 1]))} of sales in {last}.</>,
-      chart: <Plot years={years} kind="bars" lines={[{ v: pat }]} show={money} neg label="Net profit by year, Rs crore" /> },
+      chart: <Plot years={years} kind="bars" lines={[{ v: pat }]} show={money} neg label="Net profit by year, Rs crore" marks={fc(fPat)} /> },
     { id: 'cash', title: 'Cash from operations vs profit', big: xx(f.conv5), to: st(CF, 'cfo'), table: 'Cash flow', lit: cashLit?.fact,
       says: f.conv5 == null ? <>The export has no operating cash flow.</>
         : <>Rs {Math.round(f.conv5 * 100)} of operating cash for every Rs 100 of net profit over the last {word(f.k5)} years: {f.conv5 >= 0.9 ? 'profits turn into cash' : f.conv5 >= 0.8 ? 'most of it does' : 'less cash than the profit suggests'}.</>,
@@ -232,7 +243,9 @@ export default function Fundamentals({ parsed }: { parsed: Parsed }) {
 
       <section className="blk" id="charts" aria-labelledby="charts-h">
         <h2 id="charts-h">{cap(word(n))} years at a glance</h2>
-        <p className="why">Black is what the company reported. Each chart’s link opens every number behind it.</p>
+        <p className="why">Black is what the company reported. Each chart’s link opens every number behind it.{fYears.length > 0 && <>
+          {' '}<span className="fc-key" aria-hidden="true" /> Blue ticks on revenue, margin and profit: what you forecast for {fYears.join(', ')} before
+          it was reported (<a href={href('forecast', 'tracking')}>how the forecast did</a>).</>}</p>
         <div className="fgrid">
           {cards.map(c => (
             <article key={c.id} id={`f-${c.id}`} tabIndex={-1} className={`fcard${c.lit ? ' lit' : ''}`} aria-labelledby={`fh-${c.id}`}>

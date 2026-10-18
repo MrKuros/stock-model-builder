@@ -8,6 +8,7 @@ import StatementsPage from './Statements'
 import ValuationPage from './Valuation'
 import { BottomNav, DL, MobileTop, Side, type Here } from './Shell'
 import { Refresh, SourceNote } from './Fetch'
+import { Changed } from './Tracking'
 import { HrefCtx, PAGES, STATEMENTS, pathOf, placed, type Href, type Route } from './route'
 import type { SaveState } from './App'
 import {
@@ -37,6 +38,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const { company, years: histYears, drivers } = parsed
   const { n, scenarios, valuation, filings, notes, flag_notes, assumption_sources, excluded_years } = doc
   const peers = doc.peers ?? null
+  const track = doc.track ?? []
   const slug = route.slug!
   // any change to what the numbers come from puts the note back to draft; an input changed without a new source
   // (a strip, a typed value) is yours: its source flips to "manual"
@@ -61,11 +63,11 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   useEffect(() => {
     const ctl = new AbortController()
     // the words' sources go too: they don't move a number, only the note's inputs hash (stale words)
-    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation, filings, notes, flag_notes, assumption_sources, excluded_years, peers }, ctl.signal))
+    api<Projection>('/api/project', postJson({ company, scenarios, n, valuation, filings, notes, flag_notes, assumption_sources, excluded_years, peers, track }, ctl.signal))
       .then(p => { setProjection(p); setError(null) })
       .catch(e => { if (e.name !== 'AbortError') { setProjection(null); setError(e.message) } })
     return () => ctl.abort()
-  }, [company, scenarios, n, valuation, filings, notes, flag_notes, assumption_sources, excluded_years, peers])
+  }, [company, scenarios, n, valuation, filings, notes, flag_notes, assumption_sources, excluded_years, peers, track])
 
   // A filing attached or removed changes the history (payables, leases, cash-flow capex) and so the defaults; like
   // excluding a year, it never changes the assumptions by itself. The upgraded defaults are offered in one click.
@@ -122,6 +124,11 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     else setParsed({ ...parsed, company: c })
     const add = p?.fetched?.filings ?? []
     setDoc(d => ({ ...d, company: c, filings: add.length ? [...d.filings, ...add.filter((f: Filing) => !d.filings.some(x => x.id === f.id))] : d.filings }))
+  }
+  // Refresh found new results: the server recorded the forecast they replace (/api/track/apply); assumptions as they were
+  const onResults = (p: Parsed, nd: ModelDoc) => {
+    setParsed(p)
+    setDoc(d => ({ ...d, company: nd.company, filings: nd.filings, track: nd.track, reviewed_at: nd.reviewed_at }))
   }
 
   const exportXlsx = async () => {
@@ -189,13 +196,13 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const common = { parsed, doc, setDoc, projection: proj }
   let page: ReactNode
   switch (route.page) {
-    case 'fundamentals': page = <Fundamentals parsed={parsed} />; break
+    case 'fundamentals': page = <Fundamentals parsed={parsed} tracking={proj?.tracking} />; break
     case 'statements': page = <StatementsPage parsed={parsed} doc={doc} projection={proj} sub={route.sub} />; break
     case 'forecast': page = <ModelView {...common} anchor={route.anchor} upgrades={upgrades} onApply={applyUpgrades} />; break
     case 'valuation': page = <ValuationPage {...common} />; break
     case 'checks': page = <Evidence {...common} upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals}
       toggleYear={toggleYear} pendingYear={pendingYear} defaultsNote={defaultsNote} />; break
-    default: page = <Note {...common} provenance={<SourceNote company={company} onCompany={onCompany} />} />
+    default: page = <Note {...common} changed={<Changed doc={doc} setDoc={setDoc} projection={proj} />} provenance={<SourceNote company={company} onCompany={onCompany} />} />
   }
 
   return (
@@ -212,7 +219,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
                 {price != null
                   ? <span>Price <span className="num mkt">Rs {rs(price)}</span>{valuation.price != null ? ' (typed)' : ''}</span>
                   : <a href={href('valuation', 'v-price')}>No share price: type one</a>}
-                <Refresh company={company} onCompany={onCompany} />
+                <Refresh doc={doc} onCompany={onCompany} onResults={onResults} />
                 {v?.scenarios[doc.active].per_share != null && <span>Our {doc.active} value <span className="num ours">Rs {rs(v.scenarios[doc.active].per_share!)}</span>
                   {v.scenarios[doc.active].upside != null && <> ({v.scenarios[doc.active].upside! < 0 ? '−' : '+'}{Math.round(Math.abs(v.scenarios[doc.active].upside!) * 100)}% vs price)</>}</span>}
                 {price != null && shares != null && <span className="wide">Market cap <span className="num">Rs {money(price * shares)} cr</span></span>}

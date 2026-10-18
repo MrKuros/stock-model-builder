@@ -1865,6 +1865,95 @@ def projected_dates(co, n):
             for y in range(last.year + 1, last.year + n + 1)]
 
 
+# ---------- tracking (5.3): the forecast you had against the results that came in; rules only ----------
+
+# (driver, words, how close counts as a hit). A hit = the actual within one step of what you assumed: the impact
+# table's steps where it has one (growth 2 pp, margin 1 pp, days 10...), else a step of the same size.
+# ponytail: minority share and planned borrowing aren't scored (a share of profit and a plan in crore, not a rate)
+TRACK = (("growth", "Revenue growth", 0.02), ("ebitda_margin", "EBITDA margin", 0.01),
+         ("oi_pct", "Other income % revenue", 0.01), ("tax_rate", "Tax rate", 0.02), ("capex_pct", "Capex % revenue", 0.01),
+         ("dso", "Receivable days", 10.0), ("cogs_pct", "COGS % revenue", 0.02), ("dio", "Inventory days", 10.0),
+         ("dpo", "Payable days", 10.0), ("oca_pct", "Other current assets % revenue", 0.01),
+         ("ol_pct", "Other liabilities % revenue", 0.01), ("dep_pct", "Depreciation % opening net block", 0.01),
+         ("int_rate", "Interest % opening borrowings", 0.01), ("payout", "Dividend payout", 0.10))
+TRACK_LINES = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "Net profit"), ("fcf", "Free cash flow"))
+MAX_TRACK = 20  # forecasts kept per model, one per set of new annual results: twenty years of them
+
+
+def forecast_record(co, a, proj):
+    """What the base case said before new results: per projected year (by its year end) each scored driver and the
+    main lines. a = expand()-shaped base inputs, proj = project() of them. The server adds the value range then."""
+    dates = projected_dates(co, len(proj))
+    return {"last": labels(co["dates"])[-1], "dates": [d.isoformat()[:10] for d in dates], "years": [fy(d) for d in dates],
+            "drivers": {k: [float(x) for x in a[k]] for k, _, _ in TRACK if k in a},
+            "lines": {k: [r.get(k) for r in proj] for k, _ in TRACK_LINES}}
+
+
+def _at(rec, group, k, j):
+    xs = (rec.get(group) or {}).get(k) or []
+    x = xs[j] if j < len(xs) else None
+    return x if isinstance(x, (int, float)) and math.isfinite(x) else None
+
+
+def track(records, co):
+    """Each saved forecast against the years now reported: {records: [{last, made_at, years: [{year, drivers: [{key,
+    label, forecast, actual, diff, err, hit}], lines: [{key, label, forecast, actual, err}]}]}], hit_rate: [{key, label,
+    hits, scored}]}. A year matches by its year end's month; err = (actual - forecast) / |forecast|. The hit rate runs
+    over every (forecast, year) pair, so a year two forecasts covered counts twice. ponytail: no weighting by horizon"""
+    hist, labs, cogs = co["hist"], labels(co["dates"]), on_cogs(co["hist"])
+    r, at = ratios(hist), {str(d)[:7]: i for i, d in enumerate(co["dates"])}
+    tally, out = {k: [0, 0] for k, _, _ in TRACK}, []
+    for rec in records:
+        years = []
+        for j, d in enumerate(rec.get("dates") or []):
+            i = at.get(str(d)[:7])
+            if i is None:
+                continue
+            ds = []
+            for k, label, tol in TRACK:
+                f, x = _at(rec, "drivers", k, j), r[i].get(k)
+                # nothing to score: no number, COGS % for a company not on COGS (a services firm), or none either side
+                if f is None or x is None or k == "cogs_pct" and not cogs or max(abs(f), abs(x)) < tol / 10:
+                    continue
+                hit = abs(x - f) <= tol + 1e-12
+                tally[k][0] += hit
+                tally[k][1] += 1
+                ds.append({"key": k, "label": label, "forecast": f, "actual": x, "diff": x - f,
+                           "err": (x - f) / abs(f) if abs(f) > 1e-9 else None, "hit": hit, "tol": tol})
+            ls = [{"key": k, "label": label, "forecast": f, "actual": x, "err": (x - f) / abs(f) if abs(f) > 1e-9 else None}
+                  for k, label in TRACK_LINES if (f := _at(rec, "lines", k, j)) is not None and (x := hist[i].get(k)) is not None]
+            years.append({"year": labs[i], "drivers": ds, "lines": ls})
+        out.append({"last": rec.get("last"), "made_at": rec.get("made_at"), "years": years})
+    words = {k: label for k, label, _ in TRACK}
+    return {"records": out, "hit_rate": [{"key": k, "label": words[k], "hits": h, "scored": n}
+                                         for k, (h, n) in tally.items() if n]}
+
+
+def track_proposals(scored, records, base, defaults, unusual=()):
+    """Rules proposals after new results: for each driver the latest results missed (outside its step) where the rule
+    default, now with those results in, moves your base toward what came in, by at least half a step. Never applied
+    here: each is {key, label, year, forecast, actual, current, proposed} for you to accept. A driver you chose to keep
+    (the record's "kept") isn't proposed again for those results. A miss in a year detect_oneoffs flags for that driver
+    (`unusual`: {(key, year)}) proposes nothing: it comes back with proposed None and unusual True, so you can leave the
+    year out of the defaults instead (a one-off tax credit shouldn't set next year's tax rate)."""
+    for rec, s in zip(reversed(records), reversed(scored["records"])):
+        if s["years"]:
+            break
+    else:
+        return []
+    y, kept, out = s["years"][-1], set(rec.get("kept") or []), []
+    for d in y["drivers"]:
+        k = d["key"]
+        cur, new = (base.get(k) or {}).get("start"), defaults.get(k)
+        if d["hit"] or k in kept or cur is None or new is None:
+            continue
+        odd = (k, y["year"]) in unusual
+        if odd or abs(new - cur) >= d["tol"] / 2 and (new - cur) * d["diff"] > 0:
+            out.append({"key": k, "label": d["label"], "year": y["year"], "forecast": d["forecast"], "actual": d["actual"],
+                        "current": cur, "proposed": None if odd else new, **({"unusual": True} if odd else {})})
+    return out
+
+
 # ---------- Excel export (live formulas) ----------
 
 RAW = {"revenue", "cogs", "lease", "payables", "other_income", "dep", "interest", "pbt", "tax", "pat", "dividend", "share_cap", "reserves",

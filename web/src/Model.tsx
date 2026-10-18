@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Chart from './Chart'
+import { Accuracy, forecastOf, latestScored, unreviewed } from './Tracking'
 import DriverStrip from './DriverStrip'
 import { growth, month } from './Statements'
 import DraftPanel, { failing, latest, path, useDraft } from './Draft'
@@ -105,9 +106,14 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
   const roundingOnly = offIdx === 0 && off <= 2 && proj!.slice(1).every(r => Math.abs(r.chk_bs ?? 0) < 0.5 && Math.abs(r.chk_cash ?? 0) < 0.5)
   const borrowed = proj ? proj.reduce((s, r) => s + (r.revolver ?? 0), 0) : 0
   const m = METRICS.find(x => x[0] === metric)!
-  const others = proj ? SCENARIOS.filter(s => s !== active).map(s => ({
+  const tracking = projection?.tracking
+  const fc = forecastOf(tracking, metric) // what you forecast for years now reported: pencil marks over their bars
+  const others = proj ? [...SCENARIOS.filter(s => s !== active).map(s => ({
     name: s, values: [...hist.map(() => null), ...projection!.scenarios[s].map(m[2])],
-  })) : []
+  })), ...(Object.keys(fc).length ? [{ name: 'forecast', label: 'your forecast before it was reported',
+    values: [...histYears.map(y => fc[y] ?? null), ...proj.map(() => null)] }] : [])] : []
+  const fresh = !!latestScored(tracking) && unreviewed(doc, tracking)
+  const accuracy = <Accuracy doc={doc} setDoc={setDoc} projection={projection} /> // on top while the results are new
   const draft = useDraft(doc, setDoc)
   const srcOf = (k: string) => doc.assumption_sources[active]?.[k]
   const propOf = (id: string | undefined) => (id && id !== 'manual' && id !== 'history' ? doc.proposals.find(p => p.id === id) : undefined)
@@ -152,7 +158,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
         purpose={<>Pick an input in the table to see its history and the rule behind it, then drag the blue line or type a value.
           Edits change the <b>{active}</b> case (bear is cautious, base central, bull hopeful); every page recalculates. Recalculating never calls AI.</>}
         next={<a className="btn" href="#draft">Draft from documents</a>} />
-      <Toc page="forecast" />
+      <Toc page="forecast" extra={latestScored(tracking) ? [['tracking', 'How it did']] : []} />
       <p className="status-line" aria-live="polite">
         {balanced && <span className="ok">Balance sheet balances in every projected year</span>}
         {offIdx >= 0 && (roundingOnly
@@ -169,6 +175,8 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
           <button type="button" onClick={onApply}>Use the new defaults in base, bull and bear</button>
         </div>
       )}
+
+      {fresh && accuracy}
 
       <details className="fold" id="draft" open={waiting || undefined}>
         <summary><span><b>Let the documents set the inputs</b> · AI reads your annual reports and call transcripts and
@@ -275,6 +283,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
         </div>
         <p className="small">Every line year by year: <a href={href('statements')}>the full statements</a>. What it is worth: <a href={href('valuation')}>Valuation</a>.</p>
       </section>
+      {!fresh && accuracy}
     </>
   )
 }
