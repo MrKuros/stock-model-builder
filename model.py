@@ -1,4 +1,4 @@
-"""Export.in Excel export -> three-statement projection model (all figures in Rs crore)."""
+"""A 10-year financials Excel export -> three-statement projection model (all figures in Rs crore)."""
 import calendar
 import io
 import math
@@ -14,7 +14,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 
-# Export "Data Sheet" row label -> our key. Labels matched case-insensitively.
+# The export's "Data Sheet" row label -> our key. Labels matched case-insensitively.
 # Repeated labels get a "#2" suffix ("Total" appears twice in the balance sheet).
 PL = {"Sales": "revenue", "Other Income": "other_income", "Depreciation": "dep", "Interest": "interest",
       "Profit before tax": "pbt", "Tax": "tax", "Net profit": "pat", "Dividend Amount": "dividend"}
@@ -24,20 +24,21 @@ BS = {"Equity Share Capital": "share_cap", "Reserves": "reserves", "Borrowings":
       "Total#2": "total_assets", "Receivables": "receivables", "Inventory": "inventory", "Cash & Bank": "cash"}
 CF = {"Cash from Operating Activity": "cfo", "Cash from Investing Activity": "cfi",
       "Cash from Financing Activity": "cff"}
-# COGS = raw material cost (materials + purchases of stock in trade) - change in inventory: Export's own P&L sheet
+# COGS = raw material cost (materials + purchases of stock in trade) - change in inventory: the export's own P&L sheet
 # subtracts "Change in Inventory" (stock built up), so this equals the filings' materials + purchases + changes in
 # inventories (JSW Steel FY2021: 32,856 - 348 = 32,508 both ways). None when the export has no Raw Material Cost.
 COGS = {"Raw Material Cost": "rm", "Change in Inventory": "inv_change"}
 OPTIONAL = {"Dividend Amount", "Cash from Operating Activity", "Cash from Investing Activity",
             "Cash from Financing Activity", *COGS}
 COGS_MIN = 0.10  # working-capital days run on COGS only when it's at least this share of revenue (see on_cogs())
-# Export "Quarters" block (last ten quarters) -> company["quarters"]["rows"] keys. All are flows, so TTM sums them.
+# The export's "Quarters" block (last ten quarters) -> company["quarters"]["rows"] keys. All are flows, so TTM sums them.
 QUARTERS = {"Sales": "sales", "Expenses": "expenses", "Operating Profit": "op_profit", "Other Income": "other_income",
             "Depreciation": "depreciation", "Interest": "interest", "Profit before tax": "pbt", "Tax": "tax",
             "Net profit": "net_profit"}
 SECTION_HEADS = (("PROFIT & LOSS", "pl"), ("QUARTERS", "q"), ("BALANCE SHEET", "bs"),
                  ("CASH FLOW", "cf"), ("PRICE", None), ("DERIVED", None))
-TOL = 1.0  # Rs crore; Export rounds to 2 decimals per line
+EXPORT = "Excel export"  # where a year came from when no filing gave it (Company.source years)
+TOL = 1.0  # Rs crore; the export rounds to 2 decimals per line
 
 # key, label, kind. Historical values are the actual ratios; projected values are the inputs.
 DRIVERS = [
@@ -135,7 +136,7 @@ def _cell(row, i, section, label, d):
 
 def _by_date(rows, mapping, section, blank=0.0):
     if rows is None:
-        raise ValueError(f"No '{section}' section found. Is this a Export.in export?")
+        raise ValueError(f"No '{section}' section found. Is this an Excel export?")
     dates = rows.get("report date")
     if not dates:
         raise ValueError(f"{section}: no 'Report Date' row")
@@ -152,14 +153,14 @@ def _by_date(rows, mapping, section, blank=0.0):
 
 
 def parse_export(file):
-    """file: path or file-like of a Export.in 'Export to Excel' workbook."""
+    """file: path or file-like of a 10-year financials Excel export (a 'Data Sheet' tab)."""
     try:
         wb = openpyxl.load_workbook(file, data_only=True, read_only=True)
     except Exception as e:
         raise ValueError(f"Could not open this file as an .xlsx workbook ({e}). "
-                         "Upload the file from Export.in's 'Export to Excel' button.") from e
+                         "Upload a 10-year financials Excel export with a 'Data Sheet' tab.") from e
     if "Data Sheet" not in wb.sheetnames:
-        raise ValueError("No 'Data Sheet' tab. Upload the file from Export.in's 'Export to Excel' button.")
+        raise ValueError("No 'Data Sheet' tab. Upload a 10-year financials Excel export that has one.")
     ws = wb["Data Sheet"]
     name = next((r[1] for r in ws.iter_rows(max_row=5, values_only=True)
                  if isinstance(r[0], str) and r[0].strip().upper() == "COMPANY NAME"), None) or "Company"
@@ -204,7 +205,7 @@ def _derive(rows):
 
 
 class Lender(ValueError):
-    """A bank, NBFC or insurer: this model doesn't fit it, whatever the source, so a Export export won't help either."""
+    """A bank, NBFC or insurer: this model doesn't fit it, whatever the source, so an Excel export won't help either."""
 
 
 def _not_lender(hist):
@@ -225,7 +226,7 @@ def _not_lender(hist):
 def _quarters(rows):
     """{"dates", "rows": {key: [float|None per quarter]}} from the Quarters block, or None when the export has none
     (Milky Mist). Operating profit uses the annual EBITDA rule (PBT + interest + depreciation - other income), so the
-    TTM column lines up with the reported years; Export's own row is the fallback when a line is missing."""
+    TTM column lines up with the reported years; the export's own row is the fallback when a line is missing."""
     cols = [(i, d) for i, d in enumerate((rows or {}).get("report date") or ()) if isinstance(d, datetime)]
 
     def num(label, i, d):
@@ -408,7 +409,7 @@ XBRL_CF = {  # the financial year to date (results filings carry it for the half
 }
 XBRL_TAGS = {**XBRL_PL, **XBRL_BS, **XBRL_CF}
 # Results filings from FY2025 break other financial liabilities into described lines (typed-dimension contexts); the
-# ones described as lease liabilities are leases (TCS FY2026: 9,453 + 1,830 = 11,283 cr, Export's borrowings exactly)
+# ones described as lease liabilities are leases (TCS FY2026: 9,453 + 1,830 = 11,283 cr, the export's borrowings exactly)
 LEASE_LINES = {"OtherNoncurrentFinancialLiabilities": "lease_noncurrent", "OtherCurrentFinancialLiabilities": "lease_current"}
 LEASE_DESC = {"DescriptionOfOtherNoncurrentFinancialLiabilities", "DescriptionOfOtherCurrentFinancialLiabilities"}
 LEASE_RE = re.compile(r"\blease liabilit", re.I)
@@ -449,7 +450,7 @@ def parse_xbrl(file, mappings=None, company=None):
     """An NSE/BSE financial-results XBRL instance -> {company, period_start, period_end, kind, consolidated, facts
     {std key: Rs crore}, unmapped [{tag, value, context}], checks [{name, pass, detail}]}. Deterministic: XBRL_TAGS
     plus the user's approved `mappings` {tag: std key}. With `company` (parse_export's shape) revenue and net profit
-    are compared with Export's figure for the same year or quarter; a mismatch is reported, never blocking.
+    are compared with the export's figure for the same year or quarter; a mismatch is reported, never blocking.
 
     The period is the annual one if the filing has it (a Q4 filing carries the quarter and the year), else the shortest
     (the quarter, not the year to date). The exchanges' "_WEB" files reference contexts (OneD, FourD, OneI) they never
@@ -619,7 +620,7 @@ def parse_xbrl(file, mappings=None, company=None):
 
 
 def _xbrl_ties(f, kind, end, co, consolidated):
-    """Revenue and net profit against Export's reported year (or quarter) ending on the same day, within 1%."""
+    """Revenue and net profit against the export's reported year (or quarter) ending on the same day, within 1%."""
     q = co.get("quarters")
     if kind == "annual":
         dates, rows, label = co["dates"], co["hist"], fy(end)
@@ -633,27 +634,27 @@ def _xbrl_ties(f, kind, end, co, consolidated):
     i = next((i for i, d in enumerate(dates) if d.date() == end.date()), None)
     if i is None:
         what = {"annual": "year", "quarter": "quarter"}.get(kind, "period")
-        return [{"name": "Ties to Export", "pass": None,
-                 "detail": f"The Export file has no {what} ending {end:%d %b %Y} to compare with."}]
+        return [{"name": "Ties to the export", "pass": None,
+                 "detail": f"The Excel file has no {what} ending {end:%d %b %Y} to compare with."}]
     out = []
     for fk, sk, line in pairs:
         a, b = f.get(fk), rows[i].get(sk)
         if a is None or b is None:
             continue
         ok = abs(a - b) <= 0.01 * abs(b)
-        detail = f"Filing {_cr(a)}, Export {_cr(b)}"
+        detail = f"Filing {_cr(a)}, export {_cr(b)}"
         if not ok:
-            detail += f": {abs(a / b - 1) * 100:.1f}% apart" if b else ": Export has 0"
+            detail += f": {abs(a / b - 1) * 100:.1f}% apart" if b else ": the export has 0"
             if consolidated is False:
-                detail += ". This filing is standalone; Export's export is usually consolidated."
-        out.append({"name": f"{line} for {label} matches Export", "pass": ok, "detail": detail})
+                detail += ". This filing is standalone; the export is usually consolidated."
+        out.append({"name": f"{line} for {label} matches the export", "pass": ok, "detail": detail})
     return out
 
 
 # ---------- a company from its filings (fetch by ticker, 5.1) ----------
 
-# How an annual results filing's lines add up to Export's Data Sheet lines, so a company built from filings reads
-# like an export: Export's borrowings include lease liabilities and its other liabilities everything else (payables,
+# How an annual results filing's lines add up to the export's Data Sheet lines, so a company built from filings reads
+# like an export: the export's borrowings include lease liabilities and its other liabilities everything else (payables,
 # provisions, minority interest); its net block includes goodwill and intangibles; cash includes bank balances.
 FILING_SUMS = {"borrowings": ("borrowings_noncurrent", "borrowings_current", "lease_noncurrent", "lease_current"),
                "net_block": ("ppe", "investment_property", "goodwill", "intangibles"),
@@ -665,7 +666,7 @@ FILING_NEEDS = ("revenue", "pbt", "pat", "share_cap", "total_assets")  # without
 
 def filing_row(x):
     """An annual filing's facts -> one Data Sheet year (parse_export's lines), or None when a needed line is missing
-    (a results filing without a balance sheet). Lines a filing leaves out are 0, as in a Export export."""
+    (a results filing without a balance sheet). Lines a filing leaves out are 0, as in an Excel export."""
     if any(x.get(k) is None for k in FILING_NEEDS):
         return None
     g = lambda k: x.get(k) or 0.0  # noqa: E731
@@ -675,11 +676,11 @@ def filing_row(x):
     total = x.get("equity_and_liabilities") or x["total_assets"]
     tax = x["tax"] if "tax" in x else g("current_tax") + g("deferred_tax")
     cogs = ("materials", "purchases", "inventory_change")
-    # exceptional items go into other income, as in Export's export (TCS FY2026: its 4,526 cr charge makes EBITDA
+    # exceptional items go into other income, as in the export (TCS FY2026: its 4,526 cr charge makes EBITDA
     # 72,398 both ways), so EBITDA is the operating line and one-off detection sees them in other income
     r.update(revenue=x["revenue"], other_income=g("other_income") + g("exceptional"), dep=g("dep"), interest=g("interest"), pbt=x["pbt"],
              tax=tax, pat=x["pat"],
-             # ponytail: dividends paid in the year (last year's final + this year's interim), not Export's
+             # ponytail: dividends paid in the year (last year's final + this year's interim), not the export's
              # "declared for the year"; payout defaults lag a changed dividend policy by a year
              dividend=abs(g("dividends_paid")),
              share_cap=x["share_cap"], reserves=reserves, total_liab=total, total_assets=x["total_assets"],
@@ -745,7 +746,7 @@ def _month_end(d, months):
 def from_filings(name, annual, quarters=(), market=None, least=2):
     """A company in parse_export's shape from annual results filings (one basis, any order), by rules: one year per
     filing that has a balance sheet, oldest first. -> (company, skipped [{year, why}]). ValueError with fewer than
-    `least` years (1 when a Export company fills the rest, see merge), or for a lender."""
+    `least` years (1 when an export company fills the rest, see merge), or for a lender."""
     years, skipped = {}, []
     for f in annual:
         end = _iso(f.get("period_end") or "")
@@ -771,28 +772,28 @@ def from_filings(name, annual, quarters=(), market=None, least=2):
 
 MERGE_LINES = (("revenue", "Revenue"), ("pat", "Net profit"), ("total_assets", "Total assets"),
                ("borrowings", "Borrowings"), ("cfo", "Cash from operations"))
-MERGE_TOL = 0.01  # filings and Export a year apart by more than 1%: reported, the filing's number kept
+MERGE_TOL = 0.01  # filings and the export a year apart by more than 1%: reported, the filing's number kept
 RESTATED = (0.05, 0.02)  # a year off by 5%+ on revenue or profit while the next year agrees within 2%: restated later
 
 
 def _line(h, k, filing):
-    """A merge line; net profit like for like: Export's is PBT less tax, a filing's pat is the owners' share."""
+    """A merge line; net profit like for like: the export's is PBT less tax, a filing's pat is the owners' share."""
     return h["pbt"] - h["tax"] if k == "pat" and filing else h.get(k)
 
 
-def merge(filed, export):
-    """Years from filings win; a Export company (an export, or another source of its shape) fills only the years the
+def merge(filed, other):
+    """Years from filings win; an export company (an Excel export, or another source of its shape) fills only the years the
     filings don't have (older ones: NSE's XBRL starts in 2018-19). -> (company, filled years, mismatches [{year, line,
     filing, export}] on the years both have, notes). Years the other company itself took from filings aren't compared
-    (they'd be compared with themselves). Where Export's borrowings are higher, the difference is lease liabilities
+    (they'd be compared with themselves). Where the export's borrowings are higher, the difference is lease liabilities
     the filing keeps in other liabilities: moved into borrowings (the balance sheet still ties) and said. A year off on
     revenue or profit while the next year agrees was restated later: said, the filed number kept. Market data and
     quarters come from the filings' side when it has them."""
     have = {d.date(): i for i, d in enumerate(filed["dates"])}
     rows = {d: h for d, h in zip(filed["dates"], filed["hist"])}
-    whence = ((export.get("source") or {}).get("years")) or {}
+    whence = ((other.get("source") or {}).get("years")) or {}
     filled, mism, notes, gaps = [], [], [], {}
-    for d, h in zip(export["dates"], export["hist"]):
+    for d, h in zip(other["dates"], other["hist"]):
         if d.date() not in have:
             rows[d] = h
             filled.append(fy(d))
@@ -803,9 +804,9 @@ def merge(filed, export):
         if extra > MERGE_TOL * max(h["borrowings"], 1.0):
             f["borrowings"] += extra
             f["other_liab"] -= extra
-            notes.append(f"{fy(d)}: Rs {_inr(extra)} cr of borrowings taken from Export (lease liabilities, which "
+            notes.append(f"{fy(d)}: Rs {_inr(extra)} cr of borrowings taken from the export (lease liabilities, which "
                          "this year’s filing keeps in other liabilities).")
-        if whence.get(fy(d), "Export") != "Export":
+        if whence.get(fy(d), EXPORT) != EXPORT:
             continue
         gaps[fy(d)] = {}
         for k, line in MERGE_LINES:
@@ -822,18 +823,18 @@ def merge(filed, export):
             k = "revenue" if off(g, "revenue", RESTATED[0]) else "pat"
             what = "revenue" if k == "revenue" else "net profit"
             notes.append(f"{y} looks restated later: {what} as first filed Rs {_inr(g[k][0])} cr, Rs {_inr(g[k][1])} cr "
-                         f"on Export’s restated basis. Growth and margins from {y} into FY{int(y[2:]) + 1} aren’t like "
+                         f"on the export’s restated basis. Growth and margins from {y} into FY{int(y[2:]) + 1} aren’t like "
                          f"for like, and the defaults from history carry that break.")
     dates = sorted(rows)
-    sm, fm = export.get("market") or {}, filed.get("market") or {}
-    at = {d.date(): i for i, d in enumerate(export["dates"])}
-    hist_of = lambda key: [(sm.get(key) or [None] * len(export["dates"]))[at[d.date()]] if d.date() in at else None  # noqa: E731
+    sm, fm = other.get("market") or {}, filed.get("market") or {}
+    at = {d.date(): i for i, d in enumerate(other["dates"])}
+    hist_of = lambda key: [(sm.get(key) or [None] * len(other["dates"]))[at[d.date()]] if d.date() in at else None  # noqa: E731
                            for d in dates]
     market = {"price": fm.get("price") or sm.get("price"), "shares": fm.get("shares") or sm.get("shares"),
               "face_value": fm.get("face_value") or sm.get("face_value"),
               "price_hist": hist_of("price_hist"), "shares_hist": hist_of("shares_hist")}
     co = {"name": filed["name"], "dates": dates, "hist": _derive([rows[d] for d in dates]), "market": market,
-          "quarters": filed.get("quarters") or export.get("quarters")}
+          "quarters": filed.get("quarters") or other.get("quarters")}
     return co, sorted(filled), mism, notes
 
 
@@ -915,7 +916,7 @@ def mapping_checks(filing, tag, key, others=()):
 def on_cogs(hist):
     """Inventory and payable days run on COGS when it is at least COGS_MIN of revenue in each of the last three
     reported years (makers and traders); otherwise on revenue (TCS: Rs 14 cr of materials on Rs 1,64,177 cr; Coal
-    India; exports without the row). Only Export's rows decide it, so a saved model never changes basis."""
+    India; exports without the row). Only the export's rows decide it, so a saved model never changes basis."""
     return all((h.get("cogs") or 0.0) >= COGS_MIN * h["revenue"] > 0 for h in hist[-3:])
 
 
@@ -926,12 +927,12 @@ def _debt(r):
 
 def upgrade(co, filings=(), capex=None):
     """The company with what attached annual XBRL filings add, by rules (no AI): a copy, co is untouched. A filing is
-    used for the reported year ending on its period end when its revenue is within 1% of Export's (consolidated
+    used for the reported year ending on its period end when its revenue is within 1% of the export's (consolidated
     first, one filing per year). Per year it can add
-      - trade payables, split out of Export's Other Liabilities (which include them);
-      - lease liabilities, split out of Export's Borrowings (which include them): the filing's lease elements, or
-        else Export's borrowings less the filing's borrowings (results filings carry no lease element; JSW Steel
-        FY2024: 87,984 - 85,575 = 2,409 = Export's own lease line);
+      - trade payables, split out of the export's Other Liabilities (which include them);
+      - lease liabilities, split out of the export's Borrowings (which include them): the filing's lease elements, or
+        else the export's borrowings less the filing's borrowings (results filings carry no lease element; JSW Steel
+        FY2024: 87,984 - 85,575 = 2,409 = the export's own lease line);
       - capex = purchase of PP&E + intangibles from its cash flow, instead of the net block change.
     `capex` {year label: Rs crore} is cash-flow capex read from annual reports and approved by the user (3.3); it
     fills years no filing gives. Totals never change, so the balance sheet still ties. Adds "sources": {basis,
@@ -944,14 +945,14 @@ def upgrade(co, filings=(), capex=None):
         i = at.get(end.date()) if end else None
         if f.get("kind") == "annual" and i is None:
             notes.append(f"{f.get('file') or 'filing'} isn't used: its year to {end:%d %b %Y} isn't one of the "
-                         "reported years in this Export file." if end else "An annual filing without a period end isn't used.")
+                         "reported years in this Excel file." if end else "An annual filing without a period end isn't used.")
         if f.get("kind") != "annual" or i is None or i in done:
             continue
         x, h, y, name = f["facts"], hist[i], lab[i], f.get("file") or "filing"
         rev = x.get("revenue")
         if rev is None or abs(rev - h["revenue"]) > 0.01 * abs(h["revenue"]):
             notes.append(f"{name} isn't used: its {y} revenue ({'none' if rev is None else _cr(rev)}) is more than 1% "
-                         f"from Export's {_cr(h['revenue'])}.")
+                         f"from the export's {_cr(h['revenue'])}.")
             continue
         done.add(i)
         if "payables" in x or "payables_noncurrent" in x:
@@ -960,21 +961,21 @@ def upgrade(co, filings=(), capex=None):
                 h["payables"], h["other_liab"] = pay, h["other_liab"] - pay
                 used["payables"].append(y)
             else:
-                notes.append(f"{y} trade payables {_cr(pay)} exceed Export's other liabilities "
+                notes.append(f"{y} trade payables {_cr(pay)} exceed the export's other liabilities "
                              f"{_cr(h['other_liab'])}, so they stay in other liabilities.")
         tagged = "lease_current" in x or "lease_noncurrent" in x
         lease = (x.get("lease_current", 0.0) + x.get("lease_noncurrent", 0.0) if tagged
                  else h["borrowings"] - x["borrowings"] if "borrowings" in x else None)
-        # ponytail: the difference also holds preference capital and other debt Export files under borrowings
+        # ponytail: the difference also holds preference capital and other debt the export files under borrowings
         # (JSW FY2023: 2,281 vs 2,011 of leases); fine for a debt-like split, a tagged lease line wins when present
         if lease is not None and lease > TOL:
             if lease <= h["borrowings"] + TOL:
                 h["lease"], h["borrowings"] = lease, max(0.0, h["borrowings"] - lease)
                 used["lease"].append(y)
             else:
-                notes.append(f"{y} lease liabilities {_cr(lease)} exceed Export's borrowings, so they aren't split out.")
+                notes.append(f"{y} lease liabilities {_cr(lease)} exceed the export's borrowings, so they aren't split out.")
         elif lease is not None and lease < -TOL:
-            notes.append(f"{y}: the filing's borrowings {_cr(x['borrowings'])} exceed Export's "
+            notes.append(f"{y}: the filing's borrowings {_cr(x['borrowings'])} exceed the export's "
                          f"{_cr(h['borrowings'])}, so no lease liabilities are split out.")
         if "purchase_ppe" in x:
             # abs: a filing saved before parse_xbrl flipped a negative purchase still gives a size
@@ -997,7 +998,7 @@ def _sources(hist, used, notes):
     """Where each upgraded driver's history comes from, as short sentences for the UI and the Excel note."""
     cogs, ys = on_cogs(hist), lambda k: ", ".join(used[k])  # noqa: E731
     base = "COGS" if cogs else "revenue"
-    why = ("on COGS (raw material cost less change in inventory), from Export" if cogs else
+    why = ("on COGS (raw material cost less change in inventory), from the export" if cogs else
            "on revenue: COGS is under 10% of revenue" if any(h.get("cogs") is not None for h in hist) else
            "on revenue: this file has no raw material cost")
     d = {"dio": why[0].upper() + why[1:],
@@ -1006,9 +1007,9 @@ def _sources(hist, used, notes):
          "capex_pct": ("Cash-flow capex from " + " and ".join(x for x in (
              used["capex"] and f"XBRL {ys('capex')}", used["capex_ar"] and f"the annual report {ys('capex_ar')} (approved)") if x)
              + "; other years from the net block change" if used["capex"] or used["capex_ar"]
-             else "From the net block change, from Export")}
+             else "From the net block change, from the export")}
     if cogs:
-        d["cogs_pct"] = "From Export (raw material cost less change in inventory)"
+        d["cogs_pct"] = "From the export (raw material cost less change in inventory)"
     if used["payables"]:
         d["ol_pct"] = f"Excludes trade payables in {ys('payables')} (XBRL)"
     if used["lease"]:
@@ -1107,7 +1108,7 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
         # the product telescopes to the plain CAGR
         "growth": math.prod(h["revenue"] / p["revenue"] for p, h in gp) ** (1 / len(gp)) - 1 if gp and pos else 0.0,
         "ebitda_margin": per_rev(lambda h: h["ebitda"]),
-        # ponytail: other income includes exceptional items (Export's way, and filing_row's); the median drops a one-off year
+        # ponytail: other income includes exceptional items (the export's way, and filing_row's); the median drops a one-off year
         "oi_pct": max(statistics.median(oi), 0.0) if oi else 0.0,
         "dep_pct": _ros((h["dep"], p["net_block"]) for p, h in pw),
         # ponytail: capped for every source; a company with almost no borrowings still pays interest (on bill
@@ -1166,7 +1167,7 @@ def detect_oneoffs(hist, labels, min_years=4):
     """Years where a metric is more than 2 sigma from the company's own median: [{year, metric, value, typical,
     note}]. sigma = 1.4826 x MAD, so the odd years themselves don't widen the band. A metric needs `min_years`
     values; tax rate skips loss years (a rate on a loss means nothing); minority share only counts profit years that
-    split profit (Export's years read 0, which would make every filed year look unusual)."""
+    split profit (the export's years read 0, which would make every filed year look unusual)."""
     r, out = ratios(hist), []
     for key, what, unit, floor in ONEOFF:
         pts = [(labels[i], x[key]) for i, x in enumerate(r)
@@ -1278,7 +1279,7 @@ def _note(notes, topic):
 
 
 def _mscore(p, h, cogs):
-    """Beneish M-score (8 variables) for year h against p, approximated from what Export has. (score, parts, notes)
+    """Beneish M-score (8 variables) for year h against p, approximated from what the export has. (score, parts, notes)
     or None when cash flow, receivables or a positive margin is missing. Weights are Beneish's 1999 ones."""
     if h.get("cfo") is None or not (p["revenue"] > 0 and h["revenue"] > 0 and p["receivables"] > 0 and h["total_assets"] > 0
                                     and p["total_assets"] > 0):
@@ -1294,7 +1295,7 @@ def _mscore(p, h, cogs):
              "DEPI": dr(p) / dr(h) if dr(p) and dr(h) else 1.0, "SGAI": 1.0,
              "LVGI": lev(h) / lev(p) if lev(p) > 0 else 1.0, "TATA": (h["pat"] - h["cfo"]) / h["total_assets"]}
     w = {"DSRI": 0.92, "GMI": 0.528, "AQI": 0.404, "SGI": 0.892, "DEPI": 0.115, "SGAI": -0.172, "TATA": 4.679, "LVGI": -0.327}
-    approx = ["asset quality (AQI) set to 1: Export doesn't split current from non-current assets",
+    approx = ["asset quality (AQI) set to 1: the export doesn't split current from non-current assets",
               "SG&A (SGAI) set to 1: not read from the export"]
     if not (cogs and p.get("cogs") is not None and h.get("cogs") is not None):
         approx.insert(0, "gross margin (GMI) read as EBITDA margin: no cost of goods in the export")
@@ -1386,7 +1387,7 @@ def forensic(hist, labels, notes=None):
         sev, fact = _sev(oi / pbt, OI_SHARE), f"{_pct(oi / pbt)} of PBT, {span(3)}"
         txt = (f"Other income was {_pct(oi / pbt)} of profit before tax over {span(3)}"
                + (" (it includes exceptional items)." if oi / pbt > OI_SHARE[2] else "."))
-        # other income includes exceptional items (gains and charges), from Export and filings alike: a swing against its median
+        # other income includes exceptional items (gains and charges), from exports and filings alike: a swing against its median
         # makes reported profit growth that year say little about the business (TCS FY2026: Rs 4,526 cr of charges)
         pct = [h["other_income"] / h["revenue"] if h["revenue"] > 0 else None for h in hist]
         typ = _median_before(pct)
@@ -1470,7 +1471,7 @@ def forensic(hist, labels, notes=None):
 
     # Beneish M-score, approximated
     rule = (f"Beneish M-score (8 variables, 1999 weights) on {labels[-2] if n > 1 else y} to {y}: above {M_SCORE[1]} low, above "
-            f"{M_SCORE[0]} medium. Approximated from Export, so never high")
+            f"{M_SCORE[0]} medium. Approximated from the reported lines, so never high")
     m = _mscore(hist[-2], last, cogs) if n > 1 else None
     if m is None:
         add("mscore", "M-score", "not_checked", None, M_SCORE[0], labels[-2:], "Missing inputs",
@@ -1478,7 +1479,7 @@ def forensic(hist, labels, notes=None):
     else:
         score, parts, approx = m
         add("mscore", "M-score", _sev(score, (math.inf, *M_SCORE)), score, M_SCORE[0], labels[-2:], f"{score:.2f} for {y}",
-            f"The Beneish M-score is {score:.2f} for {y}, approximated from Export (above {M_SCORE[0]} looked like "
+            f"The Beneish M-score is {score:.2f} for {y}, approximated from the reported lines (above {M_SCORE[0]} looked like "
             "manipulation in Beneish's sample).", rule)
         out[-1].update(parts=parts, approx=approx)
 
@@ -1701,7 +1702,7 @@ def valuation(projs, hist, val, base, market, inputs=None, note=False):
     # ponytail: no share price -> book equity weights the WACC; a negative book counts as zero
     e = price * shares if price and shares else max(0.0, last["share_cap"] + last["reserves"])
     # lease liabilities are debt (Ind AS 116 moved lease rent out of EBITDA, so FCFF is before lease payments);
-    # Export's borrowings already included them, so splitting them out leaves D and the bridge unchanged
+    # The export's borrowings already included them, so splitting them out leaves D and the bridge unchanged
     d = _debt(last)
     we = e / (e + d) if e + d > 0 else 1.0
     wacc_build = we * ke + (1 - we) * kd_at
@@ -1783,7 +1784,7 @@ def _hist_multiples(hist, market, shares, nci=0.0):
     years, ph, sh = [], market.get("price_hist") or [], market.get("shares_hist") or []
     for i, h in enumerate(hist):
         p, s = (_pos(x[i]) if i < len(x) else None for x in (ph, sh))
-        # ponytail: a year without Export's adjusted share count uses today's count (typed or from the export)
+        # ponytail: a year without the export's adjusted share count uses today's count (typed or from the export)
         s = s or shares
         years.append(_multiples(p * s if p and s else None, _debt(h) - h["cash"] - h["investments"], h, nci))
     out = {"hist": {k: [y[k] for y in years] for k in MULTIPLES}}
@@ -1866,7 +1867,7 @@ def drivers_impact(hist, a, period, wacc, g, per_share):
     at = lambda w, gg: (lambda ev: None if ev is None else per_share(ev))((_dcf(fcff, period, w, gg) or {}).get("ev"))  # noqa: E731
     out, no_pay = [], all(h.get("payables") is None for h in hist)
     for key, label, step in IMPACT:
-        if key == "dpo" and no_pay:  # Export-only: payables sit in other liabilities, payable days would add a second copy
+        if key == "dpo" and no_pay:  # export-only: payables sit in other liabilities, payable days would add a second copy
             continue
         if key == "wacc":
             lo, hi = at(wacc - step, g), at(wacc + step, g)
@@ -2368,7 +2369,7 @@ def _quarters_sheet(wb, q, formats):
     """'Quarters' sheet: reported quarters as values (ink), then a TTM column of live SUMs over the last four
     (blank when one is missing, like ttm()). No TTM column when the last four quarters aren't consecutive."""
     qs = wb.create_sheet("Quarters")
-    qs["A1"] = ("Quarterly results as reported, Rs crore (Export.in export). Operating profit = profit before tax + "
+    qs["A1"] = ("Quarterly results as reported, Rs crore (Excel export). Operating profit = profit before tax + "
                 "interest + depreciation - other income. TTM = sum of the last four quarters.")
     qs["A1"].font = Font(italic=True, color="808080")
     top, nq, t = 3, len(q["dates"]), ttm(q)
@@ -2502,7 +2503,7 @@ def to_excel(co, scenarios, n=5, active="base", val=None, peers=None, at=None):
     got = "; ".join(f"{what} {', '.join(used[k])}" for k, what in (
         ("payables", "trade payables"), ("lease", "lease liabilities"), ("capex", "cash-flow capex")) if used.get(k))
     ar = ", ".join(used.get("capex_ar") or [])
-    ws["A2"] = ("Rs crore. Source: Export.in export" + (f", plus XBRL filings ({got})" if got else "")
+    ws["A2"] = ("Rs crore. Source: Excel export" + (f", plus XBRL filings ({got})" if got else "")
                 + (f", plus cash-flow capex read from the annual report and approved ({ar})" if ar else "")
                 + ". Blue = input (B3 and the Scenarios sheet), green = picked from the Scenarios sheet, black = formula. "
                 + f"Inventory and payable days are on {'COGS' if cogs else 'revenue'}.")

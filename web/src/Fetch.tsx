@@ -9,7 +9,7 @@ export interface FetchEvent {
   step?: string; detail?: string; company?: Parsed; report?: Report; documents?: SourceDoc[]; note?: string
   error?: string; done?: true
   final?: boolean // trying again won't change the error (no such symbol, too few years)
-  lender?: boolean // a bank, NBFC or insurer: a Export export won't work either
+  lender?: boolean // a bank, NBFC or insurer: an Excel export won't work either
 }
 
 /** A company name for matching an upload to a saved company: 'Tata Consultancy Services Ltd.' = '... Limited'
@@ -19,7 +19,7 @@ export const sameCompany = (a: string, b: string) => {
   return n(a) === n(b)
 }
 
-/** A Export export handed from Your companies to that company's Overview, where SourceNote adds its years. */
+/** An Excel export handed from Your companies to that company's Overview, where SourceNote adds its years. */
 export const pendingMerge: { company: string; parsed: Parsed }[] = []
 
 /** POST a JSON-lines endpoint (/api/nse/fetch by default), calling `on` for each line as it arrives; aborting the
@@ -295,7 +295,7 @@ function spans(ys: string[]) {
 }
 
 /** On the Overview of a company added by ticker: where each year came from, what's missing, where filings and
- * Export disagree, and the documents. A Export export can fill the missing years, right here. */
+ * the export disagree, and the documents. An Excel export can fill the missing years, right here. */
 export function SourceNote({ company, onCompany }: { company: Company; onCompany: (p: Parsed, c: Company) => void }) {
   useMinute()
   const href = useHref()
@@ -314,7 +314,7 @@ export function SourceNote({ company, onCompany }: { company: Company; onCompany
     if (!f) return
     setError(null)
     try {
-      setBusy('Reading the Export export…')
+      setBusy('Reading the Excel export…')
       const body = new FormData()
       body.append('file', f)
       await merge(await api<Parsed>('/api/parse', { method: 'POST', body }))
@@ -332,7 +332,7 @@ export function SourceNote({ company, onCompany }: { company: Company; onCompany
       })
       const g = got as Parsed | null
       if (!g) throw new Error('The server stopped before the history was ready. Try again.')
-      const c = { ...g.company, name: company.name, source: g.company.source && { ...g.company.source, from: 'your Export export', documents: s.documents } }
+      const c = { ...g.company, name: company.name, source: g.company.source && { ...g.company.source, from: 'your Excel export', documents: s.documents } }
       onCompany({ ...g, company: c }, c)
     } catch (e) { setError((e as Error).message) } finally { setBusy(null) }
   }
@@ -341,18 +341,18 @@ export function SourceNote({ company, onCompany }: { company: Company; onCompany
       <h2 id="prov-h" className="label">Where these numbers come from · <b>NSE: {s.symbol}</b>{s.industry ? ` · ${s.industry}` : ''}</h2>
       <ul>
         {nse.length > 0 && <li><b>{spans(nse)}</b>: NSE’s annual results filings ({s.basis}), read by rules.</li>}
-        {other.length > 0 && <li><b>{spans(other)}</b>: {s.from ?? 'Export'}, for years NSE has no filing with a balance sheet.</li>}
+        {other.length > 0 && <li><b>{spans(other)}</b>: {s.from ?? 'an Excel export'}, for years NSE has no filing with a balance sheet.</li>}
         {s.missing.map(m => <li key={m} className="miss">Not available: {m}.</li>)}
         <li>Price and share count: NSE, checked {ago(s.price_at)} (Refresh at the top).</li>
       </ul>
       {s.mismatches.length > 0 && <details className="fold">
-        <summary>{s.mismatches.length} difference{s.mismatches.length > 1 ? 's' : ''} over 1% between the filings and Export (the filings’ numbers are used)</summary>
-        <div className="scroll" tabIndex={0} role="region" aria-label="Differences between filings and Export"><table className="mini-t">
+        <summary>{s.mismatches.length} difference{s.mismatches.length > 1 ? 's' : ''} over 1% between the filings and the export (the filings’ numbers are used)</summary>
+        <div className="scroll" tabIndex={0} role="region" aria-label="Differences between filings and the export"><table className="mini-t">
           <thead><tr><th scope="col">Year</th><th scope="col">Line</th><th scope="col" className="r">Filing (Rs cr)</th><th scope="col" className="r">Export</th></tr></thead>
           <tbody>{s.mismatches.map((m, i) => <tr key={i}><td>{m.year}</td><td>{m.line}</td>
             <td className="r num">{Math.round(m.filing).toLocaleString('en-IN')}</td><td className="r num">{Math.round(m.export).toLocaleString('en-IN')}</td></tr>)}</tbody>
         </table></div>
-        <p className="small-note">Net profit is compared before the minority’s share on both sides. Where Export’s borrowings are higher, the difference is lease liabilities a filing keeps in other liabilities; they’re moved into borrowings and listed in the notes below.</p>
+        <p className="small-note">Net profit is compared before the minority’s share on both sides. Where the export’s borrowings are higher, the difference is lease liabilities a filing keeps in other liabilities; they’re moved into borrowings and listed in the notes below.</p>
       </details>}
       {s.notes.length > 0 && <ul className="fetch-notes">{s.notes.map((n, i) => <li key={i}>{n}</li>)}</ul>}
       {s.documents.length > 0 && <details className="fold">
@@ -361,8 +361,8 @@ export function SourceNote({ company, onCompany }: { company: Company; onCompany
           <a href={d.url} target="_blank" rel="noreferrer">{d.kind === 'annual' ? d.title : `${d.kind === 'transcript' ? 'Call transcript' : 'Presentation'}, ${new Date(d.date!).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`}</a></li>)}</ul>
       </details>}
       <p className="small-note">The documents kept with this model are on <a href={href('checks', 'documents')}>Checks → Documents</a>.{' '}
-        {other.length || !s.missing.length ? 'Have a Export export? ' : 'Missing years? '}
-        <label className="link up-l">{busy ?? 'Add years from a Export export'}<input ref={file} type="file" accept=".xlsx" className="sr" disabled={!!busy}
+        {other.length || !s.missing.length ? 'Have an Excel export? ' : 'Missing years? '}
+        <label className="link up-l">{busy ?? 'Add years from an Excel export'}<input ref={file} type="file" accept=".xlsx" className="sr" disabled={!!busy}
           onChange={e => { upload(e.target.files?.[0]); e.target.value = '' }} /></label>{' '}
         (filings still win where both have a year).</p>
       {error && <p className="error" role="alert">{error}</p>}

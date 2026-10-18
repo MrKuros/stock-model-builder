@@ -43,9 +43,9 @@ export function copyBase(setDoc: (f: (d: ModelDoc) => ModelDoc) => void, scenari
 }
 export const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
 
-/** Share price (Rs) and count (crore) from the export; null when Export left them out. */
+/** Share price (Rs) and count (crore) from the export; null when the export left them out. */
 export interface Market { price: number | null; shares: number | null; price_hist: (number | null)[]; shares_hist: (number | null)[]; face_value?: number | null }
-/** The export's Quarters block (model.QUARTERS keys: sales, op_profit, net_profit, ...), null where Export left a gap. */
+/** The export's Quarters block (model.QUARTERS keys: sales, op_profit, net_profit, ...), null where the export left a gap. */
 export interface Quarters { dates: string[]; rows: Record<string, (number | null)[]> }
 /** A document NSE lists for the company (5.1): a call transcript, presentation or annual report, linked, not kept. */
 export interface SourceDoc { date: string | null; kind: DocKind; title: string; url: string }
@@ -53,9 +53,9 @@ export interface SourceDoc { date: string | null; kind: DocKind; title: string; 
 export interface Source {
   symbol: string; exchange: 'NSE'; basis: 'consolidated' | 'standalone'; industry?: string | null
   fetched_at: string; price_at: string | null
-  years: Record<string, string> // FY2024 -> "NSE filing" | "Export"
+  years: Record<string, string> // FY2024 -> "NSE filing" | "Excel export"
   missing: string[] // "FY2019 to FY2022: why"
-  from: string | null // who filled the years filings lack: "your Export export", "this model"...
+  from: string | null // who filled the years filings lack: "your Excel export", "this model"...
   mismatches: { year: string; line: string; filing: number; export: number }[] // over 1%, on years both have
   notes: string[]; documents: SourceDoc[]
 }
@@ -117,7 +117,7 @@ export interface Forensic {
   key: string; title: string; severity: Severity; value: number | null; threshold: number | null; years: string[]
   fact: string; detail: string; rule: string; needs: string | null
   parts?: Record<string, number> // the M-score's eight ratios
-  approx?: string[] // ... and how each one Export lacks is approximated
+  approx?: string[] // ... and how each one the export lacks is approximated
 }
 /** An approved explanation of a forensic flag, doc.flag_notes: words only, AI-written, cited or from the numbers. */
 export interface FlagNote {
@@ -258,7 +258,7 @@ export interface ThesisNote {
 }
 /** A reported year whose metric sits far from the company's own median (model.detect_oneoffs). */
 export interface OneOff { year: string; metric: string; value: number; typical: number; note: string }
-/** Where the upgraded drivers' history comes from (model.upgrade): attached annual filings, else Export. */
+/** Where the upgraded drivers' history comes from (model.upgrade): attached annual filings, else the export. */
 export interface Sources {
   basis: 'cogs' | 'revenue' // inventory and payable days run on this
   drivers: Record<string, string> // driver key (and 'lease') -> a short sentence, e.g. "Trade payables from XBRL FY2024, on COGS"

@@ -117,7 +117,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     } catch (e) { setError((e as Error).message) } finally { setPendingYear(null) }
   }
 
-  // Refresh (today's price, new results) or a Export export's years: a new company; the assumptions stay as they are
+  // Refresh (today's price, new results) or an Excel export's years: a new company; the assumptions stay as they are
   // (new filings move the defaults, which the Forecast and Checks pages then offer in one click)
   const onCompany = (p: Parsed | null, c: Company) => {
     if (p) setParsed({ ...p, company: c })

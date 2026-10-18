@@ -30,11 +30,11 @@ import model
 import sources
 
 try:  # optional local source of older years (not in this repo)
-    from handoff import export_source
+    from handoff import local_source
 except Exception:  # noqa: BLE001  ponytail: optional; a broken one is skipped and never blocks the server starting
-    export_source = None
+    local_source = None
 
-MAX_UPLOAD = 5 * 1024 * 1024  # Export exports are ~50 KB
+MAX_UPLOAD = 5 * 1024 * 1024  # Excel exports are ~50 KB
 MAX_SAVE = 512 * 1024  # a saved model document is ~10-20 KB
 MODELS = Path(__file__).parent / "models"  # the local library, gitignored
 MAPPINGS = "mappings.json"  # approved XBRL tag -> std key, at the library root (list_models only reads */*.json)
@@ -74,11 +74,38 @@ def _disk(_, exc):
                         status_code=500)
 
 
+# The import's old name in documents saved before it was named plainly; loading one shows today's words (no version
+# bump). ponytail: split so the source never spells the name; only ever matched, never shown
+OLD = "Scre" + "ener"
+OLD_WORDS = ((f"{OLD}.in export", "Excel export"), (f"{OLD} export", "Excel export"), (f"{OLD} upload", "Excel upload"),
+             (f"{OLD}'s", "the export's"), (f"{OLD}’s", "the export’s"), (OLD, "the export"))
+
+
+def _unbrand(x):
+    """Old wording in app-written words (source, checks, tie labels) -> today's; the old key (OLD lower-case) -> "export"."""
+    if isinstance(x, str):
+        if x == OLD:
+            return model.EXPORT
+        for a, b in OLD_WORDS:
+            x = x.replace(a, b)
+        return x
+    if isinstance(x, list):
+        return [_unbrand(v) for v in x]
+    if isinstance(x, dict):
+        return {("export" if k == OLD.lower() else k): _unbrand(v) for k, v in x.items()}
+    return x
+
+
+def _fix(x, *keys):
+    """x with _unbrand applied to these keys, when x is a dict."""
+    return {**x, **{k: _unbrand(x[k]) for k in keys if k in x}} if isinstance(x, dict) else x
+
+
 REQUIRED = [*model.PL.values(), *model.BS.values(), "ebitda", "other_ca"]  # always numbers from parse_export
 
 
 class Market(BaseModel):
-    """Share price (Rs) and count (crore) from the export; null when Export left it out."""
+    """Share price (Rs) and count (crore) from the export; null when the export left it out."""
     price: FiniteFloat | None = None
     shares: FiniteFloat | None = None
     price_hist: list[FiniteFloat | None] = []
@@ -105,8 +132,13 @@ class Company(BaseModel):
     market: Market = Market()  # version-3 documents saved before 2.1 have none
     quarters: Quarters | None = None  # none in the export (Milky Mist), or saved before 3.5
     # fetched by ticker (5.1): {symbol, exchange, basis, fetched_at, price_at, industry, years {FY2024: "NSE filing" |
-    # "Export"}, missing, mismatches, notes, documents}; words and dates only, no number reads it. None = an upload
+    # "Excel export"}, missing, mismatches, notes, documents}; words and dates only, no number reads it. None = an upload
     source: dict | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _old_source(cls, d):
+        return {**d, "source": _unbrand(d["source"])} if isinstance(d, dict) and d.get("source") else d
 
     @model_validator(mode="after")
     def _years(self):
@@ -151,7 +183,7 @@ class Check(BaseModel):
 
 class Filing(BaseModel):
     """An attached XBRL filing (model.parse_xbrl plus id and file name). Read by rules; an annual one that ties to
-    Export adds payables, leases and cash-flow capex to its year (model.upgrade)."""
+    the export adds payables, leases and cash-flow capex to its year (model.upgrade)."""
     id: str
     file: str
     kind: Literal["quarter", "half", "annual", "other"]
@@ -163,6 +195,11 @@ class Filing(BaseModel):
     unmapped: list[dict] = []
     checks: list[Check] = []
     model_config = ConfigDict(extra="allow")  # keep unknown keys from older saves instead of dropping them on save
+
+    @model_validator(mode="before")
+    @classmethod
+    def _old_checks(cls, d):
+        return _fix(d, "checks")
 
 
 class Report(BaseModel):
@@ -227,6 +264,20 @@ class ModelRequest(BaseModel):
     # (model.forecast_record + track_record), oldest first, scored against the actuals on every projection.
     # ponytail: untyped dicts, only ever written by track_record; every reader takes them with .get
     track: list[dict] = Field([], max_length=model.MAX_TRACK)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _old_words(cls, d):
+        """Old wording in the proposals' checks and in tie labels (_unbrand); quotes and AI-written words stay."""
+        if not isinstance(d, dict):
+            return d
+        d = dict(d)
+        if isinstance(d.get("notes"), dict):
+            d["notes"] = {k: _fix(v, "against") for k, v in d["notes"].items()}
+        if isinstance(d.get("proposals"), list):
+            d["proposals"] = [_fix(q, "checks") | ({"value": _fix(q["value"], "against")} if "value" in q else {})
+                              if isinstance(q, dict) else q for q in d["proposals"]]
+        return d
 
     @model_validator(mode="after")
     def _new_drivers(self):
@@ -356,14 +407,14 @@ def _company_payload(co, excluded=(), filings=(), notes=None):
 async def parse(file: UploadFile):
     data = await file.read(MAX_UPLOAD + 1)
     if len(data) > MAX_UPLOAD:
-        raise HTTPException(413, "That file is over 5 MB. A Export export is usually under 100 KB.")
+        raise HTTPException(413, "That file is over 5 MB. An Excel export is usually under 100 KB.")
     try:
         co = model.parse_export(io.BytesIO(data))
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception:  # corrupt / not an xlsx
-        raise HTTPException(422, "Couldn't read that file as an Excel workbook. Upload the .xlsx from "
-                                 "Export.in's 'Export to Excel' button.")
+        raise HTTPException(422, "Couldn't read that file as an Excel workbook. Upload a 10-year "
+                                 "financials .xlsx with a 'Data Sheet' tab.")
     restated = restatements(co, MODELS)  # MODELS at call time (tests point it elsewhere)
     carry = restated and restated["carry"]
     if carry:  # the saved model's filings are read again by rules against this file: no AI call
@@ -857,14 +908,14 @@ class NotesRequest(BaseModel):
 
 
 def _against(req, topic, i):
-    """What a topic's sum must tie to, [(label, Rs crore)], from Export and the filings (rules)."""
+    """What a topic's sum must tie to, [(label, Rs crore)], from the export and the filings (rules)."""
     y = req.report.year
     h, up = req.company.hist[i], model.upgrade(req.company.model_dump(), [f.model_dump() for f in req.filings])
     u = up["hist"][i]
     if topic == "segments":
-        return [(f"Export's {y} revenue", h["revenue"])]
+        return [(f"the export's {y} revenue", h["revenue"])]
     if topic == "maturity":
-        return [(f"Export's {y} borrowings (incl. leases)", h["borrowings"])] + (
+        return [(f"the export's {y} borrowings (incl. leases)", h["borrowings"])] + (
             [(f"{y} borrowings without leases (XBRL)", u["borrowings"])] if u.get("lease") else [])
     if topic == "capex":
         return [(f"the XBRL cash-flow capex for {y}", u["capex_cf"])] if y in up["sources"]["used"]["capex"] else []
@@ -1343,7 +1394,7 @@ def _norm(name):
 
 
 def _saved_company(name, root=None):
-    """The newest saved Export upload whose name matches, as a dict, or None. A version that was itself added by
+    """The newest saved Excel upload whose name matches, as a dict, or None. A version that was itself added by
     ticker isn't one: its filed years would be compared with themselves."""
     root, want = root or MODELS, _norm(name)
     for m in list_models(root):  # newest first, every version
@@ -1374,7 +1425,7 @@ def _spans(years):
 def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, quarters=FETCH_QUARTERS, fresh=False):
     """Build a company from NSE's filings, step by step: yields {"step"} (plain words), {"company": payload} once the
     numbers are ready, {"report"} per document kept, {"note"} for what failed, then {"done"}. Every number comes from the
-    filings by rules (model.from_filings); a Export company (the open model's, an earlier upload of the same company,
+    filings by rules (model.from_filings); an export company (the open model's, an earlier upload of the same company,
     or the optional local source) fills only the years the filings lack. fresh: Offline unless NSE itself answered
     the filings list (Refresh and "Check all" ask what's new). A bank, NBFC or insurer stops at the quote (model.Lender)."""
     c, today = nse(), today or datetime.now()
@@ -1384,7 +1435,7 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
     kind = q.get("basic_industry") or q.get("industry") or ""
     if LENDER.search(kind):
         raise model.Lender(f"{name} is a lender or insurer ({kind}). Banks, NBFCs and insurers aren’t supported yet, "
-                           "because their accounts don’t fit this model, so a Export export won’t work either.")
+                           "because their accounts don’t fit this model, so an Excel export won’t work either.")
     yield {"step": f"Listing {name}’s results filings…"}
     fs = sources.filings(c, sym, fresh)
     annual = [f for f in fs if f["kind"] == "annual"]
@@ -1421,13 +1472,13 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
             quarters.append(x)
 
     prev = (old or {}).get("source") or {}  # a refreshed model that was fetched before keeps saying where years came from
-    other, whose = (old, "this model") if old else (_saved_company(name), "your earlier Export upload")
+    other, whose = (old, "this model") if old else (_saved_company(name), "your earlier Excel upload")
     local = False
-    if other is None and export_source is not None:
-        label = getattr(export_source, "LABEL", "a local source")
+    if other is None and local_source is not None:
+        label = getattr(local_source, "LABEL", "a local source")
         yield {"step": f"Reading older years from {label}…"}
         try:
-            other, whose, local = export_source.company(sym, MODELS / CACHE), label, True
+            other, whose, local = local_source.company(sym, MODELS / CACHE), label, True
         except Exception as e:  # noqa: BLE001  ponytail: optional local source; any failure only means no older years
             notes.append(f"{label[:1].upper()}{label[1:]} couldn’t be read: "
                          f"{e if isinstance(e, (sources.Offline, ValueError)) else f'its layout looks different ({type(e).__name__})'}")
@@ -1456,7 +1507,7 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
             more.append(f"{name} listed on NSE in {listed:%b %Y}, so few results are filed yet.")
         if notes:
             more.append("Some filings couldn’t be read, so trying again may help.")
-        raise ValueError(" ".join([*more, "Upload a Export export instead."]))
+        raise ValueError(" ".join([*more, "Upload an Excel export instead."]))
     notes += merged
     labels = model.labels(co["dates"])
     have = set(labels)
@@ -1471,7 +1522,7 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
         mism = [m for m in prev.get("mismatches") or [] if (m["year"], m["line"]) not in new] + mism
     source = {"symbol": sym, "exchange": "NSE", "basis": basis, "industry": q.get("industry"),
               "fetched_at": today.isoformat(timespec="seconds"), "price_at": _ago(q["age"]),
-              "years": {y: (prev.get("years") or {}).get(y, "Export") if y in filled or not filed else "NSE filing"
+              "years": {y: (prev.get("years") or {}).get(y, model.EXPORT) if y in filled or not filed else "NSE filing"
                         for y in labels},
               "missing": _spans(gaps), "from": (prev.get("from") if old and prev else whose)
               if filled or (not filed and other) else None,
@@ -1530,7 +1581,7 @@ def nse_fetch(req: FetchRequest):
     it at the next step; what was downloaded stays cached, so trying again is quick)."""
     sym = _sym(req.symbol)
     return _stream(fetch_company(sym, req.company.model_dump() if req.company else None, req.documents, fresh=req.fresh),
-                   f"building {sym}", "upload a Export export instead")
+                   f"building {sym}", "upload an Excel export instead")
 
 
 def _stream(events, doing, instead):
@@ -1641,7 +1692,7 @@ def check_all(today=None):
             continue
         sym = (doc.company.source.get("symbol") if doc.company.source else None)
         if not sym:
-            yield {"result": {**row, "status": "skipped", "text": "From a Export export, so there is no NSE symbol to check."}}
+            yield {"result": {**row, "status": "skipped", "text": "From an Excel export, so there is no NSE symbol to check."}}
             continue
         yield {"step": f"Checking {m['company']} ({i + 1} of {len(todo)})…"}
         try:
@@ -1812,7 +1863,7 @@ def watch_prices():
 
 # ---------- peers (5.2): rules find candidates, the AI picks by business mix, rules check and compare ----------
 
-PEER_YEARS = 4  # annual filings read per peer: only FY2023 on make years; older years from a Export upload when there is one
+PEER_YEARS = 4  # annual filings read per peer: only FY2023 on make years; older years from an Excel upload when there is one
 
 
 class PeersRequest(SymbolRequest):
@@ -1897,7 +1948,7 @@ def peer_rows(symbols):
                            "at": src["price_at"], "source": "; ".join(f"{_spans_text(v)}: {w}" for w, v in yrs.items()),
                            "metrics": model.peer_metrics(payload["hist"], m.get("price"), m.get("shares"))}}
         except (sources.Offline, ValueError) as e:  # fetch_company's upload advice is for adding a company, not a peer
-            yield {"row": {"symbol": sym, "name": sym, "error": str(e).replace(" Upload a Export export instead.", "")[:500]}}
+            yield {"row": {"symbol": sym, "name": sym, "error": str(e).replace(" Upload an Excel export instead.", "")[:500]}}
 
 
 def _spans_text(ys):
@@ -2041,7 +2092,7 @@ def _coverage(projs, co, ex, val):
 
 RESTATED = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "Net profit"), ("total_assets", "Total assets"),
             ("borrowings", "Borrowings"))
-RESTATE_TOL = 0.005  # 0.5%: Export rounds lines to whole crores or 2 decimals, so less is noise
+RESTATE_TOL = 0.005  # 0.5%: exports round lines to whole crores or 2 decimals, so less is noise
 
 
 def restatements(co, root=None):

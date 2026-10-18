@@ -20,7 +20,7 @@ import model
 
 
 def fake_export(path, years=10, quarters=True):
-    """Synthetic file in Export.in 'Data Sheet' layout with internally consistent numbers. The Quarters block is
+    """Synthetic file in the export's 'Data Sheet' layout with internally consistent numbers. The Quarters block is
     laid out like the real export: ten quarter ends, the last three after the final year; quarters=False leaves only
     its heading, as in an export without quarterly data (Milky Mist)."""
     dates = [datetime(2016 + i, 3, 31) for i in range(years)]
@@ -76,7 +76,7 @@ def fake_export(path, years=10, quarters=True):
 
 def _quarter_rows(last_fy):
     """Ten quarters ending three after last_fy, growing ~12% a year; the first quarter has no Other Income and the
-    last no Tax (Export leaves gaps), so TTM tax must come out blank in Python and Excel alike."""
+    last no Tax (exports leave gaps), so TTM tax must come out blank in Python and Excel alike."""
     ends = [divmod(last_fy.year * 12 + last_fy.month - 1 + 3 * (k - 6), 12) for k in range(10)]
     ends = [datetime(y, m + 1, calendar.monthrange(y, m + 1)[1]) for y, m in ends]  # Sep 2023 .. Dec 2025
     sales = [round(612 * 1.12 ** (k / 4), 2) for k in range(10)]  # the four to the year end sum to about its Sales
@@ -155,7 +155,7 @@ def main():
     assert abs(found[1]["value"] - 0.45) < 1e-3 and abs(found[1]["typical"] - 0.25) < 1e-3, found[1]
     assert model.detect_oneoffs(odd[3:6], labels[3:6]) == [], "fewer than 4 years: flag nothing"
     # minority share: an exceptional year's big minority (JSW FY2026: 14% against 3-8%) is flagged, so it can be left
-    # out of the defaults; years that don't split profit (Export's) don't count
+    # out of the defaults; years that don't split profit (the export's) don't count
     mi = [dict(x) for x in co["hist"]]
     for i, share in zip(range(6, 10), (0.031, 0.036, 0.078, 0.141)):
         mi[i]["pat"] = (mi[i]["pbt"] - mi[i]["tax"]) * (1 - share)
@@ -203,7 +203,7 @@ def main():
         model.parse_export(io.BytesIO(b"not a zip"))
         raise AssertionError("expected ValueError")
     except ValueError as e:
-        assert "Export to Excel" in str(e)
+        assert "Data Sheet" in str(e)
 
     # return ratios: averages of opening and closing balances, first year on closing
     h0, h1 = co["hist"][0], co["hist"][1]
@@ -362,9 +362,9 @@ def quarters_check(tmp, co):
     assert len(q["dates"]) == 10 and q["dates"][-1] == datetime(2025, 12, 31) and q["dates"][0] == datetime(2023, 9, 30)
     r = q["rows"]
     assert r["sales"][0] == 612.0 and r["other_income"][0] is None and r["tax"][-1] is None, r
-    # operating profit: PBT + interest + depreciation - other income; Export's row only when a line is missing
+    # operating profit: PBT + interest + depreciation - other income; the export's row only when a line is missing
     assert abs(r["op_profit"][5] - (r["pbt"][5] + 5 + 12 - r["other_income"][5])) < 1e-9, r["op_profit"]
-    assert r["op_profit"][0] == 122.4, r["op_profit"][0]  # Export's Operating Profit row, other income missing
+    assert r["op_profit"][0] == 122.4, r["op_profit"][0]  # the export's Operating Profit row, other income missing
     t, prev = model.ttm(q), model.ttm(q, 4)
     assert t["end"] == datetime(2025, 12, 31) and prev["end"] == datetime(2024, 12, 31), (t, prev)
     assert t["values"]["sales"] == sum(r["sales"][-4:]) and t["values"]["tax"] is None, t
@@ -388,7 +388,7 @@ def quarters_check(tmp, co):
 def fake_xbrl(co, quarter=False, web=False, standalone=False, extra=""):
     """Hand-written NSE results XBRL for the synthetic company, laid out like the real files (in-bse-fin elements,
     rupees with decimals -7, OneD = the quarter, FourD = the year to date, OneI = the balance sheet date). A Q4
-    filing (default) carries the last reported year; quarter=True the last Export quarter. web=True drops the
+    filing (default) carries the last reported year; quarter=True the last export quarter. web=True drops the
     context definitions, as NSE's "_WEB" files do, and puts the year's cash flow under the quarter's context."""
     if quarter:
         i = len(co["quarters"]["dates"]) - 1
@@ -482,7 +482,7 @@ def _quarter_facts(k):
 
 def filings_check(co):
     """5.1: a company built from annual results filings by rules. Filings that say what the export says give the same
-    history line for line (so the same projection and Excel); a fourth quarter is the year less three; Export fills
+    history line for line (so the same projection and Excel); a fourth quarter is the year less three; the export fills
     only the years filings lack, and differences over 1% are reported. Returns the filed company (last 4 years)."""
     read = lambda f, s, e: model.parse_xbrl(filing_xml(f, s, e))  # noqa: E731
     annual = [read(filing_facts(co, i), _year_start(d), d) for i, d in enumerate(co["dates"])]
@@ -502,7 +502,7 @@ def filings_check(co):
         except ValueError as e:
             assert "at least two" in str(e), e
     assert len(model.from_filings("T", [annual[-1]], least=1)[0]["dates"]) == 1
-    # exceptional items go into other income (Export's way), so EBITDA stays the operating line
+    # exceptional items go into other income (the export's way), so EBITDA stays the operating line
     ex = read(dict(filing_facts(co, 9), exceptional=-50.0, pbt=co["hist"][9]["pbt"] - 50, pat=co["hist"][9]["pat"] - 50),
               _year_start(co["dates"][9]), co["dates"][9])
     one = model.from_filings("T", [annual[8], ex])[0]["hist"][-1]
@@ -517,7 +517,7 @@ def filings_check(co):
     y = co["hist"][-1]
     assert abs(q["rows"]["sales"][3] - (y["revenue"] - 903)) < 1e-4 and q["rows"]["expenses"][0] == 245 - 5 - 12, q["rows"]
     assert q["rows"]["op_profit"][0] == 60 + 5 + 12 - 5 and model.ttm(q)["values"]["sales"] is not None
-    # merge: the last four years from filings, the six before from Export; a filing 2% off on revenue is reported
+    # merge: the last four years from filings, the six before from the export; a filing 2% off on revenue is reported
     last4 = [dict(a, facts=dict(a["facts"])) for a in annual[-4:]]
     last4[0]["facts"]["revenue"] *= 1.02
     filed = model.from_filings("Test Industries Limited", last4, qs + annual[-4:],
@@ -530,10 +530,10 @@ def filings_check(co):
     # years the other side itself took from filings are never compared (a refetch compared filings with themselves)
     fetched = dict(merged, source={"years": {y: "NSE filing" for y in model.labels(merged["dates"])[6:]}})
     assert model.merge(filed, fetched)[2] == [], "a filed year compared with itself"
-    # net profit like for like: Export's is PBT less tax, a filing's pat the owners' share (a 10% minority isn't a gap)
+    # net profit like for like: the export's is PBT less tax, a filing's pat the owners' share (a 10% minority isn't a gap)
     owners = dict(filed, hist=[dict(h, pat=h["pat"] * 0.9) for h in filed["hist"]])
     assert [m["line"] for m in model.merge(owners, co)[2]] == ["Revenue"]
-    # Export's higher borrowings are the leases a pre-FY2025 filing keeps in other liabilities: moved, balance still ties
+    # The export's higher borrowings are the leases a pre-FY2025 filing keeps in other liabilities: moved, balance still ties
     lease = dict(co, hist=[dict(h, borrowings=h["borrowings"] + 30.0, other_liab=h["other_liab"] - 30.0) for h in co["hist"]])
     m2, _, mm, nn = model.merge(filed, lease)
     h7, f7 = m2["hist"][7], filed["hist"][1]
@@ -596,9 +596,9 @@ def xbrl_check(co):
         assert fx["receivables"] == h["receivables"] and fx["borrowings"] == 200.0, fx
         assert f["unmapped"] == [{"tag": "RoyaltyIncome", "value": 4.2, "unit": "Rs crore", "context": "FourD"}], f["unmapped"]
         assert all(c["pass"] for c in f["checks"]), f["checks"]
-        assert [c["name"] for c in f["checks"]] == ["PBT less tax = profit", "Revenue for FY2025 matches Export",
-                                                    "Net profit for FY2025 matches Export"], f["checks"]
-    # the quarter (not the nine months to date) of a Q3 filing, tied to Export's quarter; no cash flow kept
+        assert [c["name"] for c in f["checks"]] == ["PBT less tax = profit", "Revenue for FY2025 matches the export",
+                                                    "Net profit for FY2025 matches the export"], f["checks"]
+    # the quarter (not the nine months to date) of a Q3 filing, tied to the export's quarter; no cash flow kept
     f = model.parse_xbrl(fake_xbrl(co, quarter=True), company=co)
     assert (f["kind"], f["period_start"], f["period_end"]) == ("quarter", "2025-10-01", "2025-12-31"), f
     assert abs(f["facts"]["revenue"] - co["quarters"]["rows"]["sales"][-1]) < 1e-6, f["facts"]
@@ -606,7 +606,7 @@ def xbrl_check(co):
     # approved mappings are applied by rules on the next parse
     f = model.parse_xbrl(fake_xbrl(co), mappings={"RoyaltyIncome": "royalty"})
     assert f["facts"]["royalty"] == 4.2 and f["unmapped"] == [], f
-    assert all(c["name"] != "Ties to Export" for c in f["checks"]), "no company: no tie checks"
+    assert all(c["name"] != "Ties to the export" for c in f["checks"]), "no company: no tie checks"
     # a mismatch is reported, not blocked; a standalone filing says why it may differ
     mis = model.parse_xbrl(fake_xbrl(co, standalone=True, extra='<in-bse-fin:RevenueFromOperations contextRef="FourD" '
                            f'unitRef="INR" decimals="-7">{h["revenue"] * 1.03e7:.2f}</in-bse-fin:RevenueFromOperations>'),
@@ -619,7 +619,7 @@ def xbrl_check(co):
     rev = next(c for c in model.parse_xbrl(fake_xbrl(co, standalone=True), company=moved)["checks"]
                if c["name"].startswith("Revenue"))
     assert rev["pass"] is False and "3.0% apart" in rev["detail"] and "standalone" in rev["detail"], rev
-    # exact duplicates (the real files repeat facts) are fine; a year Export doesn't have is a note
+    # exact duplicates (the real files repeat facts) are fine; a year the export doesn't have is a note
     same = model.parse_xbrl(fake_xbrl(co, extra='<in-bse-fin:TaxExpense contextRef="FourD" unitRef="INR" '
                                       f'decimals="-7">{h["tax"] * 1e7:.2f}</in-bse-fin:TaxExpense>'), company=co)
     assert all(c["pass"] for c in same["checks"]), same["checks"]
@@ -813,7 +813,7 @@ def upgrade_check(tmp, co, excel):
     f24 = _filing(co, -2, _fact("TradePayablesCurrent", 0.05 * h24["revenue"]))
     quarter = {"id": "q", "file": "q.xml", **model.parse_xbrl(fake_xbrl(co, quarter=True), company=co)}
     off = dict(_filing(dict(co, hist=[*co["hist"][:-1], dict(h25, revenue=h25["revenue"] * 1.05)])), file="off.xml",
-               consolidated=False)  # revenue 5% from Export's: not used
+               consolidated=False)  # revenue 5% from the export's: not used
     up = model.upgrade(co, [off, quarter, f24, f25])
     u24, u25 = up["hist"][-2], up["hist"][-1]
     assert "payables" not in co["hist"][-1], "upgrade() must not touch the parsed company"
@@ -834,7 +834,7 @@ def upgrade_check(tmp, co, excel):
     assert "isn't one of the reported years" in model.upgrade(later, [f25])["sources"]["notes"][0]
     note = model.upgrade(co, [off])["sources"]["notes"]
     assert len(note) == 1 and "off.xml" in note[0] and "1%" in note[0], note
-    # no lease element: Export's borrowings less the filing's (150 + 50) are the leases; equal = none
+    # no lease element: the export's borrowings less the filing's (150 + 50) are the leases; equal = none
     d30 = dict(co, hist=[*co["hist"][:-1], dict(h25, borrowings=230.0, other_liab=h25["other_liab"] - 30)])
     assert model.upgrade(d30, [_filing(d30)])["hist"][-1]["lease"] == 30.0
     assert "lease" not in model.upgrade(co, [_filing(co)])["hist"][-1]
@@ -1138,7 +1138,7 @@ def review_fixes_check(tmp, co, projs, ex):
     fake_export(p2, years=2)
     c2 = model.parse_export(p2)
     assert len(model.forensic(c2["hist"], model.labels(c2["dates"]))) == 15
-    # other income turning negative (Export folds exceptional charges into it) lights the rule, at low
+    # other income turning negative (exports fold exceptional charges into it) lights the rule, at low
     h = [dict(x) for x in co["hist"]]
     h[-1]["other_income"] = -0.01 * h[-1]["revenue"]
     oi = next(f for f in model.forensic(h, labels) if f["key"] == "other_income")
@@ -1346,6 +1346,20 @@ def library_check(root, co, scenarios):
           "notes": {}, "reports": []}
     assert server.ModelDoc.model_validate(v5).model_dump(mode="json") == {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None, "track": []}
     data = {**v5, "version": 6, "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None, "peers": None, "track": []}
+    # saved before the import was named plainly: the old name (server.OLD) in app-written words opens as today's
+    o = server.OLD
+    worded = server.ModelDoc.model_validate({**data, "company": {**company, "source": {
+        "symbol": "TEST", "years": {"FY2016": o, "FY2025": "NSE filing"}, "from": f"your {o} export",
+        "mismatches": [{"year": "FY2025", "line": "Revenue", "filing": 1.0, o.lower(): 2.0}],
+        "notes": [f"FY2016: Rs 5 cr of borrowings taken from {o} (lease liabilities)"]}},
+        "filings": [{**_filing(co), "checks": [{"name": f"Revenue for FY2025 matches {o}", "pass": True, "detail": f"Filing 1, {o} 1"}]}],
+        "proposals": [{"id": "p", "checks": [], "value": {"against": {"label": f"{o}'s FY2025 revenue", "value": 1.0}}}]})
+    src = worded.company.source
+    assert (src["years"], src["from"], src["mismatches"][0]["export"]) == (
+        {"FY2016": "Excel export", "FY2025": "NSE filing"}, "your Excel export", 2.0), src
+    assert worded.filings[0].checks[0].name == "Revenue for FY2025 matches the export", worded.filings[0].checks
+    assert worded.proposals[0]["value"]["against"]["label"] == "the export's FY2025 revenue", worded.proposals
+    assert o.lower() not in json.dumps(worded.model_dump(mode="json")).lower(), "no old name left"
     assert server.restatements(co, root) is None, "nothing saved yet: no comparison"
     doc = server.ModelDoc.model_validate(data)
     mid, at = server.save_model(doc, root, now=datetime(2026, 10, 15, 12, 41, 5))
@@ -1813,7 +1827,7 @@ def ar_notes_check(server, root, co, data):
         ext = lambda topic, **kw: client.post("/api/notes/extract", json={**body, "topic": topic, **kw})  # noqa: E731
         assert ext("segments").status_code == 503, "no LLM_CMD: a calm 503"
         assert client.post("/api/notes/plan", json=dict(body, report=dict(rep, year="FY2031"))).status_code == 422
-        # segments: values with page and quote, in crore, summing to Export's revenue
+        # segments: values with page and quote, in crore, summing to the export's revenue
         calls = fake_llm(root / "llm", "Here:\n" + json.dumps(segs))
         r = ext("segments")
         assert r.status_code == 200 and calls() == 1, r.text
@@ -1826,7 +1840,7 @@ def ar_notes_check(server, root, co, data):
         assert abs(p["value"]["total"] - rev) < 0.01 and p["value"]["rows"][1]["amount"] == round(rev - seg, 2), p["value"]
         assert p["source"] == {"file": "ar.pdf", "page": 2, "quote": segs["items"][0]["quote"], "tag": None}
         tie = next(c for c in p["checks"] if c["name"] == "Ties to the statements")
-        assert "Export's FY2025 revenue" in tie["detail"] and "within 2%" in tie["detail"], tie
+        assert "the export's FY2025 revenue" in tie["detail"] and "within 2%" in tie["detail"], tie
         # a failing tie-out: one segment left out, the sum is 40% short, so rules reject it and approval refuses it
         short = dict(segs, items=segs["items"][:1])
         fake_llm(root / "llm", short)
@@ -2522,8 +2536,8 @@ def fetch_api_check(server, root, co, data):
     calls, online = [], [True]
     Opener = _fake_socket(net, calls, online)
 
-    client, models, llm, adapter = TestClient(server.app), server.MODELS, ai.llm, server.export_source
-    server.MODELS, ai.llm, server.export_source = root, None, None  # never the real library, the LLM or Export
+    client, models, llm, adapter = TestClient(server.app), server.MODELS, ai.llm, server.local_source
+    server.MODELS, ai.llm, server.local_source = root, None, None  # never the real library, the LLM or a local source
     server._clients.clear()
     try:
         c = server.nse()
@@ -2548,10 +2562,10 @@ def fetch_api_check(server, root, co, data):
             assert r.status_code == 200 and r.headers["content-type"].startswith("application/x-ndjson"), r.text
             return [json.loads(x) for x in r.text.splitlines()]
         # the optional local source of older years failing in an unexpected way is a note, never the end of the fetch
-        server.export_source = type("Broken", (), {"LABEL": "a local source",
+        server.local_source = type("Broken", (), {"LABEL": "a local source",
                                                      "company": staticmethod(lambda sym, cache: {}["no layout"])})
         ev = fetch(documents=False)
-        server.export_source = None
+        server.local_source = None
         assert ev[-1] == {"done": True} and any("A local source couldn’t be read: its layout looks different (KeyError)"
                                                in n for n in next(e for e in ev if "company" in e)["company"]["company"]["source"]["notes"]), ev
         ev = fetch()
@@ -2595,11 +2609,11 @@ def fetch_api_check(server, root, co, data):
         r = client.post("/api/nse/price", json={"symbol": "OTHER"})
         assert r.status_code == 503 and "internet" in r.json()["detail"], r.text
         online[0] = True
-        # refresh of a Export upload: the filings' years win, Export keeps the six older ones and its name
+        # refresh of an Excel upload: the filings' years win, the export keeps the six older ones and its name
         ev = fetch(company={**data["company"], "name": "Test Industries Ltd"}, documents=False)
         m = next(e["company"] for e in ev if "company" in e)
         assert m["company"]["name"] == "Test Industries Ltd" and len(m["company"]["dates"]) == 10, m["company"]["name"]
-        assert list(m["company"]["source"]["years"].values()).count("Export") == 6 and m["company"]["source"]["from"] == "this model"
+        assert list(m["company"]["source"]["years"].values()).count("Excel export") == 6 and m["company"]["source"]["from"] == "this model"
         # 5.3 check all for new results: a company added by ticker before its latest year gets it (forecast recorded,
         # saved as today's version, assumptions as they were); an upload is skipped; checking again finds nothing new
         pc = p["company"]
@@ -2653,7 +2667,7 @@ def fetch_api_check(server, root, co, data):
         except OSError:
             pass
     finally:
-        server.MODELS, ai.llm, server.export_source = models, llm, adapter
+        server.MODELS, ai.llm, server.local_source = models, llm, adapter
         server._clients.clear()
 
 
@@ -2686,8 +2700,8 @@ def net_check(server, co):
            api + "integrated-filing-results?index=equities&symbol=BADX": {"data": []},
            f"{arch}x/BAD.xml": b"<html>Access Denied</html>"}
     calls, online = [], [True]
-    client, models, llm, adapter = TestClient(server.app), server.MODELS, ai.llm, server.export_source
-    server.MODELS, ai.llm, server.export_source = root, None, None
+    client, models, llm, adapter = TestClient(server.app), server.MODELS, ai.llm, server.local_source
+    server.MODELS, ai.llm, server.local_source = root, None, None
     server._clients.clear()
     try:
         c = server.nse()
@@ -2703,7 +2717,7 @@ def net_check(server, co):
         lines = lambda sym: [json.loads(x) for x in client.post("/api/nse/fetch", json={"symbol": sym}).text.splitlines()]  # noqa: E731
         e = lines("ZZQQX")[-1]
         assert e["final"] and not e["lender"] and "no company with the symbol" in e["error"], e
-        # a bank stops at the quote: no filings asked for, and no "upload a Export export" (it won't work either)
+        # a bank stops at the quote: no filings asked for, and no "upload an Excel export" (it won't work either)
         n = len(calls)
         e = lines("HDFCBANK")[-1]
         assert e["lender"] and e["final"] and "Private Sector Bank" in e["error"] and len(calls) == n + 1, (e, calls[n:])
@@ -2749,7 +2763,7 @@ def net_check(server, co):
         [x.join() for x in ts]
         assert got[0] is got[1]
     finally:
-        server.MODELS, ai.llm, server.export_source = models, llm, adapter
+        server.MODELS, ai.llm, server.local_source = models, llm, adapter
         server._clients.clear()
 
 
@@ -2933,8 +2947,8 @@ def peers_api_check(server, root, co, data):
            for i, x in enumerate(d) if i >= len(d) - 4},
     }
     calls, online = [], [True]
-    client, models, llm, adapter, env = TestClient(server.app), server.MODELS, ai.llm, server.export_source, os.environ.pop("LLM_CMD", None)
-    server.MODELS, server.export_source = root / "peers", None
+    client, models, llm, adapter, env = TestClient(server.app), server.MODELS, ai.llm, server.local_source, os.environ.pop("LLM_CMD", None)
+    server.MODELS, server.local_source = root / "peers", None
     server._clients.clear()
     try:
         c = server.nse()
@@ -3007,7 +3021,7 @@ def peers_api_check(server, root, co, data):
         bad = dict(doc, peers=dict(peers, rows=[dict(a, symbol="../x")]))
         assert client.post("/api/project", json=bad).status_code == 422
     finally:
-        server.MODELS, ai.llm, server.export_source = models, llm, adapter
+        server.MODELS, ai.llm, server.local_source = models, llm, adapter
         server._clients.clear()
         os.environ.pop("LLM_CMD", None)
         if env is not None:

@@ -117,7 +117,7 @@ function Switcher({ here, compact }: { here: Here; compact?: boolean }) {
       {list}
       <div className="sw-add">
         <AddBox models={here.models} compact onAdd={sym => navigate(`/?add=${encodeURIComponent(sym)}`)}
-          upload={<a href="/?upload=1">Upload a Export export instead</a>} />
+          upload={<a href="/?upload=1">Upload an Excel export instead</a>} />
       </div>
     </div>
   )

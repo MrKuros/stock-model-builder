@@ -22,7 +22,7 @@ interface Props {
   baseLabel: string
   onChange: (p: Path) => void
   ghost?: number | null // a reference value drawn as a thin dashed ink line (revenue growth: what the price implies)
-  source?: string // where the history comes from, when it isn't plain Export (model.upgrade's sources)
+  source?: string // where the history comes from, when it isn't the plain export (model.upgrade's sources)
 }
 
 function domainOf(vals: number[], kind: Kind): [number, number] {

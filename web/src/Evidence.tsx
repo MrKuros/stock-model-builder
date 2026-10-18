@@ -96,11 +96,11 @@ export default function Evidence({ parsed, doc, setDoc, projection, upgrades, on
         <h2 id="docs-h">Documents</h2>
         <p className="why">What the app has read, and what each missing document would add. Attach them in the panel below: pick the document type first.</p>
         <div className="docs">
-          <div className="doc"><h3>{company.source?.symbol ? `NSE: ${company.source.symbol}` : 'Export export'}</h3><p>{company.name}, {years[0]}–{years[years.length - 1]}, read by rules
+          <div className="doc"><h3>{company.source?.symbol ? `NSE: ${company.source.symbol}` : 'Excel export'}</h3><p>{company.name}, {years[0]}–{years[years.length - 1]}, read by rules
             {company.source?.symbol ? ` (${Object.values(company.source.years).filter(w => w === 'NSE filing').length} years from NSE filings; where each came from is on the Overview)` : ''}.
             {doc.saved_at ? ` Saved ${when(doc.saved_at)}.` : ''}</p></div>
           <div className={`doc${doc.filings.length ? '' : ' missing'}`}><h3>Exchange results filings <span className="term">XBRL: the machine-readable results file on NSE or BSE</span></h3>
-            <p>{doc.filings.length ? `${doc.filings.length} attached; annual ones that tie to Export add payables, leases and cash-flow capex.`
+            <p>{doc.filings.length ? `${doc.filings.length} attached; annual ones that tie to the export add payables, leases and cash-flow capex.`
               : 'Would add trade payables, lease liabilities and cash-flow capex from an annual filing.'}</p></div>
           <div className={`doc${annual.length ? '' : ' missing'}`}><h3>Annual reports</h3>
             <p>{annual.length ? annual.map(r => `${r.year} (${r.pages} pages)`).join(', ') + '.'

@@ -110,7 +110,7 @@ export function PeersSection({ parsed, doc, setDoc, projection, short }: {
           <button type="button" className="link" onClick={() => setRun(null)}>Close</button></>
         : <><button type="button" className="btn" onClick={() => run.ctl.abort()}>Stop</button>
           <span className="small muted">{run.kind === 'find' ? 'Up to half a minute the first time: the app asks NSE once a second and keeps the answers, so the next time is quick.'
-            : 'About 10 seconds a peer: NSE’s filings (kept for good), and older years from a Export export of that peer when you have one.'}</span></>}
+            : 'About 10 seconds a peer: NSE’s filings (kept for good), and older years from an Excel export of that peer when you have one.'}</span></>}
     </div>
   </div>
   const msgs = <>
@@ -268,7 +268,7 @@ function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; sho
         </tbody>
       </table>
     </div>
-    <p className="small-note">Numbers from each company’s NSE results filings, read by rules; older years come from a Export export of
+    <p className="small-note">Numbers from each company’s NSE results filings, read by rules; older years come from an Excel export of
       that company when you have one (hover a name to see where each year came from). Market cap and multiples at NSE prices read {ago(at)}; {short} at the price in this model.
       Growth is revenue CAGR; ROCE = EBIT / average capital employed; cash conversion = cash from operations / net profit over 3 years; EV = market cap +
       borrowings − cash − investments. Blank: not enough years, or a negative base. Leases count as debt only where the source includes them.</p>

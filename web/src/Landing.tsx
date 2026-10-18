@@ -37,7 +37,7 @@ function pref<T extends string>(key: 'sort' | 'filter', ok: Record<T, string>, d
 }
 
 /** Your companies: every saved model with its price against our value range, and the add-a-company panel (a name or
- * NSE symbol, or a Export export). With an empty library it is the first-run screen, then straight to the Overview.
+ * NSE symbol, or an Excel export). With an empty library it is the first-run screen, then straight to the Overview.
  * /?add=TCS (the company switcher's box) starts adding that symbol here. */
 export default function Landing({ models, error: listError, onAdd, onDeleted, onChecked, onReload }: Props) {
   const [watch, setWatch] = useState<WatchList | null>(null)
@@ -67,7 +67,7 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
     return a && /^[A-Z0-9&-]{1,20}$/.test(a) ? a : null
   })
   const libHead = useRef<HTMLHeadingElement>(null)
-  const [upOpen] = useState(() => { // "Upload a Export export instead" from the company switcher
+  const [upOpen] = useState(() => { // "Upload an Excel export instead" from the company switcher
     const u = new URLSearchParams(location.search).has('upload')
     if (u) history.replaceState(history.state, '', '/')
     return u
@@ -105,7 +105,7 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
   const keepTwin = () => {
     if (!twin) return
     const { p } = twin
-    run('Saving it as a separate model…', async () => ({ ...p, company: { ...p.company, name: `${p.company.name} (Export export)` } }))
+    run('Saving it as a separate model…', async () => ({ ...p, company: { ...p.company, name: `${p.company.name} (Excel export)` } }))
   }
   const sample = () => run('Loading the sample…', () => api<Parsed>('/api/sample'))
   const remove = async (m: ModelSummary) => {
@@ -125,12 +125,12 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
       <input ref={input} type="file" accept=".xlsx" className="sr" disabled={!!busy}
         onChange={e => { upload(e.target.files?.[0]); e.target.value = '' }} />
       {big && <svg className="up" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-5 5m5-5 5 5M4 20h16" fill="none" stroke="currentColor" strokeWidth="1.8" /></svg>}
-      <strong>{busy ?? (big ? 'Drop a Export export here' : 'Add a company')}</strong>
-      {!busy && <span>{big ? 'or ' : 'Drop a Export.in export here, or '}<u>choose a file</u> (.xlsx)</span>}
+      <strong>{busy ?? (big ? 'Drop an Excel export here' : 'Add a company')}</strong>
+      {!busy && <span>{big ? 'or ' : 'Drop an Excel export here, or '}<u>choose a file</u> (.xlsx)</span>}
     </label>
   )
   const err = (error || listError) && <p className="error" role="alert">{error ?? listError}</p>
-  const uploadLink = <button type="button" className="link" disabled={!!busy} onClick={() => input.current?.click()}>Upload a Export export instead</button>
+  const uploadLink = <button type="button" className="link" disabled={!!busy} onClick={() => input.current?.click()}>Upload an Excel export instead</button>
   // the upload sits right under the box on this page, so the box itself doesn't offer it a second time
   const box = () => twin
     ? <section className="fetch" aria-labelledby="twin-h">
@@ -156,7 +156,7 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
       <p className="purpose">Type a listed company’s name or NSE symbol: the app reads its results filings from NSE and in
         about half a minute you get a valuation, its fundamentals and a forecast you can change. No account needed.</p>
       <div className="first-add">{box()}</div>
-      <p className="label or">or use a Export.in export</p>
+      <p className="label or">or use an Excel export</p>
       <div className="choices">
         {drop(true)}
         <div className="sample"><b>No file yet?</b>
@@ -164,9 +164,9 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
           <button className="primary" type="button" onClick={sample} disabled={!!busy}>Try the sample company</button></div>
       </div>
       {err}
-      <ol className="how" aria-label="How to get a Export export">
-        <li><b>1. Open export.in</b>Search for the company. A free account is enough.</li>
-        <li><b>2. Click “Export to Excel”</b>It’s on the company page, above the numbers.</li>
+      <ol className="how" aria-label="How to get an Excel export">
+        <li><b>1. Get the company’s financials in Excel</b>Ten years of results in one .xlsx workbook.</li>
+        <li><b>2. Check it has a “Data Sheet” tab</b>That tab holds the profit and loss, balance sheet and cash flow.</li>
         <li><b>3. Drop the file above</b>Ten years at once, also for companies that listed recently. Banks, NBFCs and insurers aren’t supported.</li>
       </ol>
     </main>
@@ -203,9 +203,9 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
         <div className="add">
           {box()}
           <details className="up-alt" open={!!busy || over || upOpen || undefined}>
-            <summary>Or upload a Export export</summary>
+            <summary>Or upload an Excel export</summary>
             {drop(false)}
-            <p className="small muted">On export.in open the company and click <b>Export to Excel</b> (free account).{' '}
+            <p className="small muted">An .xlsx with ten years of financials on a <b>Data Sheet</b> tab.{' '}
               <button type="button" className="link" disabled={!!busy} onClick={sample}>Try a sample company</button> (made-up numbers).</p>
           </details>
           {watchMsg && <p className="small" role="status">{watchMsg}</p>}

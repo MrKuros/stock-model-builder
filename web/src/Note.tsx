@@ -87,10 +87,10 @@ export default function Note({ parsed, doc, setDoc, projection, provenance, chan
   const { company, years } = parsed
   const hist = parsed.hist ?? company.hist
   const name = subject(company.name)
-  // where the reported numbers came from: NSE's filings (added by ticker), a Export export, or both
+  // where the reported numbers came from: NSE's filings (added by ticker), an Excel export, or both
   const filed = Object.values(company.source?.years ?? {})
-  const builtFrom = !company.source?.symbol ? 'a Export.in export'
-    : filed.every(w => w === 'NSE filing') ? 'NSE results filings' : 'NSE results filings and Export.in data'
+  const builtFrom = !company.source?.symbol ? 'an Excel export'
+    : filed.every(w => w === 'NSE filing') ? 'NSE results filings' : 'NSE results filings and an Excel export'
   const nameIn = name === COMPANY ? 'the company' : name
   const v = projection?.valuation ?? null
   const sv = v?.scenarios.base

@@ -160,10 +160,10 @@ export default function Sources({
       const again = filings.some(x => x.id === f.id)
       onFilings(fs => [...fs.filter(x => x.id !== f.id), f])
       const failed = f.checks.filter(c => c.pass === false).length
-      const ties = f.checks.filter(c => c.pass === false && c.name.endsWith('matches Export')).length
+      const ties = f.checks.filter(c => c.pass === false && c.name.endsWith('matches the export')).length
       setNote(`${again ? 'Read again' : 'Attached'}: ${title(f)}. ${Object.keys(f.facts).length} lines mapped, ` +
         `${f.unmapped.length} unmapped${failed ? `, ${failed} check${failed > 1 ? 's' : ''} failed` : ''}.` +
-        (ties > 1 ? ` Revenue and profit don’t match Export’s${f.company ? ` (the filing is ${f.company})` : ''}; ` +
+        (ties > 1 ? ` Revenue and profit don’t match the export’s${f.company ? ` (the filing is ${f.company})` : ''}; ` +
           'check it is the same company and basis.' : ''))
     } catch (e) { setError((e as Error).message) } finally { setBusy(null) }
   }
@@ -244,8 +244,8 @@ export default function Sources({
     <section className="sources" aria-labelledby="src-head">
       <div className="val-top"><h2 id="src-head" ref={head} tabIndex={-1}>Filings and AI proposals</h2></div>
       <p className="muted small">
-        Results filings from the exchanges, read by fixed rules and checked against the Export figures. An annual
-        filing whose revenue matches Export’s adds that year’s trade payables, lease liabilities and cash-flow capex
+        Results filings from the exchanges, read by fixed rules and checked against the export’s figures. An annual
+        filing whose revenue matches the export’s adds that year’s trade payables, lease liabilities and cash-flow capex
         to the model; the totals don’t move. Other filings are kept for reference.
       </p>
       <label className={`drop drop-small ${over ? 'is-over' : ''}`} aria-busy={!!busy}

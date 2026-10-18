@@ -332,7 +332,7 @@ TIE = {"segments": 0.02, "maturity": 0.05, "capex": 0.02}  # sums agree with the
 
 def pick_topic_pages(pages, topic, end: date):
     """Page numbers (1-based) of up to 3 pages for the topic, best first: word hits, then the consolidated notes
-    (Export's figures are consolidated) and the year. A page needs a strong word, not just the year."""
+    (the export's figures are consolidated) and the year. A page needs a strong word, not just the year."""
     words, yr, scored = TOPICS[topic][2], year_re(end), []
     for i, (raw, _) in enumerate(pages):
         t = norm(raw)
@@ -936,7 +936,7 @@ def thesis_prompt(name, facts, cites):
             "- Plain English, short sentences, no hype. Money in Rs crore with Indian grouping (1,64,177), as in the facts.\n"
             "- The history starts at the first year in the facts. Compare the growth the price needs only with runs of the "
             "same length, and never write never, always or ever: say since that year.\n"
-            "- If a fact says Export folds exceptional items into other income, judge profit growth on EBITDA, EBIT or a "
+            "- If a fact says the export folds exceptional items into other income, judge profit growth on EBITDA, EBIT or a "
             "cited figure before exceptional items, not on reported net profit.\n"
             "- If the discount-rate fact says beta or the premium is the app default, say our value depends on that "
             "choice, and don't call a WACC break-even within 3 points of ours far-fetched: WACC is a judgement, not a result.\n"

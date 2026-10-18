@@ -47,7 +47,7 @@ const RULE: Record<string, string> = {
   mi_pct: '3-yr ratio of sums, kept between −50% and 50%',
 }
 const ruleOf = (k: string) => RULE[k] ?? '3-yr ratio of sums (each year weighted by its size)'
-// defaults an attached annual filing can move (payables, cash-flow capex); inventory days and COGS come from Export
+// defaults an attached annual filing can move (payables, cash-flow capex); inventory days and COGS come from the export
 export const UPGRADED = ['dpo', 'ol_pct', 'capex_pct']
 /** A default the filings moved, offered to all three scenarios in one click: base's value now, the new default. */
 export interface Upgrade { key: string; label: string; kind: Kind; from: number; to: number }
@@ -247,7 +247,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
               })}
               <span className="ours">= {fmt(seeded[active][selKey].start, kindOf(selKey))}{active !== 'base' && SHIFT[selKey] ? ` (${active}: base ± ${+(SHIFT[selKey] * 100).toFixed(2)} pp)` : ''}{seeded[active][selKey].end != null ? `, fading to ${fmt(seeded[active][selKey].end!, kindOf(selKey))} (a fast grower)` : ''}</span>
             </p>}
-            <p className="small dim">{selKey === 'growth' ? 'Revenue, Rs crore' : 'Each year as reported'}, from the Export export{doc.excluded_years.length ? `; left out: ${doc.excluded_years.join(', ')}` : ''}.</p>
+            <p className="small dim">{selKey === 'growth' ? 'Revenue, Rs crore' : 'Each year as reported'}, from the Excel export{doc.excluded_years.length ? `; left out: ${doc.excluded_years.join(', ')}` : ''}.</p>
           </div>
           {(flags.length > 0 || lit) && <div className="card flag">
             <div className="card-h"><span>Warning sign</span><span className="tag flag">{lit?.status === 'red' || flags.some(f => f.year === histYears[nHist - 1]) ? 'High' : 'Watch'}</span></div>
@@ -256,7 +256,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
             <a className="go small" href={href('checks', flags.length ? 'unusual' : lit!.id)}>See it in Checks</a>
           </div>}
           <div className="card doclist">
-            <p className="small"><b>{nDocs} of 4 documents</b> attached: the Export export{doc.filings.length ? ', XBRL filings' : ''}{doc.reports.length ? `, ${doc.reports.map(r => `${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}`).join(', ')}` : ''}.{' '}
+            <p className="small"><b>{nDocs} of 4 documents</b> attached: the Excel export{doc.filings.length ? ', XBRL filings' : ''}{doc.reports.length ? `, ${doc.reports.map(r => `${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}`).join(', ')}` : ''}.{' '}
               <a className="go" href={href('checks', 'documents')}>Add documents</a></p>
           </div>
         </aside>

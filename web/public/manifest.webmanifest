@@ -1,7 +1,7 @@
 {
   "name": "Stock Model Builder",
   "short_name": "Stock Models",
-  "description": "Research notes, fundamentals and three-statement forecasts for Indian listed companies, from a Export export.",
+  "description": "Research notes, fundamentals and three-statement forecasts for Indian listed companies, from an Excel export.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

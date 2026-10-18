@@ -46,7 +46,7 @@ export default function StatementsPage({ parsed, doc, projection, sub }: { parse
         {tab === 'QUARTERS'
           ? quarterly
             ? <div className="table-wrap" tabIndex={0} role="region" aria-label="Quarters"><QuarterTable {...quarterly} /></div>
-            : <p className="val-empty">This Export export has no quarterly figures. Exports that include the Quarters block
+            : <p className="val-empty">This Excel export has no quarterly figures. Exports that include the Quarters block
                 show the last ten quarters and the trailing twelve months here.</p>
           : <StatementTable layout={layout} section={tab} years={years} rows={rows} nHist={nHist} hide={hide} />}
         {tab === 'RATIOS' && (
@@ -113,7 +113,7 @@ function StatementTable({ layout, section, years, rows, nHist, hide }: {
   )
 }
 
-const SHOW = 10 // Export exports ten quarters
+const SHOW = 10 // an export has ten quarters
 const DAY = 86_400_000
 /** "2021-12-31T00:00:00" -> "Dec 2021" */
 export const month = (iso: string) => new Date(iso).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })
