@@ -110,6 +110,7 @@ def main():
     assert co["hist"][1]["cfi"] is None and co["hist"][1]["net_cf"] is None, "missing CF rows must not be 0"
     quarters_check(tmp, co)
     xbrl_check(co)
+    filed = filings_check(co)
     review_rules_check(co)
     pins_check(co)
     m = co["market"]
@@ -265,6 +266,16 @@ def main():
             _same(ws, rows, 2 + len(co["hist"]) + j, {**c, **{k: v[j] for k, v in ex[s].items()}}, (s, j))
         _same_valuation(ws.parent["Valuation"], model.valuation(projs, co["hist"], None, ex["base"], co["market"], ex), s)
         _same_quarters(ws.parent["Quarters"], co["quarters"])
+    for i, s in enumerate(model.SCENARIOS):  # a company built from filings exports the same live formulas
+        (tmp / f"filed-{s}").mkdir()
+        (tmp / f"filed-{s}" / "model.xlsx").write_bytes(model.to_excel(filed, seeded, n=5, active=s))
+        wsf = recalc(tmp / f"filed-{s}" / "model.xlsx", tmp / f"filed-{s}" / "calc")
+        pf = model.project(filed["hist"], ex[s], 5)
+        for j, c in enumerate(pf):
+            _same(wsf, rows, 2 + len(filed["hist"]) + j, c, ("filed", s, j))
+        for j, h in enumerate(filed["hist"]):
+            _same(wsf, rows, 2 + j, {k: h[k] for k in ("ebitda", *RETURNS)}, ("filed hist", j))
+        _same_quarters(wsf.parent["Quarters"], filed["quarters"])
     edge = {s: dict(p) for s, p in seeded.items()}
     edge["base"].update(int_rate={"start": 0.3, "end": None}, mi_pct={"start": -0.1, "end": None})
     edge["bear"]["capex_pct"] = {"start": 0.4, "end": None}
@@ -409,6 +420,99 @@ def fake_xbrl(co, quarter=False, web=False, standalone=False, extra=""):
         + fact("TradeReceivablesCurrent", "OneI", co["hist"][-1]["receivables"])
         + fact("BorrowingsNoncurrent", "OneI", 150.0) + fact("BorrowingsCurrent", "OneI", 50.0)
         + fact("RoyaltyIncome", "OneD" if quarter else "FourD", 4.2) + extra + "</xbrli:xbrl>").encode()
+
+
+TAG = {}  # std key -> one XBRL element that carries it, for writing test filings
+for _t, _k in model.XBRL_TAGS.items():
+    TAG.setdefault(_k, _t)
+
+
+def filing_facts(co, i):
+    """The synthetic company's year i as an annual results filing carries it (parse_xbrl's std keys)."""
+    h = co["hist"][i]
+    return {"revenue": h["revenue"], "other_income": h["other_income"], "dep": h["dep"], "interest": h["interest"],
+            "pbt": h["pbt"], "tax": h["tax"], "pat": h["pat"], "dividends_paid": h["dividend"], "materials": h["cogs"],
+            "share_cap": h["share_cap"], "other_equity": h["reserves"], "borrowings_noncurrent": h["borrowings"],
+            "equity_and_liabilities": h["total_liab"], "total_assets": h["total_assets"], "ppe": h["net_block"],
+            "cwip": h["cwip"], "investments_noncurrent": h["investments"], "receivables": h["receivables"],
+            "inventory": h["inventory"], "cash": h["cash"], "cfo": h["cfo"]}
+
+
+def filing_xml(facts, start, end, consolidated=True):
+    """A results XBRL instance holding `facts` (std keys, Rs crore) for start-end, laid out like NSE's files."""
+    ctx = lambda i, p: (f'<xbrli:context id="{i}"><xbrli:entity><xbrli:identifier scheme="x">TESTIND</xbrli:identifier>'  # noqa: E731
+                        f'</xbrli:entity><xbrli:period>{p}</xbrli:period></xbrli:context>')
+    body = "".join(f'<f:{TAG[k]} contextRef="{"I" if k in model.XBRL_STOCKS else "D"}" unitRef="INR" decimals="-7">'
+                   f'{v * 1e7:.2f}</f:{TAG[k]}>' for k, v in facts.items() if v is not None)
+    return ('<?xml version="1.0" encoding="UTF-8"?><xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" '
+            'xmlns:f="http://www.bseindia.com/xbrl/fin/2020-03-31/in-bse-fin">'
+            + ctx("D", f"<xbrli:startDate>{start:%Y-%m-%d}</xbrli:startDate><xbrli:endDate>{end:%Y-%m-%d}</xbrli:endDate>")
+            + ctx("I", f"<xbrli:instant>{end:%Y-%m-%d}</xbrli:instant>")
+            + '<xbrli:unit id="INR"><xbrli:measure>iso4217:INR</xbrli:measure></xbrli:unit>'
+            f'<f:NatureOfReportStandaloneConsolidated contextRef="D">{"Consolidated" if consolidated else "Standalone"}'
+            '</f:NatureOfReportStandaloneConsolidated>' + body + "</xbrli:xbrl>").encode()
+
+
+def _year_start(end):
+    return datetime(end.year - 1, end.month + 1, 1) if end.month < 12 else datetime(end.year, 1, 1)
+
+
+def _quarter_facts(k):
+    return {"revenue": 300.0 + k, "other_income": 5.0, "dep": 12.0, "interest": 5.0, "pbt": 60.0 + k, "tax": 15.0,
+            "pat": 45.0 + k, "total_exp": 245.0}
+
+
+def filings_check(co):
+    """5.1: a company built from annual results filings by rules. Filings that say what the export says give the same
+    history line for line (so the same projection and Excel); a fourth quarter is the year less three; Export fills
+    only the years filings lack, and differences over 1% are reported. Returns the filed company (last 4 years)."""
+    read = lambda f, s, e: model.parse_xbrl(filing_xml(f, s, e))  # noqa: E731
+    annual = [read(filing_facts(co, i), _year_start(d), d) for i, d in enumerate(co["dates"])]
+    full, skipped = model.from_filings("Test Industries Limited", annual)
+    assert skipped == [] and full["dates"] == co["dates"], skipped
+    for h, x in zip(full["hist"], co["hist"]):
+        for k, v in x.items():
+            assert (v is None and h[k] is None) or abs(h[k] - v) < 1e-4, (k, h[k], v)
+    # a year without a balance sheet (NSE's results before FY2023) is left out and said; one year alone isn't a model
+    no_bs = dict(annual[0], facts={k: v for k, v in annual[0]["facts"].items() if k not in ("share_cap", "total_assets")})
+    part, skipped = model.from_filings("T", [no_bs, *annual[-4:]])
+    assert len(part["dates"]) == 4 and skipped == [{"year": "FY2016", "why": skipped[0]["why"]}], skipped
+    for bad in ([annual[-1]], [no_bs]):
+        try:
+            model.from_filings("T", bad)
+            raise AssertionError("expected ValueError")
+        except ValueError as e:
+            assert "at least two" in str(e), e
+    assert len(model.from_filings("T", [annual[-1]], least=1)[0]["dates"]) == 1
+    # exceptional items go into other income (Export's way), so EBITDA stays the operating line
+    ex = read(dict(filing_facts(co, 9), exceptional=-50.0, pbt=co["hist"][9]["pbt"] - 50, pat=co["hist"][9]["pat"] - 50),
+              _year_start(co["dates"][9]), co["dates"][9])
+    one = model.from_filings("T", [annual[8], ex])[0]["hist"][-1]
+    assert abs(one["ebitda"] - co["hist"][9]["ebitda"]) < 1e-4 and abs(one["other_income"] - co["hist"][9]["other_income"] + 50) < 1e-4
+    # quarters: three filed, the fourth = the year less them; a gap ends the run (only the latest run is kept)
+    end = co["dates"][-1]
+    qs = [dict(read(_quarter_facts(k), datetime(e.year, e.month - 2, 1), e), kind="quarter")
+          for k, e in enumerate((datetime(end.year - 1, 6, 30), datetime(end.year - 1, 9, 30), datetime(end.year - 1, 12, 31),
+                                 datetime(end.year, 6, 30), datetime(end.year - 2, 6, 30)))]
+    q = model.filing_quarters(qs + annual)
+    assert q["dates"] == [datetime(end.year - 1, m, d) for m, d in ((6, 30), (9, 30), (12, 31))] + [end, datetime(end.year, 6, 30)], q["dates"]
+    y = co["hist"][-1]
+    assert abs(q["rows"]["sales"][3] - (y["revenue"] - 903)) < 1e-4 and q["rows"]["expenses"][0] == 245 - 5 - 12, q["rows"]
+    assert q["rows"]["op_profit"][0] == 60 + 5 + 12 - 5 and model.ttm(q)["values"]["sales"] is not None
+    # merge: the last four years from filings, the six before from Export; a filing 2% off on revenue is reported
+    last4 = [dict(a, facts=dict(a["facts"])) for a in annual[-4:]]
+    last4[0]["facts"]["revenue"] *= 1.02
+    filed = model.from_filings("Test Industries Limited", last4, qs + annual[-4:],
+                               {"price": 1650.0, "shares": 5.0, "face_value": 10.0})[0]
+    merged, filled, mism = model.merge(filed, co)
+    assert filled == model.labels(co["dates"])[:6] and merged["dates"] == co["dates"], filled
+    assert [(m["year"], m["line"]) for m in mism] == [("FY2022", "Revenue")], mism
+    assert merged["hist"][5]["capex"] == co["hist"][5]["capex"] and merged["hist"][6]["revenue"] != co["hist"][6]["revenue"]
+    assert merged["market"]["price"] == 1650 and merged["market"]["price_hist"][0] == 500 and merged["quarters"] == filed["quarters"]
+    # the model's defaults never read 1,000% interest off a company with almost no borrowings
+    tiny = [dict(h, borrowings=0.5) for h in co["hist"]]
+    assert model.default_assumptions(tiny)["int_rate"] == model.INT_CAP
+    return filed
 
 
 def xbrl_check(co):
@@ -1126,7 +1230,8 @@ def library_check(root, co, scenarios):
 
     q = co["quarters"]
     company = {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
-               "market": co["market"], "quarters": {"dates": [d.isoformat() for d in q["dates"]], "rows": q["rows"]}}
+               "market": co["market"], "quarters": {"dates": [d.isoformat() for d in q["dates"]], "rows": q["rows"]},
+               "source": None}
     old = server.ModelDoc.model_validate({"version": 3, "company": {k: company[k] for k in ("name", "dates", "hist")},
                                           "scenarios": scenarios})  # saved before market data and valuation existed
     assert old.company.market.price is None and old.company.market.price_hist == [], old.company.market
@@ -1137,7 +1242,7 @@ def library_check(root, co, scenarios):
           "active": "bull", "scenarios": scenarios, "excluded_years": ["FY2020"], "saved_at": "2026-10-15T09:00:00",
           "valuation": model.VALUATION}
     up = server.ModelDoc.model_validate(v4).model_dump(mode="json")
-    assert up == {**v4, "version": 6, "company": {**v4["company"], "quarters": None}, "filings": [], "proposals": [],
+    assert up == {**v4, "version": 6, "company": {**v4["company"], "quarters": None, "source": None}, "filings": [], "proposals": [],
                   "notes": {}, "reports": [], "note": None, "assumption_sources": {}, "flag_notes": [], "reviewed_at": None}, up
     # saved before 3.4: no COGS line in the company, no cogs_pct / dpo in the scenarios. They come back as 0 (days stay
     # on revenue, payables stay in other liabilities) and the model projects exactly as it did
@@ -1259,6 +1364,7 @@ def library_check(root, co, scenarios):
     assume_check(server, root, data)
     thesis_check(server, root, data)
     reimport_check(server, root, co, data)
+    fetch_api_check(server, root, co, data)
 
 
 def reimport_check(server, root, co, data):
@@ -2273,6 +2379,159 @@ def _no_dimension(path):
     with zipfile.ZipFile(path, "w") as z:
         for n, b in files.items():
             z.writestr(n, b)
+
+
+def fetch_api_check(server, root, co, data):
+    """5.1: add a company by ticker, offline: NSE's answers are recorded fixtures served through the client's own
+    cache, size-cap, allow-list and politeness code (only the socket is fake). Search, price and fetch never call the
+    LLM; what was fetched works offline from the cache; bad symbols never reach a URL."""
+    import sources  # noqa: PLC0415
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    nse, arch = sources.NSE + "/api/", "https://nsearchives.nseindia.com/"
+    pdf = tiny_pdf([["Annual report"], ["Revenue grew 12% in FY2025."]])
+    d = co["dates"]
+    net = {  # url (or its start) -> body; anything else is a network failure
+        nse + "NextApi/globalSearch/equity?symbol=test": {"data": [{"symbol": "TESTIND", "companyName": "Test Industries Limited"},
+                                                                {"symbol": "../X", "companyName": "Bad"}]},
+        nse + "NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N&series=EQ&symbol=TESTIND": {
+            "equityResponse": [{"metaData": {"companyName": "Test Industries Limited"}, "tradeInfo": {
+                "lastPrice": 1650, "issuedSize": 50_000_000, "faceValue": 10}, "secInfo": {
+                "industryInfo": "Widgets", "listingDate": "01-Jan-2010 00:00:00"}, "lastUpdateTime": "16-Oct-2026 16:00:00"}]},
+        nse + "corporates-financial-results?index=equities&symbol=TESTIND&period=Annual": [
+            *[{"toDate": f"{x:%d-%b-%Y}", "period": "Annual", "consolidated": "Consolidated", "filingDate": f"{x:%d-%b-%Y} 10:00",
+               "xbrl": f"{arch}corporate/xbrl/A{x.year}.xml"} for x in d[-4:]],
+            {"toDate": f"{d[-5]:%d-%b-%Y}", "period": "Annual", "consolidated": "Consolidated", "xbrl": f"{arch}corporate/xbrl/-"},
+            {"toDate": f"{d[-6]:%d-%b-%Y}", "period": "Annual", "consolidated": "Consolidated", "xbrl": "https://evil.example/a.xml"}],
+        nse + "corporates-financial-results?index=equities&symbol=TESTIND&period=Quarterly": [
+            {"toDate": "31-Dec-2024", "period": "Quarterly", "consolidated": "Consolidated", "xbrl": f"{arch}corporate/xbrl/Q3.xml"}],
+        nse + "integrated-filing-results?index=equities&symbol=TESTIND": {"data": []},
+        nse + "annual-reports?index=equities&symbol=TESTIND": {"data": [{"toYr": "2025", "fileName": f"{arch}annual_reports/AR.pdf"}]},
+        nse + "corporate-announcements?index=equities&symbol=TESTIND": [
+            {"an_dt": "14-Oct-2026 15:59:41", "desc": "Analysts/Institutional Investor Meet/Con. Call Updates",
+             "attchmntText": "Test Industries has informed the Exchange about Transcript", "attchmntFile": f"{arch}corporate/T.pdf"}],
+        f"{arch}annual_reports/AR.pdf": pdf, f"{arch}corporate/T.pdf": pdf,
+        f"{arch}corporate/xbrl/Q3.xml": filing_xml(_quarter_facts(0), datetime(2024, 10, 1), datetime(2024, 12, 31)),
+        **{f"{arch}corporate/xbrl/A{x.year}.xml": filing_xml(filing_facts(co, i), _year_start(x), x)
+           for i, x in enumerate(d) if i >= len(d) - 4},
+    }
+    calls, online = [], [True]
+
+    class Resp(io.BytesIO):
+        def __init__(self, url, body):
+            super().__init__(body)
+            self.url, self.headers = url, {}
+
+        def geturl(self):
+            return self.url
+
+    class Opener:  # the socket: everything above it (cache, caps, allow-list, gap) is the real client
+        def open(self, req, timeout):
+            url = req.full_url
+            calls.append(url)
+            body = next((v for k, v in net.items() if url.startswith(k)), None) if online[0] else None
+            if body is None:
+                raise OSError("no network")
+            return Resp(url, body if isinstance(body, bytes) else json.dumps(body).encode())
+
+    client, models, llm, adapter = TestClient(server.app), server.MODELS, ai.llm, server.export_source
+    server.MODELS, ai.llm, server.export_source = root, None, None  # never the real library, the LLM or Export
+    server._clients.clear()
+    try:
+        c = server.nse()
+        c.opener, c.gap = Opener(), 0.0
+        # strict symbols, before any URL
+        assert [sources.symbol(x) for x in ("tcs", " M&M ", "BAJAJ-AUTO")] == ["TCS", "M&M", "BAJAJ-AUTO"]
+        for bad in ("", "../etc", "TCS?x=1", "A" * 21, "TCS/1", "ТСS"):
+            assert client.post("/api/nse/price", json={"symbol": bad}).status_code == 422, bad
+            assert client.post("/api/nse/fetch", json={"symbol": bad}).status_code == 422, bad
+        assert not calls, calls
+        assert not sources.allowed("http://www.nseindia.com/x") and not sources.allowed("https://www.nseindia.com.evil.io/")
+        assert not sources.allowed("https://www.nseindia.com:8443/") and sources.allowed(arch + "x.pdf")
+        # search: only well-formed symbols; a query of symbols isn't sent; offline says so
+        r = client.post("/api/nse/search", json={"q": "Test"}).json()
+        assert r == {"results": [{"symbol": "TESTIND", "name": "Test Industries Limited"}], "error": None}, r
+        assert client.post("/api/nse/search", json={"q": "<script>"}).json()["results"] == [] and len(calls) == 2  # home page, search
+        r = client.post("/api/nse/price", json={"symbol": "testind"}).json()
+        assert r["price"] == 1650 and r["shares"] == 5.0 and r["face_value"] == 10, r
+
+        def fetch(**body):
+            r = client.post("/api/nse/fetch", json={"symbol": "TESTIND", **body})
+            assert r.status_code == 200 and r.headers["content-type"].startswith("application/x-ndjson"), r.text
+            return [json.loads(x) for x in r.text.splitlines()]
+        ev = fetch()
+        assert [e for e in ev if "error" in e] == [] and ev[-1] == {"done": True}, ev
+        steps = [e["step"] for e in ev if "step" in e]
+        assert steps[0] == "Finding TESTIND on NSE…" and any("4 annual results" in x for x in steps), steps
+        p = next(e["company"] for e in ev if "company" in e)
+        src = p["company"]["source"]
+        assert [y for y, w in src["years"].items() if w == "NSE filing"] == model.labels(d[-4:]) and src["basis"] == "consolidated"
+        assert src["missing"] == [f"{model.fy(d[0])} to {model.fy(d[-5])}: no results filing in XBRL on NSE (it starts in "
+                                  "2018-19)"] and src["mismatches"] == [] and src["industry"] == "Widgets", src
+        assert p["company"]["market"]["price"] == 1650 and len(p["fetched"]["filings"]) == 4 and p["restated"] is None
+        for h, x in zip(p["hist"], co["hist"][-4:]):
+            assert abs(h["revenue"] - x["revenue"]) < 1e-4 and h["capex_cf"] is None if "capex_cf" in h else True
+        assert all((root / server.FILINGS / f"{f['id']}.xml").is_file() for f in p["fetched"]["filings"])
+        assert "https://evil.example/a.xml" not in calls and f"{arch}corporate/xbrl/-" not in calls
+        reports = [e["report"] for e in ev if "report" in e]
+        if ai.pdf_available():
+            assert [(r["kind"], r["year"]) for r in reports] == [("annual", "FY2025"), ("transcript", "FY2027")], reports
+        # the result saves and reopens like an upload (Company.source kept), and project/export never call the LLM
+        doc = dict(data, company=p["company"], filings=p["fetched"]["filings"], reports=reports)
+        saved = client.post("/api/models", json=doc).json()
+        back = client.get(f"/api/models/{saved['id']}").json()
+        assert back["doc"]["company"]["source"]["symbol"] == "TESTIND", back["doc"]["company"].get("source")
+        assert client.post("/api/project", json=doc).status_code == 200 and client.post("/api/export", json=doc).status_code == 200
+        # offline: everything again from the cache (stale lists are better than nothing), no request made
+        n, online[0] = len(calls), False
+        for f in (root / server.CACHE / "nse").glob("*.bin"):
+            os.utime(f, (0, 0))
+        again = fetch(documents=False)
+        assert next(e for e in again if "company" in e)["company"]["hist"] == p["hist"] and again[-1] == {"done": True}, again
+        assert client.post("/api/nse/price", json={"symbol": "TESTIND"}).status_code == 200 and len(calls) > n
+        # nothing cached and no network: a plain error, in the stream and as a 503
+        e = fetch(symbol="OTHER")
+        assert len(e) == 2 and "Couldn't reach NSE" in e[-1]["error"], e
+        r = client.post("/api/nse/price", json={"symbol": "OTHER"})
+        assert r.status_code == 503 and "internet" in r.json()["detail"], r.text
+        online[0] = True
+        # refresh of a Export upload: the filings' years win, Export keeps the six older ones and its name
+        ev = fetch(company={**data["company"], "name": "Test Industries Ltd"}, documents=False)
+        m = next(e["company"] for e in ev if "company" in e)
+        assert m["company"]["name"] == "Test Industries Ltd" and len(m["company"]["dates"]) == 10, m["company"]["name"]
+        assert list(m["company"]["source"]["years"].values()).count("Export") == 6 and m["company"]["source"]["from"] == "this model"
+        # caps: a list over the size cap is refused, not truncated; a block page is never cached as data
+        big = sources.Client(root / "_cache" / "t", gap=0.0)
+        big.opener = Opener()
+        net[nse + "big"] = b"x" * 100
+        try:
+            big.get(nse + "big", limit=50)
+            raise AssertionError("expected Offline")
+        except sources.Offline as e:
+            assert "over" in str(e)
+        net[nse + "page"] = b"<html>Access Denied</html>"
+        try:
+            big.json(nse + "page")
+            raise AssertionError("expected Offline")
+        except sources.Offline:
+            assert not big.path(nse + "page").exists()
+        # politeness: requests one gap apart, the home page first for its cookies (its refusal doesn't matter)
+        slow = sources.Client(root / "_cache" / "s", gap=0.05)
+        slow.opener, calls[:] = Opener(), []
+        import time  # noqa: PLC0415
+        t0 = time.monotonic()
+        slow.get(nse + "big", max_age=0, limit=1000)
+        slow.get(nse + "page", max_age=0, limit=1000)
+        assert calls == [sources.NSE + "/", nse + "big", nse + "page"] and time.monotonic() - t0 >= 0.1, calls
+        try:
+            sources._Stay(sources.HOSTS).redirect_request(None, None, 302, "", {}, "https://evil.example/")
+            raise AssertionError("expected a refused redirect")
+        except OSError:
+            pass
+    finally:
+        server.MODELS, ai.llm, server.export_source = models, llm, adapter
+        server._clients.clear()
 
 
 def _blank(tmp):

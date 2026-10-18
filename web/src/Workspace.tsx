@@ -7,11 +7,12 @@ import Fundamentals from './Fundamentals'
 import StatementsPage from './Statements'
 import ValuationPage from './Valuation'
 import { BottomNav, DL, MobileTop, Side, type Here } from './Shell'
+import { Refresh, SourceNote } from './Fetch'
 import { HrefCtx, PAGES, STATEMENTS, pathOf, placed, type Href, type Route } from './route'
 import type { SaveState } from './App'
 import {
   NAMES, api, clock, flat, groupKeys, money, postJson, rs, when, SCENARIOS,
-  type ModelDoc, type ModelSummary, type Parsed, type Projection, type Proposal, type Scenario,
+  type Company, type Filing, type ModelDoc, type ModelSummary, type Parsed, type Projection, type Proposal, type Scenario,
 } from './lib'
 
 const ORDER: Scenario[] = ['bear', 'base', 'bull']
@@ -113,6 +114,15 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     } catch (e) { setError((e as Error).message) } finally { setPendingYear(null) }
   }
 
+  // Refresh (today's price, new results) or a Export export's years: a new company; the assumptions stay as they are
+  // (new filings move the defaults, which the Forecast and Checks pages then offer in one click)
+  const onCompany = (p: Parsed | null, c: Company) => {
+    if (p) setParsed({ ...p, company: c })
+    else setParsed({ ...parsed, company: c })
+    const add = p?.fetched?.filings ?? []
+    setDoc(d => ({ ...d, company: c, filings: add.length ? [...d.filings, ...add.filter((f: Filing) => !d.filings.some(x => x.id === f.id))] : d.filings }))
+  }
+
   const exportXlsx = async () => {
     setExporting(true)
     try {
@@ -184,7 +194,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     case 'valuation': page = <ValuationPage {...common} />; break
     case 'checks': page = <Evidence {...common} upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals}
       toggleYear={toggleYear} pendingYear={pendingYear} defaultsNote={defaultsNote} />; break
-    default: page = <Note {...common} />
+    default: page = <Note {...common} provenance={<SourceNote company={company} onCompany={onCompany} />} />
   }
 
   return (
@@ -201,6 +211,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
                 {price != null
                   ? <span>Price <span className="num mkt">Rs {rs(price)}</span>{valuation.price != null ? ' (typed)' : ''}</span>
                   : <a href={href('valuation', 'v-price')}>No share price: type one</a>}
+                <Refresh company={company} onCompany={onCompany} />
                 {v?.scenarios[doc.active].per_share != null && <span>Our {doc.active} value <span className="num ours">Rs {rs(v.scenarios[doc.active].per_share!)}</span>
                   {v.scenarios[doc.active].upside != null && <> ({v.scenarios[doc.active].upside! < 0 ? '−' : '+'}{Math.round(Math.abs(v.scenarios[doc.active].upside!) * 100)}% vs price)</>}</span>}
                 {price != null && shares != null && <span className="wide">Market cap <span className="num">Rs {money(price * shares)} cr</span></span>}

@@ -45,7 +45,10 @@ function Cite({ n, src, children, plain, uid }: { n: number; src: string; childr
   )
 }
 
-interface Props { parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null }
+interface Props {
+  parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null
+  provenance?: ReactNode // right under the verdict: where the numbers come from, for a company added by ticker
+}
 
 const refKey = (r: NoteRef) => (typeof r === 'string' ? r : JSON.stringify(r))
 /** What a ref stands for, as the note was written: the fact's text, or the file, page and quote. */
@@ -77,7 +80,7 @@ export function Prose({ text, refs, tn, refN, uid }: { text: string; refs: NoteR
 
 /** Overview: the verdict first, then the business in five numbers, price against value, the checks, the thesis and
  * risks next to the key numbers, and where to go deeper. The how-it-is-valued detail lives on Valuation. */
-export default function Note({ parsed, doc, setDoc, projection }: Props) {
+export default function Note({ parsed, doc, setDoc, projection, provenance }: Props) {
   const href = useHref()
   const { company, years } = parsed
   const hist = parsed.hist ?? company.hist
@@ -211,6 +214,7 @@ export default function Note({ parsed, doc, setDoc, projection }: Props) {
           </div>}
         </aside>}
       </section>
+      {provenance}
 
       <FundStrip parsed={parsed} />
 

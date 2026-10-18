@@ -174,12 +174,25 @@ def parse_export(file):
     if len(dates) < 2:
         raise ValueError("Need at least 2 years with both P&L and balance sheet data.")
 
-    hist = []
+    rows = []
     for d in dates:
         h = {**pl[d], **bs[d], **cf.get(d, dict.fromkeys(("cfo", "cfi", "cff")))}
-        h["ebitda"] = h["pbt"] + h["interest"] + h["dep"] - h["other_income"]
         c = cg.get(d) or {}
         h["cogs"] = None if c.get("rm") is None else c["rm"] - (c["inv_change"] or 0.0)
+        rows.append(h)
+    hist = _derive(rows)
+    _not_lender(hist)
+    return {"name": str(name), "dates": dates, "hist": hist, "market": _market(ws, s["pl"]["report date"], dates),
+            "quarters": _quarters(s.get("q"))}
+
+
+def _derive(rows):
+    """Reported lines per year (oldest first) -> history rows with the derived lines: EBITDA, other current assets,
+    net cash flow, capex from the net block, free cash flow and the return ratios."""
+    hist = []
+    for h in rows:
+        h = dict(h)
+        h["ebitda"] = h["pbt"] + h["interest"] + h["dep"] - h["other_income"]
         h["other_ca"] = h["other_assets"] - h["receivables"] - h["inventory"] - h["cash"]
         h["net_cf"] = None if None in (h["cfo"], h["cfi"], h["cff"]) else h["cfo"] + h["cfi"] + h["cff"]
         p = hist[-1] if hist else None
@@ -187,17 +200,22 @@ def parse_export(file):
         h["fcf"] = h["cfo"] - h["capex"] if p and h["cfo"] is not None else None
         h.update(returns(h, p))
         hist.append(h)
+    return hist
+
+
+def _not_lender(hist):
+    """ValueError for a bank, NBFC or insurer, which this model doesn't fit."""
     # ponytail: heuristic, tuned on 15 real exports: lenders' loan books sit in Other Assets at 2.7-9.4x revenue;
     # non-financials stay under ~1.6x (ADANIPORTS: infra loans/advances ~1.2x). Revisit if a real lender slips under 2x.
     rev = [h for h in hist if h["revenue"]]
+    if not rev:
+        raise ValueError("No year has revenue from operations.")
     wc = statistics.median((h["receivables"] + h["inventory"]) / h["revenue"] for h in rev)
     ir = statistics.median(h["interest"] / h["revenue"] for h in rev)
     oca = statistics.median(h["other_ca"] / h["revenue"] for h in rev)
     if all(not h["receivables"] and not h["inventory"] for h in hist) or (ir > 0.3 and wc < 0.05) or oca > 2.0:
         raise ValueError("Looks like a bank/NBFC/insurer (loan book or interest dominates, no receivables/inventory). "
                          "Financial companies are not supported yet.")
-    return {"name": str(name), "dates": dates, "hist": hist, "market": _market(ws, s["pl"]["report date"], dates),
-            "quarters": _quarters(s.get("q"))}
 
 
 def _quarters(rows):
@@ -613,6 +631,159 @@ def _xbrl_ties(f, kind, end, co, consolidated):
     return out
 
 
+# ---------- a company from its filings (fetch by ticker, 5.1) ----------
+
+# How an annual results filing's lines add up to Export's Data Sheet lines, so a company built from filings reads
+# like an export: Export's borrowings include lease liabilities and its other liabilities everything else (payables,
+# provisions, minority interest); its net block includes goodwill and intangibles; cash includes bank balances.
+FILING_SUMS = {"borrowings": ("borrowings_noncurrent", "borrowings_current", "lease_noncurrent", "lease_current"),
+               "net_block": ("ppe", "investment_property", "goodwill", "intangibles"),
+               "cwip": ("cwip", "intangibles_wip"),
+               "investments": ("investments_noncurrent", "investments_current", "investments_equity_method"),
+               "cash": ("cash", "bank_balances")}
+FILING_NEEDS = ("revenue", "pbt", "pat", "share_cap", "total_assets")  # without these a filing doesn't make a year
+
+
+def filing_row(x):
+    """An annual filing's facts -> one Data Sheet year (parse_export's lines), or None when a needed line is missing
+    (a results filing without a balance sheet). Lines a filing leaves out are 0, as in a Export export."""
+    if any(x.get(k) is None for k in FILING_NEEDS):
+        return None
+    g = lambda k: x.get(k) or 0.0  # noqa: E731
+    r = {k: sum(g(p) for p in parts) for k, parts in FILING_SUMS.items()}
+    reserves = (x["other_equity"] if "other_equity" in x else
+                x["equity_parent"] - x["share_cap"] if "equity_parent" in x else g("equity") - g("nci") - x["share_cap"])
+    total = x.get("equity_and_liabilities") or x["total_assets"]
+    tax = x["tax"] if "tax" in x else g("current_tax") + g("deferred_tax")
+    cogs = ("materials", "purchases", "inventory_change")
+    # exceptional items go into other income, as in Export's export (TCS FY2026: its 4,526 cr charge makes EBITDA
+    # 72,398 both ways), so EBITDA is the operating line and one-off detection sees them in other income
+    r.update(revenue=x["revenue"], other_income=g("other_income") + g("exceptional"), dep=g("dep"), interest=g("interest"), pbt=x["pbt"],
+             tax=tax, pat=x["pat"],
+             # ponytail: dividends paid in the year (last year's final + this year's interim), not Export's
+             # "declared for the year"; payout defaults lag a changed dividend policy by a year
+             dividend=abs(g("dividends_paid")),
+             share_cap=x["share_cap"], reserves=reserves, total_liab=total, total_assets=x["total_assets"],
+             receivables=g("receivables"), inventory=g("inventory"),
+             cfo=x.get("cfo"), cfi=x.get("cfi"), cff=x.get("cff"),
+             cogs=sum(g(k) for k in cogs) if any(k in x for k in cogs) else None)
+    r["other_liab"] = total - r["share_cap"] - r["reserves"] - r["borrowings"]
+    r["other_assets"] = r["total_assets"] - r["net_block"] - r["cwip"] - r["investments"]
+    return r
+
+
+Q_FROM = (("sales", "revenue"), ("other_income", "other_income"), ("depreciation", "dep"), ("interest", "interest"),
+          ("pbt", "pbt"), ("tax", "tax"), ("net_profit", "pat"))
+
+
+def _q_row(x):
+    """Quarter lines (QUARTERS keys) from a filing's P&L facts; operating profit by the annual EBITDA rule."""
+    q = {k: x.get(f) for k, f in Q_FROM}
+    if q["other_income"] is not None and x.get("exceptional"):
+        q["other_income"] += x["exceptional"]  # as filing_row does
+    if q["tax"] is None and ("current_tax" in x or "deferred_tax" in x):
+        q["tax"] = x.get("current_tax", 0.0) + x.get("deferred_tax", 0.0)
+    te = x.get("total_exp")
+    q["expenses"] = None if te is None else te - (x.get("interest") or 0.0) - (x.get("dep") or 0.0)
+    parts = [q[k] for k in ("pbt", "interest", "depreciation", "other_income")]
+    q["op_profit"] = None if None in parts else parts[0] + parts[1] + parts[2] - parts[3]
+    return q
+
+
+def filing_quarters(filings, keep=12):
+    """company["quarters"] from quarter filings (one basis), the last `keep` quarters. A fourth quarter is filed inside
+    the annual results, so it is the year less its first three quarters, when all three were filed; else left out."""
+    rows = {}
+    for f in filings:
+        end = _iso(f.get("period_end") or "")
+        if end and f.get("kind") == "quarter":
+            rows[end] = _q_row(f["facts"])
+    for f in filings:
+        end = _iso(f.get("period_end") or "")
+        if not end or f.get("kind") != "annual" or end in rows:
+            continue
+        y = _q_row(f["facts"])
+        firsts = [rows.get(e) for e in (_month_end(end, -9), _month_end(end, -6), _month_end(end, -3))]
+        if all(firsts):
+            rows[end] = {k: None if y[k] is None or any(q[k] is None for q in firsts) else y[k] - sum(q[k] for q in firsts)
+                         for k in y}
+    dates = sorted(rows)
+    i = len(dates) - 1  # the trailing run of consecutive quarters: a gap (a fourth quarter we can't work out) ends it
+    while i > 0 and 80 <= (dates[i] - dates[i - 1]).days <= 100:
+        i -= 1
+    dates = dates[i:][-keep:]
+    if not dates:
+        return None
+    return {"dates": dates, "rows": {k: [rows[d][k] for d in dates] for k in QUARTERS.values()}}
+
+
+def _month_end(d, months):
+    m = d.month - 1 + months
+    y, m = d.year + m // 12, m % 12 + 1
+    return datetime(y, m, calendar.monthrange(y, m)[1])
+
+
+def from_filings(name, annual, quarters=(), market=None, least=2):
+    """A company in parse_export's shape from annual results filings (one basis, any order), by rules: one year per
+    filing that has a balance sheet, oldest first. -> (company, skipped [{year, why}]). ValueError with fewer than
+    `least` years (1 when a Export company fills the rest, see merge), or for a lender."""
+    years, skipped = {}, []
+    for f in annual:
+        end = _iso(f.get("period_end") or "")
+        if not end or f.get("kind") != "annual":
+            continue
+        r = filing_row(f["facts"])
+        if r is None:
+            skipped.append({"year": fy(end), "why": "the filing has no balance sheet or profit lines"})
+        else:
+            years[end] = r
+    dates = sorted(years)
+    if len(dates) < max(least, 1):
+        raise ValueError(f"Only {len(dates)} year{'s' if len(dates) != 1 else ''} of annual results with a balance sheet "
+                         "were filed in XBRL; the model needs at least two.")
+    hist = _derive([years[d] for d in dates])
+    _not_lender(hist)
+    m = market or {}
+    return ({"name": name, "dates": dates, "hist": hist, "quarters": filing_quarters(quarters),
+             "market": {"price": m.get("price"), "shares": m.get("shares"), "face_value": m.get("face_value"),
+                        "price_hist": [None] * len(dates), "shares_hist": [None] * len(dates)}}, skipped)
+
+
+MERGE_LINES = (("revenue", "Revenue"), ("pat", "Net profit"), ("total_assets", "Total assets"),
+               ("borrowings", "Borrowings"), ("cfo", "Cash from operations"))
+MERGE_TOL = 0.01  # filings and Export a year apart by more than 1%: reported, the filing's number kept
+
+
+def merge(filed, export):
+    """Years from filings win; a Export company (an export, or its public page) fills only the years the filings
+    don't have (older ones: NSE's XBRL starts in 2018-19). -> (company, filled years, mismatches [{year, line, filing,
+    export}] on the years both have). Market data and quarters come from the filings' side when it has them."""
+    have = {d.date() for d in filed["dates"]}
+    rows = {d: h for d, h in zip(filed["dates"], filed["hist"])}
+    filled, mism = [], []
+    for d, h in zip(export["dates"], export["hist"]):
+        if d.date() not in have:
+            rows[d] = h
+            filled.append(fy(d))
+            continue
+        f = next(x for e, x in zip(filed["dates"], filed["hist"]) if e.date() == d.date())
+        for k, line in MERGE_LINES:
+            a, b = f.get(k), h.get(k)
+            if a is not None and b is not None and abs(a - b) > MERGE_TOL * max(abs(b), 1.0):
+                mism.append({"year": fy(d), "line": line, "filing": a, "export": b})
+    dates = sorted(rows)
+    sm, fm = export.get("market") or {}, filed.get("market") or {}
+    at = {d.date(): i for i, d in enumerate(export["dates"])}
+    hist_of = lambda key: [(sm.get(key) or [None] * len(export["dates"]))[at[d.date()]] if d.date() in at else None  # noqa: E731
+                           for d in dates]
+    market = {"price": fm.get("price") or sm.get("price"), "shares": fm.get("shares") or sm.get("shares"),
+              "face_value": fm.get("face_value") or sm.get("face_value"),
+              "price_hist": hist_of("price_hist"), "shares_hist": hist_of("shares_hist")}
+    co = {"name": filed["name"], "dates": dates, "hist": _derive([rows[d] for d in dates]), "market": market,
+          "quarters": filed.get("quarters") or export.get("quarters")}
+    return co, sorted(filled), mism
+
+
 # For checking a proposed mapping of a leftover tag (mapping_checks): the lines a tag may map to, with a one-line
 # meaning for the prompt (the standard element's name in words); lines that are never negative; totals and their parts.
 XBRL_KEYS = {}
@@ -886,7 +1057,9 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
         # ponytail: Export folds exceptional items into Other Income; median drops a single one-off year
         "oi_pct": max(statistics.median(oi), 0.0) if oi else 0.0,
         "dep_pct": _ros((h["dep"], p["net_block"]) for p, h in pw),
-        "int_rate": _ros((h["interest"], _debt(p)) for p, h in pw),
+        # ponytail: capped; a company with almost no borrowings still pays interest (on lease liabilities, which
+        # results filings keep out of borrowings, or bill discounting), and Rs 400 cr on Rs 13 cr read as 3,000%
+        "int_rate": min(_ros((h["interest"], _debt(p)) for p, h in pw), INT_CAP),
         # ponytail: loss years make raw tax ratios meaningless
         "tax_rate": min(max(_ros(((h["tax"], h["pbt"]) for h in w), 0.25), 0.0), 0.5),
         "payout": min(max(_ros((h["dividend"], h["pat"]) for h in w), 0.0), 1.0),
@@ -904,6 +1077,8 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
         "debt_change": 0.0,
     }
 
+
+INT_CAP = 0.25  # the interest rate default never reads above 25%
 
 FAST = 0.15  # last-3-year revenue CAGR above this: a young or booming company, so the defaults fade instead of holding flat
 

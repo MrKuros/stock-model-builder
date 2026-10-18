@@ -1,0 +1,279 @@
+"""Company data from the exchange by ticker, by rules (no AI): NSE's search, quote, results XBRL filings, annual reports
+and call transcripts. A polite client: browser-like headers, a cookie from the home page first, at most one request a
+second, small timeouts, an allow-list of hosts (redirects never leave it), size caps, and a local cache under the
+library folder (models/_cache), so everything fetched once works offline."""
+import contextlib
+import hashlib
+import http.cookiejar
+import json
+import os
+import re
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zlib
+from datetime import datetime
+from pathlib import Path
+
+NSE = "https://www.nseindia.com"
+HOSTS = frozenset({"www.nseindia.com", "nsearchives.nseindia.com"})
+SYMBOL = re.compile(r"[A-Z0-9&-]{1,20}")  # NSE symbols: TCS, M&M, BAJAJ-AUTO
+QUERY = re.compile(r"[A-Za-z0-9&.\- ]{1,40}")
+PRICE_AGE, LIST_AGE = 15 * 60, 6 * 3600  # seconds a cached quote / list stays fresh; a downloaded file never expires
+MAX_JSON, MAX_XBRL, MAX_PDF = 8 << 20, 5 << 20, 60 << 20
+GAP, TIMEOUT = 1.0, 20  # seconds between requests (one client per library, shared by every request); per request
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+HEADERS = {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", "Accept-Encoding": "gzip, deflate"}
+PAGE = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none"}
+API = {"Accept": "application/json, text/plain, */*", "Referer": NSE + "/"}
+
+
+class Offline(Exception):
+    """The site couldn't be reached or refused, and nothing usable is cached. The message is for the user."""
+
+
+def symbol(s):
+    """An NSE symbol, strictly (A-Z, 0-9, & and -, at most 20), or ValueError: nothing else ever reaches a URL."""
+    s = (s or "").strip().upper()
+    if not SYMBOL.fullmatch(s):
+        raise ValueError("An NSE symbol is letters, digits, & or - (like TCS, M&M or BAJAJ-AUTO).")
+    return s
+
+
+def allowed(url, hosts=HOSTS):
+    u = urllib.parse.urlsplit(url or "")
+    return u.scheme == "https" and u.hostname in hosts and u.port is None
+
+
+class _Stay(urllib.request.HTTPRedirectHandler):
+    def __init__(self, hosts):
+        self.hosts = hosts
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not allowed(newurl, self.hosts):
+            raise urllib.error.HTTPError(newurl, code, "redirect off the allow-list", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class Client:
+    """GETs from an allow-listed site through a cache folder. `home` is fetched once first for its cookies."""
+
+    def __init__(self, cache: Path, hosts=HOSTS, home=NSE + "/", gap=GAP, name="NSE"):
+        self.cache, self.hosts, self.home, self.gap, self.name = cache, hosts, home, gap, name
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+                                                  _Stay(hosts))
+        self.lock, self.last, self.warm = threading.Lock(), 0.0, False
+
+    def path(self, url):
+        return self.cache / (hashlib.sha1(url.encode()).hexdigest()[:24] + ".bin")
+
+    def get(self, url, max_age=LIST_AGE, limit=MAX_JSON):
+        """(bytes, age in seconds): the cached copy while fresh (max_age None = forever), else the site's; when the site
+        fails, a stale copy is better than nothing. Offline when there's neither."""
+        if not allowed(url, self.hosts):
+            raise Offline(f"Not fetched: {urllib.parse.urlsplit(url or '').hostname or url!r} isn't one of the sites this app reads.")
+        p = self.path(url)
+        age = time.time() - p.stat().st_mtime if p.is_file() else None
+        if age is not None and (max_age is None or age < max_age):
+            return p.read_bytes(), age
+        try:
+            data = self.fetch(url, limit)
+        except Offline:
+            if age is not None:
+                return p.read_bytes(), age
+            raise
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, p)
+        return data, 0.0
+
+    def json(self, url, max_age=LIST_AGE):
+        data, age = self.get(url, max_age)
+        try:
+            return json.loads(data), age
+        except ValueError:
+            self.path(url).unlink(missing_ok=True)  # a block page cached as data: never serve it again
+            raise Offline(f"{self.name} sent a page instead of data (it may be blocking automated requests). "
+                          "Try again in a minute, or upload a Export export instead.") from None
+
+    def fetch(self, url, limit):
+        with self.lock:  # one request at a time per client, at least `gap` apart
+            if not self.warm:
+                self._cookies()
+            try:
+                return self._raw(url, limit, API)
+            except urllib.error.HTTPError as e:
+                if e.code not in (401, 403) or not self.home:
+                    raise Offline(self._why(e)) from None
+                self._cookies()  # an expired cookie: a fresh one, then once more
+                try:
+                    return self._raw(url, limit, API)
+                except OSError as e2:
+                    raise Offline(self._why(e2)) from None
+            except OSError as e:  # URLError, timeouts, resets
+                raise Offline(self._why(e)) from None
+
+    def _cookies(self):
+        """The home page's cookies, as a browser would have them. NSE's home page often refuses clients that aren't
+        browsers while its API still answers, so a refusal here is ignored."""
+        self.warm = True
+        if self.home:
+            with contextlib.suppress(OSError, Offline):
+                self._raw(self.home, 2 << 20, PAGE)
+
+    def _why(self, e):
+        if isinstance(e, urllib.error.HTTPError):
+            if e.code in (401, 403):
+                return f"{self.name} refused the request (HTTP {e.code}); it sometimes blocks automated requests for a while."
+            if e.code == 404:
+                return f"{self.name} has no such page (HTTP 404)."
+            return f"{self.name} answered HTTP {e.code} ({e.reason})."
+        return f"Couldn't reach {self.name} ({getattr(e, 'reason', None) or e}). Check the internet connection."
+
+    def _raw(self, url, limit, kind):
+        wait = self.last + self.gap - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            with self.opener.open(urllib.request.Request(url, headers=HEADERS | kind), timeout=TIMEOUT) as r:
+                if not allowed(r.geturl(), self.hosts):
+                    raise Offline(f"{self.name} sent the request elsewhere; not followed.")
+                data = r.read(limit + 1)
+                enc = (r.headers.get("Content-Encoding") or "").lower()
+        finally:
+            self.last = time.monotonic()
+        if len(data) > limit:
+            raise Offline(f"{url.rsplit('/', 1)[-1][:60]} is over {limit >> 20} MB, so it wasn't downloaded.")
+        if enc in ("gzip", "deflate"):
+            d = zlib.decompressobj(zlib.MAX_WBITS | 32 if enc == "gzip" else zlib.MAX_WBITS)
+            try:
+                data = d.decompress(data, limit + 1)
+            except zlib.error:
+                raise Offline(f"{self.name} sent a damaged download; try again.") from None
+            if len(data) > limit or d.unconsumed_tail:
+                raise Offline(f"{url.rsplit('/', 1)[-1][:60]} is over {limit >> 20} MB, so it wasn't downloaded.")
+        return data
+
+
+# ---------- what the exchange publishes, as plain lists ----------
+
+def _date(s, fmt="%d-%b-%Y"):
+    try:
+        return datetime.strptime((s or "").strip().title(), fmt)
+    except ValueError:
+        return None
+
+
+def search(c, q):
+    """[{symbol, name}] for a name or symbol, listed shares only (EQ and SME series)."""
+    q = " ".join((q or "").split())
+    if not QUERY.fullmatch(q):
+        return []
+    d, _ = c.json(f"{NSE}/api/NextApi/globalSearch/equity?symbol={urllib.parse.quote(q.lower())}", 24 * 3600)
+    out = []
+    for x in (d.get("data") if isinstance(d, dict) else None) or []:
+        if isinstance(x, dict) and isinstance(x.get("symbol"), str) and SYMBOL.fullmatch(x["symbol"]):
+            out.append({"symbol": x["symbol"], "name": str(x.get("companyName") or x["symbol"])[:120]})
+    return out[:12]
+
+
+SERIES = ("EQ", "BE", "SM", "ST")  # main board; trade-for-trade (new listings often start here); SME boards
+
+
+def quote(c, sym, max_age=PRICE_AGE):
+    """{name, price (Rs), shares (crore), face_value, industry, sector, isin, listed, as_of, age} from NSE's quote,
+    trying the series a share may trade in."""
+    for series in SERIES:
+        d, age = c.json(f"{NSE}/api/NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N"
+                        f"&series={series}&symbol={urllib.parse.quote(sym)}", max_age)
+        try:
+            e = d["equityResponse"][0]
+            meta, trade, sec = e.get("metaData") or {}, e.get("tradeInfo") or {}, e.get("secInfo") or {}
+        except (KeyError, IndexError, TypeError, AttributeError):
+            continue
+        if meta.get("companyName"):
+            break
+    else:
+        raise Offline(f"NSE has no quote for {sym}. Check the symbol, or upload a Export export instead.")
+    num = lambda v: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None  # noqa: E731
+    price = num(trade.get("lastPrice")) or num(meta.get("closePrice")) or num(meta.get("previousClose"))
+    issued = num(trade.get("issuedSize"))
+    return {"name": str(meta["companyName"])[:200], "price": price, "shares": issued and issued / 1e7,
+            "face_value": num(trade.get("faceValue")), "industry": sec.get("industryInfo") or sec.get("basicIndustry"),
+            "sector": sec.get("sector"), "isin": meta.get("isinCode"), "listed": sec.get("listingDate"),
+            "series": series, "as_of": e.get("lastUpdateTime"), "age": age}
+
+
+def filings(c, sym):
+    """Results XBRL filings: [{end, kind (annual | quarter), consolidated, url, filed}], newest first, one per period
+    and basis (the latest filed). Before 2025 from the results list (XBRL from 2018-19 on; earlier rows have none);
+    from the March 2025 quarter on from the integrated filings (SEBI's combined format), whose March filing holds the
+    year."""
+    out = []
+    for period in ("Annual", "Quarterly"):
+        d, _ = c.json(f"{NSE}/api/corporates-financial-results?index=equities&symbol={urllib.parse.quote(sym)}&period={period}")
+        for x in d if isinstance(d, list) else []:
+            end = _date(x.get("toDate"))
+            if end and allowed(x.get("xbrl")) and x["xbrl"].endswith(".xml"):
+                out.append({"end": end, "kind": "annual" if x.get("period") == "Annual" else "quarter",
+                            "consolidated": x.get("consolidated") == "Consolidated", "url": x["xbrl"],
+                            "filed": _date(x.get("filingDate"), "%d-%b-%Y %H:%M") or end})
+    d, _ = c.json(f"{NSE}/api/integrated-filing-results?index=equities&symbol={urllib.parse.quote(sym)}"
+                  "&type=Integrated%20Filing-%20Financials")
+    for x in (d.get("data") if isinstance(d, dict) else None) or []:
+        end = _date(x.get("qe_Date"))
+        if end and allowed(x.get("xbrl")) and x["xbrl"].endswith(".xml"):
+            out.append({"end": end, "kind": "annual" if end.month == 3 else "quarter",
+                        "consolidated": x.get("consolidated") == "Consolidated", "url": x["xbrl"],
+                        "filed": _date(x.get("broadcast_Date"), "%d-%b-%Y %H:%M:%S") or end})
+    best = {}
+    for f in out:  # the Q4 row of the quarterly list is the annual filing again: the annual kind wins
+        k = (f["end"], f["consolidated"])
+        b = best.get(k)
+        if b is None or (f["kind"] == "annual", f["filed"]) > (b["kind"] == "annual", b["filed"]):
+            best[k] = f
+    return sorted(best.values(), key=lambda f: (f["end"], f["consolidated"]), reverse=True)
+
+
+def annual_reports(c, sym):
+    """[{year (FY2026), url, pdf}], newest first. Older ones are zips (pdf False), which this app doesn't open."""
+    d, _ = c.json(f"{NSE}/api/annual-reports?index=equities&symbol={urllib.parse.quote(sym)}")
+    out = []
+    for x in (d.get("data") if isinstance(d, dict) else None) or []:
+        y, url = str(x.get("toYr") or ""), x.get("fileName")
+        if re.fullmatch(r"\d{4}", y) and allowed(url):
+            out.append({"year": f"FY{y}", "url": url, "pdf": url.lower().endswith(".pdf")})
+    return sorted(out, key=lambda x: x["year"], reverse=True)
+
+
+DOCS = (("transcript", "transcript"), ("presentation", "presentation"))
+
+
+def documents(c, sym, today=None):
+    """Call transcripts and investor presentations filed in the last two years: [{date, kind, title, url}], newest
+    first. By rules: an analyst / con. call announcement whose text names a transcript or a presentation."""
+    today = today or datetime.now()
+    since = today.replace(year=today.year - 2)
+    d, _ = c.json(f"{NSE}/api/corporate-announcements?index=equities&symbol={urllib.parse.quote(sym)}"
+                  f"&from_date={since:%d-%m-%Y}&to_date={today:%d-%m-%Y}")
+    out = []
+    for x in d if isinstance(d, list) else []:
+        text = f"{x.get('desc') or ''} {x.get('attchmntText') or ''}".lower()
+        kind = next((k for word, k in DOCS if word in text), None)
+        when = _date(x.get("an_dt"), "%d-%b-%Y %H:%M:%S") or _date(x.get("an_dt"))
+        url = x.get("attchmntFile")
+        if kind and when and allowed(url) and url.lower().endswith(".pdf"):
+            out.append({"date": when, "kind": kind, "title": str(x.get("attchmntText") or x.get("desc") or "")[:200],
+                        "url": url})
+    return sorted(out, key=lambda x: x["date"], reverse=True)
+
+
+def fy_of(d):
+    """The Indian financial year a date falls in: 14 Oct 2026 -> FY2027."""
+    return f"FY{d.year + 1 if d.month > 3 else d.year}"

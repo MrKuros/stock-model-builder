@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { PAGES, SECTIONS, STATEMENTS, pathOf, type Page } from './route'
+import { PAGES, SECTIONS, STATEMENTS, navigate, pathOf, type Page } from './route'
+import { AddBox } from './Fetch'
 import { rs, when, type ModelSummary } from './lib'
 
 const THEME = 'financial-model:theme'
@@ -93,7 +94,7 @@ function Switcher({ here, compact }: { here: Here; compact?: boolean }) {
       d.open = false
       if (refocus) d.querySelector('summary')?.focus()
     }
-    const key = (e: KeyboardEvent) => { if (e.key === 'Escape' && box.current?.open) { e.preventDefault(); close(true) } }
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented && box.current?.open) { e.preventDefault(); close(true) } }
     const down = (e: PointerEvent) => { if (!box.current?.contains(e.target as Node)) close(false) }
     const pick = (e: MouseEvent) => { if ((e.target as Element).closest?.('.sw-list a')) close(false) }
     const d = box.current
@@ -109,24 +110,32 @@ function Switcher({ here, compact }: { here: Here; compact?: boolean }) {
         return <a key={m.id} href={pathOf(s, here.page, here.sub)} aria-current={s === here.slug ? 'true' : undefined}>
           <span>{m.company}</span><span>{m.saved_at ? when(m.saved_at) : ''}</span></a>
       })}
-      <a className="sw-add" href="/">+ Add a company</a>
     </nav>
+  )
+  const menu = (
+    <div className="sw-menu">
+      {list}
+      <div className="sw-add">
+        <AddBox models={here.models} compact onAdd={sym => navigate(`/?add=${encodeURIComponent(sym)}`)}
+          upload={<a href="/?upload=1">Upload a Export export instead</a>} />
+      </div>
+    </div>
   )
   if (compact) return (
     <details className="m-switch" ref={box}>
-      <summary aria-label={`Company: ${here.name}. Switch company`}><b>{here.short}</b><span>Switch ▾</span></summary>
-      {list}
+      <summary aria-label={`Company: ${here.name}. Switch or add a company`}><b>{here.short}</b><span>Switch ▾</span></summary>
+      {menu}
     </details>
   )
   return (
     <details className="switch" ref={box}>
-      <summary aria-label={`Company: ${here.name}. Switch company`}>
+      <summary aria-label={`Company: ${here.name}. Switch or add a company`}>
         <span className="sw-top"><span className="sw-name">{here.short}</span><span className="sw-chev">Switch ▾</span></span>
         {!here.name.startsWith(here.short) && <span className="sw-full">{here.name}</span>}
         <MiniRange {...here.range} />
         <span className="sw-cap">{rangeWords(here.range.price, here.range.bear, here.range.base, here.range.bull)}</span>
       </summary>
-      {list}
+      {menu}
     </details>
   )
 }

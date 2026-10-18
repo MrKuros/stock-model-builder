@@ -1,23 +1,35 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { MiniRange, latestOf, rangeWords, slugOf } from './Shell'
 import { pathOf, placed } from './route'
-import { NAMES, api, fmt, rs, when, type ModelSummary, type Parsed } from './lib'
+import { NAMES, api, fmt, rs, when, type ModelSummary, type Parsed, type Report } from './lib'
+import { AddBox, FetchRun } from './Fetch'
 
 interface Props {
   models: ModelSummary[] | null
   error: string | null
-  onAdd: (p: Parsed) => Promise<void> // saves the new company and opens its Overview
+  onAdd: (p: Parsed, reports?: Report[]) => Promise<void> // saves the new company and opens its Overview
   onDeleted: (id: string) => void
 }
 
-/** Your companies: every saved model with its price against our value range, and the add-a-company panel. With an
- * empty library it is the first-run screen: drop a Export export or try the sample, then straight to the Overview. */
+/** Your companies: every saved model with its price against our value range, and the add-a-company panel (a name or
+ * NSE symbol, or a Export export). With an empty library it is the first-run screen, then straight to the Overview.
+ * /?add=TCS (the company switcher's box) starts adding that symbol here. */
 export default function Landing({ models, error: listError, onAdd, onDeleted }: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [over, setOver] = useState(false)
   const input = useRef<HTMLInputElement>(null)
+  const [adding, setAdding] = useState<string | null>(() => { // a symbol picked in the company switcher
+    const a = new URLSearchParams(location.search).get('add')?.toUpperCase() ?? null
+    if (a) history.replaceState(history.state, '', '/')
+    return a && /^[A-Z0-9&-]{1,20}$/.test(a) ? a : null
+  })
   const libHead = useRef<HTMLHeadingElement>(null)
+  const [upOpen] = useState(() => { // "Upload a Export export instead" from the company switcher
+    const u = new URLSearchParams(location.search).has('upload')
+    if (u) history.replaceState(history.state, '', '/')
+    return u
+  })
   useEffect(() => { // back on the list from a company: focus its heading, like any page change (not on a cold load)
     if (models == null) return
     if (placed.once) document.getElementById('page-h')?.focus({ preventScroll: true })
@@ -59,6 +71,10 @@ export default function Landing({ models, error: listError, onAdd, onDeleted }: 
     </label>
   )
   const err = (error || listError) && <p className="error" role="alert">{error ?? listError}</p>
+  const uploadLink = <button type="button" className="link" disabled={!!busy} onClick={() => input.current?.click()}>Upload a Export export instead</button>
+  const box = () => adding
+    ? <FetchRun key={adding} symbol={adding} onAdd={onAdd} onClose={() => setAdding(null)} upload={uploadLink} />
+    : <AddBox models={models} onAdd={setAdding} upload={uploadLink} busy={!!busy} />
 
   if (models == null) return <main id="main" className="page" tabIndex={-1}><p className="muted pad" role="status">Opening your companies…</p></main>
 
@@ -66,8 +82,10 @@ export default function Landing({ models, error: listError, onAdd, onDeleted }: 
     <main id="main" className="page first" tabIndex={-1}>
       <p className="label">Get started · <b>one step</b></p>
       <h1 id="page-h" tabIndex={-1}>Add your first company</h1>
-      <p className="purpose">Give the app a company’s financials from Export.in. In a few seconds you get a valuation, ten
-        years of fundamentals and a forecast you can change.</p>
+      <p className="purpose">Type a listed company’s name or NSE symbol: the app reads its results filings from NSE and in
+        about half a minute you get a valuation, its fundamentals and a forecast you can change. No account needed.</p>
+      <div className="first-add">{box()}</div>
+      <p className="label or">or use a Export.in export</p>
       <div className="choices">
         {drop(true)}
         <div className="sample"><b>No file yet?</b>
@@ -75,10 +93,10 @@ export default function Landing({ models, error: listError, onAdd, onDeleted }: 
           <button className="primary" type="button" onClick={sample} disabled={!!busy}>Try the sample company</button></div>
       </div>
       {err}
-      <ol className="how" aria-label="How to get the file">
+      <ol className="how" aria-label="How to get a Export export">
         <li><b>1. Open export.in</b>Search for the company. A free account is enough.</li>
         <li><b>2. Click “Export to Excel”</b>It’s on the company page, above the numbers.</li>
-        <li><b>3. Drop the file above</b>Works for non-financial companies; banks, NBFCs and insurers aren’t supported.</li>
+        <li><b>3. Drop the file above</b>Ten years at once, also for companies that listed recently. Banks, NBFCs and insurers aren’t supported.</li>
       </ol>
     </main>
   )
@@ -103,9 +121,13 @@ export default function Landing({ models, error: listError, onAdd, onDeleted }: 
             fundamentals, the forecast and the checks behind it. Analysis, not a recommendation.</p>
         </div>
         <div className="add">
-          {drop(false)}
-          <p className="small muted">On export.in open the company and click <b>Export to Excel</b> (free account).{' '}
-            <button type="button" className="link" disabled={!!busy} onClick={sample}>Try a sample company</button> (made-up numbers).</p>
+          {box()}
+          <details className="up-alt" open={!!busy || over || upOpen || undefined}>
+            <summary>Or upload a Export export</summary>
+            {drop(false)}
+            <p className="small muted">On export.in open the company and click <b>Export to Excel</b> (free account).{' '}
+              <button type="button" className="link" disabled={!!busy} onClick={sample}>Try a sample company</button> (made-up numbers).</p>
+          </details>
           {err}
         </div>
       </div>

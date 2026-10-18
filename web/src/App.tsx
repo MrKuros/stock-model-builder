@@ -3,7 +3,7 @@ import Landing from './Landing'
 import Workspace from './Workspace'
 import { MobileTop, Side, keysOn, slugOf } from './Shell'
 import { PAGES, navigate, onLinkClick, pathOf, placed, readRoute, type Page, type Route } from './route'
-import { api, defaultPaths, postJson, seed, type ModelDoc, type ModelSummary, type Opened, type Parsed } from './lib'
+import { api, defaultPaths, postJson, seed, type ModelDoc, type ModelSummary, type Opened, type Parsed, type Report } from './lib'
 
 const LAST = 'financial-model:last' // id of the last open model: only the old #note/#model/#evidence links need it now
 const SAVE_DELAY = 1500
@@ -32,12 +32,15 @@ function oldLink(hash: string, id: string): string | null {
   return pathOf(slug, 'forecast', '', null, a)
 }
 
-// a re-import of a saved company keeps its filings, proposals, notes and reports (p.defaults already use them)
-const newDoc = (p: Parsed): ModelDoc => ({
+const byId = <T extends { id: string }>(a: T[] = [], b: T[] = []) => [...a, ...b.filter(x => !a.some(y => y.id === x.id))]
+// a re-import of a saved company keeps its filings, proposals, notes and reports (p.defaults already use them); a
+// company added by ticker brings the filings its years came from and the documents downloaded with it
+const newDoc = (p: Parsed, reports: Report[] = []): ModelDoc => ({
   version: 6, company: p.company, n: 5, active: 'base', scenarios: seed(defaultPaths(p.defaults, p.default_ends)),
-  excluded_years: [], saved_at: null, valuation: p.valuation, filings: [], proposals: [], notes: {}, reports: [],
+  excluded_years: [], saved_at: null, valuation: p.valuation, proposals: [], notes: {},
   note: null, assumption_sources: {}, flag_notes: [], reviewed_at: null,
   ...p.restated?.carry,
+  filings: byId(p.restated?.carry?.filings, p.fetched?.filings), reports: byId(p.restated?.carry?.reports, reports),
 })
 
 export interface SaveState { at: string | null; error: string | null }
@@ -242,11 +245,11 @@ export default function App() {
     return () => window.removeEventListener('keydown', on)
   }, [])
 
-  const add = async (p: Parsed) => { // a fresh upload (or the sample) is saved straight away, then its Overview opens
+  const add = async (p: Parsed, reports: Report[] = []) => { // a fresh upload, a ticker or the sample is saved straight away, then its Overview opens
     // the company you just left may still have an edit on its way (or one the server refused): never drop it
     if ((await flushRef.current()) === false)
       throw new Error('Your last change to the open company isn’t saved yet. Open it and press Try again.')
-    const d = newDoc(p)
+    const d = newDoc(p, reports)
     const r = await api<{ id: string; saved_at: string }>('/api/models', postJson(d))
     channel?.postMessage({ type: 'saved', id: r.id, saved_at: r.saved_at } satisfies Msg)
     openDoc(p, { ...d, saved_at: r.saved_at }, r.id, null)

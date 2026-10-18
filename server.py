@@ -16,8 +16,9 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -25,6 +26,12 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError,
 
 import ai
 import model
+import sources
+
+try:  # local-only (kept out of the public repo): a Export-shaped company from Export's public page
+    from handoff import export_source
+except ImportError:
+    export_source = None
 
 MAX_UPLOAD = 5 * 1024 * 1024  # Export exports are ~50 KB
 MAX_SAVE = 512 * 1024  # a saved model document is ~10-20 KB
@@ -96,6 +103,9 @@ class Company(BaseModel):
     hist: list[dict[str, float | None]]
     market: Market = Market()  # version-3 documents saved before 2.1 have none
     quarters: Quarters | None = None  # none in the export (Milky Mist), or saved before 3.5
+    # fetched by ticker (5.1): {symbol, exchange, basis, fetched_at, price_at, industry, years {FY2024: "NSE filing" |
+    # "Export"}, missing, mismatches, notes, documents}; words and dates only, no number reads it. None = an upload
+    source: dict | None = None
 
     @model_validator(mode="after")
     def _years(self):
@@ -278,7 +288,8 @@ def _company_payload(co, excluded=(), filings=(), notes=None):
     return {
         "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
                     "market": co.get("market") or Market().model_dump(),
-                    "quarters": q and {"dates": [d.isoformat() for d in q["dates"]], "rows": q["rows"]}},
+                    "quarters": q and {"dates": [d.isoformat() for d in q["dates"]], "rows": q["rows"]},
+                    "source": co.get("source")},
         "ttm": model.ttm(q), "ttm_prev": model.ttm(q, 4),  # last four quarters, and the four before them
         "years": labels,
         "hist": up["hist"], "sources": up["sources"],
@@ -466,13 +477,18 @@ async def report(file: UploadFile, year: str = Form(...), kind: str = Form("annu
     data = await file.read(MAX_PDF + 1)
     if len(data) > MAX_PDF:
         raise HTTPException(413, "That file is over 60 MB. Annual reports are usually 5-30 MB.")
-    try:
-        pages = await run_in_threadpool(ai.pdf_pages, data)  # pdftotext takes seconds: keep serving other requests
+    try:  # pdftotext takes seconds: keep serving other requests
+        return await run_in_threadpool(keep_report, data, file.filename or "report.pdf", year, kind)
     except ValueError as e:
         raise HTTPException(503 if str(e) == ai.PDF_MISSING else 422, str(e))
+
+
+def keep_report(data, name, year, kind):
+    """A PDF's page text kept in the library (rules: pdftotext) -> the document's Report entry. ValueError if unreadable."""
+    pages = ai.pdf_pages(data)
     rid = hashlib.sha1(data).hexdigest()[:12]
-    _write(MODELS / REPORTS / f"{rid}.json", json.dumps({"file": file.filename or "", "pages": pages}).encode())
-    return {"id": rid, "file": (file.filename or "report.pdf")[:200], "year": year[:20], "pages": len(pages), "kind": kind}
+    _write(MODELS / REPORTS / f"{rid}.json", json.dumps({"file": name, "pages": pages}).encode())
+    return {"id": rid, "file": name[:200], "year": year[:20], "pages": len(pages), "kind": kind}
 
 
 class ExplainRequest(BaseModel):
@@ -1178,6 +1194,240 @@ def export(req: ModelRequest):
     return Response(model.to_excel(co, sc, n, req.active, req.valuation.model_dump()),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{safe} model.xlsx"'})
+
+
+# ---------- add a company by ticker (5.1): exchange filings by rules, no AI ----------
+
+CACHE = "_cache"  # what the exchange sent, models/_cache/<site>/ ("_": never a slug); prices 15 min, lists 6 h, files kept
+FETCH_YEARS, FETCH_QUARTERS = 10, 8  # annual and quarterly results filings read per company
+_clients = {}
+
+
+def nse():
+    """One polite client per library folder (one request a second, shared by every request)."""
+    if MODELS not in _clients:
+        _clients[MODELS] = sources.Client(MODELS / CACHE / "nse")
+    return _clients[MODELS]
+
+
+def _sym(s):
+    try:
+        return sources.symbol(s)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+class SearchRequest(BaseModel):
+    q: str = Field(max_length=100)
+
+
+class SymbolRequest(BaseModel):
+    symbol: str = Field(max_length=40)
+
+
+class FetchRequest(SymbolRequest):
+    company: Company | None = None  # Refresh: the open model's company; its years the filings don't cover are kept
+    documents: bool = True  # the latest annual report and call transcript too
+
+
+@app.post("/api/nse/search")
+def nse_search(req: SearchRequest):
+    """Companies on NSE matching a name or symbol (POST: only this app's pages can make the server go online)."""
+    try:
+        return {"results": sources.search(nse(), req.q), "error": None}
+    except sources.Offline as e:
+        return {"results": [], "error": str(e)}
+
+
+@app.post("/api/nse/price")
+def nse_price(req: SymbolRequest):
+    """Today's price and share count (cached 15 minutes)."""
+    try:
+        q = sources.quote(nse(), _sym(req.symbol))
+    except sources.Offline as e:
+        raise HTTPException(503, str(e))
+    return {"price": q["price"], "shares": q["shares"], "face_value": q["face_value"], "as_of": q["as_of"],
+            "at": _ago(q["age"])}
+
+
+def _ago(age):
+    return datetime.fromtimestamp(datetime.now().timestamp() - (age or 0)).isoformat(timespec="seconds")
+
+
+def _norm(name):
+    """A company name for matching an export to the exchange's: 'Tata Consultancy Services Ltd.' = '... Limited'."""
+    return re.sub(r"\b(limited|ltd|the|india|co|company)\b|[^a-z0-9]", "", (name or "").lower())
+
+
+def _saved_company(name, root=None):
+    """The newest saved company whose name matches (an earlier Export upload), as a dict, or None."""
+    root, want = root or MODELS, _norm(name)
+    for m in list_models(root):  # newest first
+        if _norm(m["company"]) == want:
+            with contextlib.suppress(HTTPException):
+                return load_model(m["id"], root).company.model_dump()
+    return None
+
+
+def _spans(years):
+    """[(FY2019, why), (FY2020, why)...] -> "FY2019 to FY2022: why" lines, consecutive years with one reason joined."""
+    out = []
+    for y, why in sorted(years):
+        if out and out[-1][2] == why and int(y[2:]) == int(out[-1][1][2:]) + 1:
+            out[-1][1] = y
+        else:
+            out.append([y, y, why])
+    return [f"{a}{'' if a == b else f' to {b}'}: {why}" for a, b, why in out]
+
+
+def fetch_company(sym, old=None, documents=True, today=None):
+    """Build a company from NSE's filings, step by step: yields {"step"} (plain words), {"company": payload} once the
+    numbers are ready, {"report"} per document kept, {"note"} for what failed, then {"done"}. Every number comes from the
+    filings by rules (model.from_filings); a Export company (the open model's, an earlier upload of the same company,
+    or Export's public page when the local adapter is installed) fills only the years the filings lack."""
+    c, today = nse(), today or datetime.now()
+    yield {"step": f"Finding {sym} on NSE…"}
+    q = sources.quote(c, sym)
+    name = q["name"]
+    yield {"step": f"Listing {name}’s results filings…"}
+    fs = sources.filings(c, sym)
+    annual = [f for f in fs if f["kind"] == "annual"]
+    cons = bool(annual) and any(f["consolidated"] for f in annual if f["end"] == annual[0]["end"])
+    basis = "consolidated" if cons else "standalone"
+    ann = [f for f in annual if f["consolidated"] == cons][:FETCH_YEARS]
+    qtr = [f for f in fs if f["kind"] == "quarter" and f["consolidated"] == cons][:FETCH_QUARTERS]
+    notes, read, mappings = [], [], load_mappings(MODELS)
+
+    def grab(f, label):
+        try:
+            data, _ = c.get(f["url"], None, sources.MAX_XBRL)  # a filed document never changes: cached for good
+            x = model.parse_xbrl(data, mappings=mappings)
+        except (sources.Offline, ValueError) as e:
+            notes.append(f"{label} results couldn’t be read: {e}")
+            return None
+        fid = hashlib.sha1(data).hexdigest()[:12]
+        _write(MODELS / FILINGS / f"{fid}.xml", data)  # re-read by rules when a mapping is approved, like an upload
+        return {"id": fid, "file": f"NSE {sym} {label} {basis}.xml", **x}
+
+    if ann:
+        yield {"step": f"Reading {len(ann)} annual results ({model.fy(ann[-1]['end'])} to {model.fy(ann[0]['end'])})…"}
+    for i, f in enumerate(ann):
+        yield {"detail": f"{model.fy(f['end'])} ({i + 1} of {len(ann)})"}
+        if (x := grab(f, model.fy(f["end"]))) and x["kind"] == "annual":
+            read.append(x)
+    quarters = []
+    if qtr:
+        yield {"step": f"Reading the latest {len(qtr)} quarterly results…"}
+    for i, f in enumerate(qtr):
+        yield {"detail": f"{f['end']:%b %Y} ({i + 1} of {len(qtr)})"}
+        if (x := grab(f, f"{f['end']:%b %Y} quarter")) and x["kind"] == "quarter":
+            quarters.append(x)
+
+    other, whose = (old, "this model") if old else (_saved_company(name), "your earlier Export upload")
+    if other is None and export_source is not None:
+        yield {"step": "Reading older years from Export’s public page…"}
+        try:
+            other, whose = export_source.company(sym, MODELS / CACHE), "Export’s public page"
+        except (sources.Offline, ValueError) as e:
+            notes.append(f"Export’s page couldn’t be read: {e}")
+    try:
+        filed, skipped = model.from_filings(name, read, quarters + read, q, least=1 if other else 2)
+        why = None
+    except ValueError as e:
+        filed, skipped, why = None, [], str(e)
+    yield {"step": "Putting the history together…"}
+    filled, mism = [], []
+    if filed and other:
+        co, filled, mism = model.merge(filed, other)
+        if old or whose != "Export’s public page":
+            co["name"] = other["name"]  # the saved model keeps its name, so the library keeps one row for the company
+    elif filed:
+        co = filed
+    elif other:
+        co = {**other, "market": {**(other.get("market") or {}), **{k: q[k] for k in ("price", "shares", "face_value") if q[k]}},
+              "quarters": model.filing_quarters(quarters + read) or other.get("quarters")}
+    else:
+        raise ValueError(f"{why} {name} may have listed recently. Upload a Export export instead.")
+    labels = model.labels(co["dates"])
+    have = set(labels)
+    no_bs = {s["year"] for s in skipped}
+    listed = sources._date((q.get("listed") or "")[:11])
+    last = int(labels[-1][2:])
+    gaps = [(f"FY{y}", "NSE’s results filings for these years carry no balance sheet in XBRL"
+             if f"FY{y}" in no_bs else f"listed on NSE in {listed:%b %Y}, so no results before that"
+             if listed and listed.year >= y else "no results filing in XBRL on NSE (it starts in 2018-19)")
+            for y in range(last - FETCH_YEARS + 1, last + 1) if f"FY{y}" not in have]
+    prev = (other or {}).get("source") or {}  # a refreshed model that was fetched before keeps saying where years came from
+    source = {"symbol": sym, "exchange": "NSE", "basis": basis, "industry": q.get("industry"),
+              "fetched_at": today.isoformat(timespec="seconds"), "price_at": _ago(q["age"]),
+              "years": {y: (prev.get("years") or {}).get(y, "Export") if y in filled or not filed else "NSE filing"
+                        for y in labels},
+              "missing": _spans(gaps), "from": whose if filled or (not filed and other) else None,
+              "mismatches": [{**m, "filing": round(m["filing"], 2), "export": round(m["export"], 2)} for m in mism],
+              "notes": notes, "documents": []}
+    co["source"] = source
+    payload = _company_payload(co, (), read)
+    restated = restatements(co, MODELS)
+    payload["restated"], payload["fetched"] = restated, {"filings": read}
+    yield {"company": payload}
+    if not documents:
+        yield {"done": True}
+        return
+
+    yield {"step": "Looking for the annual report and the latest call transcript…"}
+    try:
+        ars = sources.annual_reports(c, sym)
+        docs = sources.documents(c, sym, today)
+    except sources.Offline as e:
+        yield {"note": f"The documents list couldn’t be read: {e}"}
+        ars, docs = [], []
+    source["documents"] = [{"date": d["date"].date().isoformat(), "kind": d["kind"], "title": d["title"], "url": d["url"]}
+                           for d in docs[:8]] + [{"date": None, "kind": "annual", "title": f"Annual report {a['year']}",
+                                                 "url": a["url"]} for a in ars[:3]]
+    yield {"documents": source["documents"]}
+    want = []
+    if ars and ars[0]["pdf"]:
+        want.append((ars[0]["url"], f"the {ars[0]['year']} annual report", ars[0]["year"], "annual",
+                     f"NSE {sym} annual report {ars[0]['year']}.pdf"))
+    elif ars:
+        yield {"note": f"The {ars[0]['year']} annual report on NSE is a zip file; download it from NSE and attach it "
+                       "on the Checks page."}
+    else:
+        yield {"note": "NSE has no annual report for this company yet (it may have listed this year)."}
+    t = next((d for d in docs if d["kind"] == "transcript"), None)
+    if t:
+        want.append((t["url"], f"the {t['date']:%d %b %Y} call transcript", sources.fy_of(t["date"]), "transcript",
+                     f"NSE {sym} call transcript {t['date']:%Y-%m-%d}.pdf"))
+    else:
+        yield {"note": "No earnings-call transcript filed on NSE in the last two years."}
+    for url, what, year, kind, file in want:
+        yield {"step": f"Downloading {what}…"}
+        try:
+            data, _ = c.get(url, None, MAX_PDF)
+            yield {"detail": f"reading {len(data) / 1048576:.1f} MB of pages"}
+            yield {"report": keep_report(data, file, year, kind)}
+        except (sources.Offline, ValueError) as e:
+            yield {"note": f"Couldn’t keep {what}: {e}"}
+    yield {"done": True}
+
+
+@app.post("/api/nse/fetch")
+def nse_fetch(req: FetchRequest):
+    """fetch_company as a stream of JSON lines, so the page can show each step and stop it (closing the request stops
+    it at the next step; what was downloaded stays cached, so trying again is quick)."""
+    sym = _sym(req.symbol)
+    old = req.company.model_dump() if req.company else None
+
+    def lines():
+        try:
+            for ev in fetch_company(sym, old, req.documents):
+                yield json.dumps(jsonable_encoder(ev), allow_nan=False) + "\n"
+        except (sources.Offline, ValueError) as e:
+            yield json.dumps({"error": str(e)}) + "\n"
+        except Exception as e:  # noqa: BLE001  mid-stream: the status line is already sent, so say it in the stream
+            yield json.dumps({"error": f"Something went wrong building {sym}: {type(e).__name__}. Try again, or "
+                                       "upload a Export export instead."}) + "\n"
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
 # ---------- local model library: models/<company-slug>/<YYYY-MM-DD>.json, one file per company per day ----------

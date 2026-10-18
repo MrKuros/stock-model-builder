@@ -47,7 +47,19 @@ export const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bea
 export interface Market { price: number | null; shares: number | null; price_hist: (number | null)[]; shares_hist: (number | null)[]; face_value?: number | null }
 /** The export's Quarters block (model.QUARTERS keys: sales, op_profit, net_profit, ...), null where Export left a gap. */
 export interface Quarters { dates: string[]; rows: Record<string, (number | null)[]> }
-export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market; quarters?: Quarters | null }
+/** A document NSE lists for the company (5.1): a call transcript, presentation or annual report, linked, not kept. */
+export interface SourceDoc { date: string | null; kind: DocKind; title: string; url: string }
+/** Where a company added by ticker came from (server.fetch_company): words and dates only, no number reads it. */
+export interface Source {
+  symbol: string; exchange: 'NSE'; basis: 'consolidated' | 'standalone'; industry?: string | null
+  fetched_at: string; price_at: string | null
+  years: Record<string, string> // FY2024 -> "NSE filing" | "Export"
+  missing: string[] // "FY2019 to FY2022: why"
+  from: string | null // who filled the years filings lack: "Export’s public page", "your Export export"...
+  mismatches: { year: string; line: string; filing: number; export: number }[] // over 1%, on years both have
+  notes: string[]; documents: SourceDoc[]
+}
+export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market; quarters?: Quarters | null; source?: Source | null }
 /** Trailing twelve months (model.ttm): the four quarters ending `end`, each row summed (null if one is missing). */
 export interface Ttm { end: string; values: Row }
 /** A reported figure that moved > 0.5% against the latest saved model of this company (server.restatements). */
@@ -222,6 +234,7 @@ export interface Parsed {
   ttm?: Ttm | null // null: no quarters, or the last four aren't consecutive
   ttm_prev?: Ttm | null // the four quarters a year earlier, for TTM growth
   restated?: Restated | null // only on a fresh upload; null when no model of this company is saved
+  fetched?: { filings: Filing[] } // added by ticker: the annual results filings its years were read from
   rule_checks?: RuleCheck[] // red, amber, clear, then needs-a-filing (missing on an old server)
   forensic?: Forensic[] // the full radar, fixed order (missing on an old server)
   key_numbers?: KeyNumber[]
