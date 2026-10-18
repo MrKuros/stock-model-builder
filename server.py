@@ -1282,11 +1282,12 @@ FETCH_YEARS, FETCH_QUARTERS = 10, 8  # annual and quarterly results filings read
 _clients = {}
 
 
-def nse():
+def nse(root=None):
     """One polite client per library folder (one request a second, shared by every request)."""
-    if MODELS not in _clients:
-        _clients[MODELS] = sources.Client(MODELS / CACHE / "nse")
-    return _clients[MODELS]
+    root = root or MODELS
+    if root not in _clients:
+        _clients[root] = sources.Client(root / CACHE / "nse")
+    return _clients[root]
 
 
 def _sym(s):
@@ -1507,6 +1508,8 @@ def _stream(events, doing, instead):
                 yield json.dumps(jsonable_encoder(ev), allow_nan=False) + "\n"
         except (sources.Offline, ValueError) as e:
             yield json.dumps({"error": str(e)}) + "\n"
+        except HTTPException as e:
+            yield json.dumps({"error": str(e.detail)}) + "\n"
         except Exception as e:  # noqa: BLE001
             yield json.dumps({"error": f"Something went wrong {doing}: {type(e).__name__}. Try again, or {instead}."}) + "\n"
     return StreamingResponse(lines(), media_type="application/x-ndjson")
@@ -1630,6 +1633,149 @@ def check_all(today=None):
 def track_check():
     """check_all as JSON lines; closing the request stops it after the company in hand."""
     return _stream(check_all(), "checking for new results", "use Refresh on each company")
+
+
+# ---------- watchlist (5.4): the coverage page's prices and history, rules only ----------
+
+WATCH = "watch.json"  # library root (list_models reads only */*.json): {"symbols": [...], "history": {slug: [...]}}
+WATCH_MAX = 100  # tickers watched without a model
+HISTORY_MAX = 750  # ponytail: one point a day per company (about three years), oldest dropped; a file per company past that
+TRIES = 2  # failed price checks in a row before the rest are left for later (NSE down or refusing)
+
+
+def _watch(root=None, strict=False):
+    """The watch file, or an empty one. strict: a damaged file is a 409, so a write never replaces it."""
+    p = (root or MODELS) / WATCH
+    try:
+        w = json.loads(p.read_bytes())
+        if isinstance(w, dict) and isinstance(w.get("symbols"), list) and isinstance(w.get("history"), dict):
+            return w
+    except FileNotFoundError:
+        return {"symbols": [], "history": {}}
+    except (OSError, ValueError):
+        pass
+    if strict:
+        raise HTTPException(409, f"{WATCH} in the models folder is damaged; move it away and try again.")
+    return {"symbols": [], "history": {}}
+
+
+def _live(root, sym):
+    """The last NSE quote kept for a symbol, however old, without going online; None when there's none or no price."""
+    if not sym:
+        return None
+    try:
+        q = sources.quote(nse(root), sources.symbol(sym), cached=True)
+    except (sources.Offline, ValueError):
+        return None
+    return q if q["price"] else None
+
+
+def watchlist(root=None):
+    """Watched tickers with their cached price, and the daily price-against-value history per company."""
+    root = root or MODELS
+    w = _watch(root)
+    out = []
+    for x in w["symbols"]:
+        q = _live(root, x.get("symbol"))
+        out.append({"symbol": x.get("symbol"), "name": x.get("name"), "added_at": x.get("added_at"),
+                    "price": q and q["price"], "at": q and _ago(q["age"]), "industry": q and q["industry"]})
+    return {"watch": out, "history": w["history"]}
+
+
+def watch_add(sym, root=None, now=None):
+    root = root or MODELS
+    w = _watch(root, strict=True)
+    if any(x.get("symbol") == sym for x in w["symbols"]):
+        return w
+    if len(w["symbols"]) >= WATCH_MAX:
+        raise HTTPException(422, f"The watchlist holds {WATCH_MAX} tickers; remove one first.")
+    q = sources.quote(nse(root), sym)  # the name, and proof the symbol trades
+    w["symbols"].append({"symbol": sym, "name": q["name"], "added_at": (now or datetime.now()).isoformat(timespec="seconds")})
+    _write(root / WATCH, json.dumps(w).encode())
+    return w
+
+
+def snapshot(rows, root=None, now=None):
+    """Today's point (price, bear, base, bull per share) for each company's newest version; replaces an earlier one
+    from today, so a company has at most one point a day."""
+    root = root or MODELS
+    w, day = _watch(root, strict=True), (now or datetime.now()).date().isoformat()
+    for m in rows:
+        v = m.get("values") or {}
+        if m.get("price") is None or v.get("base") is None:
+            continue
+        r = lambda x: None if x is None else round(x, 2)  # noqa: E731
+        pts = [p for p in w["history"].get(slug_of(m["id"]), []) if p[0] != day]
+        w["history"][slug_of(m["id"])] = (pts + [[day, r(m["price"]), r(v.get("bear")), r(v["base"]), r(v.get("bull"))]])[-HISTORY_MAX:]
+    _write(root / WATCH, json.dumps(w).encode())
+
+
+def slug_of(model_id):
+    return model_id.split("/")[0]
+
+
+def latest_models(root=None):
+    """list_models, newest version of each company only."""
+    seen, out = set(), []
+    for m in list_models(root):
+        if slug_of(m["id"]) not in seen:
+            seen.add(slug_of(m["id"]))
+            out.append(m)
+    return out
+
+
+def refresh_prices(root=None, now=None):
+    """Today's NSE price for every company added by ticker and every watched ticker whose cached quote is over 15
+    minutes old (one request a second), then today's history point. Yields {step}, {failed: {symbol, text}}, then
+    {done, checked, missed, stopped, left}. Nothing here calls the LLM or changes a saved model."""
+    root = root or MODELS
+    syms = list(dict.fromkeys([m["symbol"] for m in latest_models(root) if m.get("symbol")] +
+                              [x.get("symbol") for x in _watch(root)["symbols"] if x.get("symbol")]))
+    c, checked, failed, run, stopped = nse(root), 0, 0, 0, False
+    todo = [s for s in syms if not ((q := _live(root, s)) and q["age"] < sources.PRICE_AGE)]
+    for i, s in enumerate(todo):
+        yield {"step": f"Checking today’s prices on NSE: {s} ({i + 1} of {len(todo)})…"}
+        try:
+            if sources.quote(c, sources.symbol(s))["age"] >= sources.PRICE_AGE:  # the site failed; the cache answered
+                raise sources.Offline("NSE didn’t answer, so the price shown is the last one kept.")
+            checked, run = checked + 1, 0
+        except (sources.Offline, ValueError) as e:
+            failed, run = failed + 1, run + 1
+            yield {"failed": {"symbol": s, "text": str(e)}}
+            if run >= TRIES:
+                stopped = True
+                break
+    snapshot(latest_models(root), root, now)
+    yield {"done": True, "checked": checked, "missed": failed, "stopped": stopped, "left": len(todo) - checked - failed}
+
+
+@app.get("/api/watch")
+def watch_list():
+    return watchlist()
+
+
+@app.post("/api/watch")
+def watch_post(req: SymbolRequest):
+    """Watch a ticker without modelling it (its name and price come from NSE once, now)."""
+    try:
+        watch_add(_sym(req.symbol))
+    except sources.Offline as e:
+        raise HTTPException(503, str(e))
+    return watchlist()
+
+
+@app.delete("/api/watch/{symbol}")
+def watch_delete(symbol: str):
+    sym, w = _sym(symbol), _watch(strict=True)
+    w["symbols"] = [x for x in w["symbols"] if x.get("symbol") != sym]
+    _write(MODELS / WATCH, json.dumps(w).encode())
+    return watchlist()
+
+
+@app.post("/api/watch/prices")
+def watch_prices():
+    """refresh_prices as JSON lines; closing the request stops it after the price in hand."""
+    return _stream(refresh_prices(), "checking prices", "the prices shown are the last ones kept")
 
 
 # ---------- peers (5.2): rules find candidates, the AI picks by business mix, rules check and compare ----------
@@ -1815,8 +1961,13 @@ def list_models(root=None):
             labels = model.labels(co["dates"])
             checks = model.rule_checks(co["hist"], labels, model.detect_oneoffs(co["hist"], labels),
                                        model.data_checks(doc.company.model_dump()), doc.notes)
+            sym = (doc.company.source or {}).get("symbol")
+            live = _live(root, sym)
+            if live and doc.valuation.price is None:  # today's price, from the cache only (a typed price stays)
+                co["market"] = {**co["market"], "price": live["price"]}
             cover = _coverage(projs, co, ex, doc.valuation.model_dump())
             rec = doc.track[-1] if doc.track else {}
+            q = co.get("quarters") or {}
         except Exception:  # noqa: BLE001
             continue  # ponytail: skip any unreadable file, never fail the whole list
         out.append({"id": model_id, "company": doc.company.name, "active": doc.active, "n": n,
@@ -1824,7 +1975,9 @@ def list_models(root=None):
                     "revenue": last if last is not None and math.isfinite(last) else None,
                     "flags": sum(c["status"] in ("red", "amber") for c in checks), "reviewed_at": doc.reviewed_at,
                     # results that came in since you last marked it reviewed (5.3)
-                    "symbol": (doc.company.source or {}).get("symbol"),
+                    "symbol": sym, "price_saved": doc.company.market.price,
+                    "price_at": _ago(live["age"]) if live else (doc.company.source or {}).get("price_at"),
+                    "price_live": bool(live), "results_to": max([str(co["dates"][-1])[:10], *[str(d)[:10] for d in (q.get("dates") or [])[-1:]]]),
                     "new_results": rec.get("new_years") if rec and _before(doc.reviewed_at, rec.get("recorded_at")) else None,
                     **cover})
     # ponytail: parses and projects every file per listing; fine for hundreds, add an index file past that

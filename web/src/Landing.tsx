@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { MiniRange, latestOf, rangeWords, slugOf } from './Shell'
 import { pathOf, placed } from './route'
-import { NAMES, api, fmt, rs, when, type ModelSummary, type Parsed, type Report } from './lib'
-import { AddBox, FetchRun, streamFetch } from './Fetch'
+import { NAMES, api, fmt, postJson, rs, when, type ModelSummary, type Parsed, type Report, type WatchList } from './lib'
+import { AddBox, FetchRun, ago, streamFetch } from './Fetch'
+import { month } from './Statements'
+import { Prices, Spark, WatchSection } from './Watch'
 
 interface Props {
   models: ModelSummary[] | null
@@ -10,12 +12,50 @@ interface Props {
   onAdd: (p: Parsed, reports?: Report[]) => Promise<void> // saves the new company and opens its Overview
   onDeleted: (id: string) => void
   onChecked: (saved: { id: string; saved_at: string }[]) => void // "Check all for new results" saved these versions
+  onReload: () => void // prices were refreshed: list again (values are recomputed at today's price)
+}
+
+const SORTS = {
+  cheap: 'Cheapest against our value',
+  flags: 'Most warning signs',
+  changed: 'Recently changed',
+  name: 'Name, A to Z',
+} as const
+const FILTERS = {
+  all: 'All companies',
+  below: 'Price below our base value',
+  flags: 'With warning signs',
+  results: 'New results to review',
+  draft: 'Not reviewed yet',
+} as const
+type Sort = keyof typeof SORTS
+type Filter = keyof typeof FILTERS
+const upside = (m: ModelSummary) => (m.price && m.values?.base != null ? m.values.base / m.price - 1 : null)
+const PREFS = 'financial-model:coverage' // the sort and filter you last chose, this browser only
+function pref<T extends string>(key: 'sort' | 'filter', ok: Record<T, string>, dflt: T): T {
+  try { const v = JSON.parse(localStorage.getItem(PREFS) ?? '{}')[key]; return v in ok ? v : dflt } catch { return dflt }
 }
 
 /** Your companies: every saved model with its price against our value range, and the add-a-company panel (a name or
  * NSE symbol, or a Export export). With an empty library it is the first-run screen, then straight to the Overview.
  * /?add=TCS (the company switcher's box) starts adding that symbol here. */
-export default function Landing({ models, error: listError, onAdd, onDeleted, onChecked }: Props) {
+export default function Landing({ models, error: listError, onAdd, onDeleted, onChecked, onReload }: Props) {
+  const [watch, setWatch] = useState<WatchList | null>(null)
+  const [watchMsg, setWatchMsg] = useState<string | null>(null)
+  const [sort, setSort] = useState<Sort>(() => pref('sort', SORTS, 'cheap'))
+  const [filter, setFilter] = useState<Filter>(() => pref('filter', FILTERS, 'all'))
+  useEffect(() => { try { localStorage.setItem(PREFS, JSON.stringify({ sort, filter })) } catch { /* private window */ } }, [sort, filter])
+  const loadWatch = () => api<WatchList>('/api/watch').then(setWatch).catch(() => setWatch({ watch: [], history: {} }))
+  useEffect(() => { loadWatch() }, [])
+  const watchIt = async (symbol: string) => {
+    setWatchMsg(`Looking up ${symbol} on NSE…`)
+    try {
+      const w = await api<WatchList>('/api/watch', postJson({ symbol }))
+      setWatch(w)
+      const x = w.watch.find(x => x.symbol === symbol)
+      setWatchMsg(`Watching ${x?.name ?? symbol}. It’s listed under “Watching” below.`)
+    } catch (e) { setWatchMsg(`Couldn’t watch ${symbol}: ${(e as Error).message}`) }
+  }
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [over, setOver] = useState(false)
@@ -75,7 +115,7 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
   const uploadLink = <button type="button" className="link" disabled={!!busy} onClick={() => input.current?.click()}>Upload a Export export instead</button>
   const box = () => adding
     ? <FetchRun key={adding} symbol={adding} onAdd={onAdd} onClose={() => setAdding(null)} upload={uploadLink} />
-    : <AddBox models={models} onAdd={setAdding} upload={uploadLink} busy={!!busy} />
+    : <AddBox models={models} onAdd={setAdding} onWatch={models?.length ? watchIt : undefined} upload={uploadLink} busy={!!busy} />
 
   if (models == null) return <main id="main" className="page" tabIndex={-1}><p className="muted pad" role="status">Opening your companies…</p></main>
 
@@ -102,9 +142,18 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
     </main>
   )
 
-  // newest version of each company leads; older days follow, dimmed
+  // the newest version of each company is the list; older saved days sit in a fold under it
   const latest = latestOf(models)
   const isLatest = new Set(latest.map(m => m.id))
+  const older = models.filter(m => !isLatest.has(m.id))
+  const shown = latest.filter(m => filter === 'all' ? true
+    : filter === 'below' ? (upside(m) ?? -1) > 0
+    : filter === 'flags' ? (m.flags ?? 0) > 0
+    : filter === 'results' ? !!m.new_results?.length
+    : !m.reviewed_at)
+  const by = (f: (m: ModelSummary) => number | null) => (x: ModelSummary, y: ModelSummary) => (f(y) ?? -Infinity) - (f(x) ?? -Infinity)
+  shown.sort(sort === 'cheap' ? by(upside) : sort === 'flags' ? by(m => m.flags ?? null)
+    : sort === 'changed' ? by(m => (m.saved_at ? new Date(m.saved_at).getTime() : null)) : (x, y) => x.company.localeCompare(y.company))
   const below = latest.filter(m => m.price != null && m.values?.bear != null && m.price < m.values.bear)
   const above = latest.filter(m => m.price != null && m.values?.bull != null && m.price > m.values.bull)
   const count = (ms: ModelSummary[], one: string, many: string) => ms.length === 1 ? `${ms[0].company} ${one}` : `${ms.length} companies ${many}`
@@ -129,36 +178,39 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
             <p className="small muted">On export.in open the company and click <b>Export to Excel</b> (free account).{' '}
               <button type="button" className="link" disabled={!!busy} onClick={sample}>Try a sample company</button> (made-up numbers).</p>
           </details>
+          {watchMsg && <p className="small" role="status">{watchMsg}</p>}
           {err}
         </div>
       </div>
 
       <section aria-labelledby="library-head">
         <h2 id="library-head" ref={libHead} tabIndex={-1} className="label sec-label">
-          <span>Companies · <b>price against our value range</b></span><span>newest first</span>
+          <span>Companies · <b>price against our value range</b></span><span>{latest.length}</span>
         </h2>
+        <Prices models={latest} watch={watch?.watch ?? []} onDone={() => { onReload(); loadWatch() }} />
         {latest.some(m => m.symbol) && <CheckAll n={latest.filter(m => m.symbol).length} onSaved={onChecked} />}
+        <div className="cov-tools">
+          <label>Sort by <select value={sort} onChange={e => setSort(e.target.value as Sort)}>
+            {Object.entries(SORTS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
+          <label>Show <select value={filter} onChange={e => setFilter(e.target.value as Filter)}>
+            {Object.entries(FILTERS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
+          <span className="small muted" role="status">{shown.length === latest.length ? `${latest.length} compan${latest.length === 1 ? 'y' : 'ies'}` : `${shown.length} of ${latest.length} companies`}</span>
+        </div>
         <div className="legend" aria-hidden="true">
           <span><i className="lg-band" />Our value range, cautious (bear) to hopeful (bull)</span>
           <span><i className="lg-mkt" />Today’s price</span>
+          {Object.values(watch?.history ?? {}).some(h => h.length > 1) && <span><i className="lg-line ours" />Base value and <i className="lg-line mkt" />price, day by day</span>}
         </div>
-        <ul className="cov">
-          {models.map(m => { const latest = isLatest.has(m.id); return (
-            <li key={m.id} className={`cov-row${latest ? '' : ' old'}`}>
-              <a className="cov-open" href={pathOf(slugOf(m.id), m.values?.base == null ? 'forecast' : 'overview', '', latest ? null : m.id.split('/')[1])}>
-                <span className="co"><strong>{m.company}</strong>
-                  <span>{m.saved_at ? when(m.saved_at) : '–'} · {NAMES[m.active]} · {m.n} yrs
-                    {m.reviewed_at ? ' · reviewed' : ' · draft'}{latest ? '' : ' · older version'}</span></span>
-                <MiniRange price={m.price ?? null} bear={m.values?.bear ?? null} base={m.values?.base ?? null} bull={m.values?.bull ?? null} />
-                <span className="pf">{coverText(m)}</span>
-                <span className="fl">{latest && m.new_results?.length ? <><span className="tag prop">New {m.new_results.join(', ')} results</span></> : null}{m.flags == null ? '' : m.flags ? `${m.flags} warning sign${m.flags > 1 ? 's' : ''}` : 'No warning signs'}</span>
-              </a>
-              <button type="button" className="link lib-del" disabled={!!busy} onClick={() => remove(m)}
-                aria-label={`Delete ${m.company}, saved ${m.saved_at ? when(m.saved_at) : 'earlier'}`}>Delete</button>
-            </li>
-          ) })}
-        </ul>
+        {shown.length === 0
+          ? <p className="pad-s">No company matches “{FILTERS[filter]}”. <button type="button" className="link" onClick={() => setFilter('all')}>Show all companies</button></p>
+          : <ul className="cov">{shown.map(m => <Row key={m.id} m={m} hist={watch?.history[slugOf(m.id)]} busy={!!busy} onDelete={remove} />)}</ul>}
+        {older.length > 0 && <details className="fold older">
+          <summary>{older.length} older saved day{older.length > 1 ? 's' : ''} (earlier versions of these models)</summary>
+          <ul className="cov">{older.map(m => <Row key={m.id} m={m} old busy={!!busy} onDelete={remove} />)}</ul>
+        </details>}
       </section>
+      <WatchSection list={watch} models={latest} onChange={setWatch}
+        onBuild={sym => { setAdding(sym); window.scrollTo({ top: 0 }) }} />
       <footer className="foot">
         <p>Works for manufacturing, services and other non-financial companies; banks, NBFCs and insurers aren’t
           supported. Models save themselves to the <code>models</code> folder next to the app. Analysis, not a
@@ -166,6 +218,44 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
       </footer>
     </main>
   )
+}
+
+/** One company on the coverage list: name and status, price against our range (with its day-by-day history), what
+ * the price assumes, upside to our base, warning signs and results. */
+function Row({ m, old, hist, busy, onDelete }: { m: ModelSummary; old?: boolean; hist?: Parameters<typeof Spark>[0]['pts']; busy: boolean; onDelete: (m: ModelSummary) => void }) {
+  const up = upside(m)
+  return (
+    <li className={`cov-row${old ? ' old' : ''}`}>
+      <a className="cov-open" href={pathOf(slugOf(m.id), m.values?.base == null ? 'forecast' : 'overview', '', old ? m.id.split('/')[1] : null)}>
+        <span className="co"><strong>{m.company}</strong>
+          <span>{m.symbol ? `NSE: ${m.symbol} · ` : ''}changed {m.saved_at ? when(m.saved_at) : '–'} · {NAMES[m.active]} · {m.n} yrs
+            {m.reviewed_at ? ' · reviewed' : ' · draft'}{old ? ' · older version' : ''}</span></span>
+        <span className="rng">
+          <MiniRange price={m.price ?? null} bear={m.values?.bear ?? null} base={m.values?.base ?? null} bull={m.values?.bull ?? null} />
+          {!old && <Spark pts={hist} />}
+        </span>
+        <span className="pf">{coverText(m)}{!old && <PriceNote m={m} />}</span>
+        <span className="fl">
+          {up != null && <span className={`up num${up >= 0 ? ' ours' : ''}`} title="Our base value against today’s price">{up >= 0 ? '+' : '−'}{fmt(Math.abs(up), 'pct')}<span className="small"> {up >= 0 ? 'base above price' : 'base below price'}</span></span>}
+          {!old && m.new_results?.length ? <span className="tag prop">New {m.new_results.join(', ')} results</span> : null}
+          <span>{m.flags == null ? '' : m.flags ? `${m.flags} warning sign${m.flags > 1 ? 's' : ''}` : 'No warning signs'}</span>
+          {m.results_to && <span className="small muted">Results to {month(m.results_to)}</span>}
+        </span>
+      </a>
+      <button type="button" className="link lib-del" disabled={busy} onClick={() => onDelete(m)}
+        aria-label={`Delete ${m.company}, saved ${m.saved_at ? when(m.saved_at) : 'earlier'}`}>Delete</button>
+    </li>
+  )
+}
+
+/** Where the price came from when it isn't the one saved in the model. */
+function PriceNote({ m }: { m: ModelSummary }) {
+  if (!m.symbol) return null
+  if (!m.price_live) return <><br /><span className="small muted">Price saved with the model, {ago(m.price_at)}</span></>
+  const moved = m.price_saved && m.price != null ? m.price / m.price_saved - 1 : null
+  return moved != null && Math.abs(moved) >= 0.005
+    ? <><br /><span className="small muted">Today’s price, {moved > 0 ? 'up' : 'down'} {fmt(Math.abs(moved), 'pct')} since the model was saved; open it and Refresh to keep it there</span></>
+    : null
 }
 
 function coverText(m: ModelSummary): ReactNode {

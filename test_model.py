@@ -10,7 +10,7 @@ import statistics
 import subprocess
 import tempfile
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import openpyxl
@@ -1371,6 +1371,7 @@ def library_check(root, co, scenarios):
     fetch_api_check(server, root, co, data)
     peers_api_check(server, root, co, data)
     track_check(server, root, co, data)
+    watch_check(server, data)
 
 
 def reimport_check(server, root, co, data):
@@ -2808,6 +2809,89 @@ def _blank(tmp):
     p = tmp / "blank.xlsx"
     openpyxl.Workbook().save(p)
     return p
+
+
+
+def watch_check(server, data):
+    """5.4 the coverage page, offline: today's price comes from the cache only when listing (never online), values are
+    recomputed at it (a typed price stays), a refresh asks NSE only for quotes over 15 minutes old and stops after two
+    failures in a row, one history point per company per day, watched tickers without a model, a damaged watch file
+    never overwritten. Listing, refreshing and watching never call the LLM."""
+    import sources  # noqa: PLC0415
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    root = Path(tempfile.mkdtemp())
+    quote = sources.NSE + "/api/NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N&series="
+
+    def q(name, price):
+        return {"equityResponse": [{"metaData": {"companyName": name}, "tradeInfo": {"lastPrice": price, "issuedSize": 5e7},
+                                    "secInfo": {"industryInfo": "Widgets"}, "lastUpdateTime": "16-Oct-2026 16:00:00"}]}
+    net = {quote + "EQ&symbol=TESTIND": q("Test Industries Limited", 1650.0), quote + "EQ&symbol=NEWCO": {"equityResponse": []},
+           quote + "BE&symbol=NEWCO": q("New Co Limited", 311.0)}  # a new listing trades in BE
+    calls, online = [], [True]
+    client, models, llm = TestClient(server.app), server.MODELS, ai.llm
+    server.MODELS, ai.llm = root, None
+    server._clients.clear()
+    try:
+        c = server.nse()
+        c.opener, c.gap = _fake_socket(net, calls, online)(), 0.0
+        by_ticker = dict(data, valuation=dict(data["valuation"], price=None),  # data's typed price would hide today's
+                         company=dict(data["company"], name="Ticker Co", source={"symbol": "TESTIND", "price_at": "2026-10-01T09:00:00"}))
+        mid, _ = server.save_model(server.ModelDoc.model_validate(by_ticker), root, now=datetime(2026, 10, 1, 9, 0))
+        server.save_model(server.ModelDoc.model_validate(data), root, now=datetime(2026, 10, 1, 9, 0))  # an upload, no symbol
+        saved = data["company"]["market"]["price"]
+        row = lambda: next(m for m in server.list_models(root) if m["company"] == "Ticker Co")  # noqa: E731
+        r0 = row()
+        assert r0["price"] == saved and not r0["price_live"] and r0["price_at"] == "2026-10-01T09:00:00" and not calls, r0
+        assert r0["results_to"] == data["company"]["quarters"]["dates"][-1][:10] > data["company"]["dates"][-1][:10], r0  # a later quarter
+        # watch: strict symbols before any request, then the name from NSE once
+        assert client.get("/api/watch").json() == {"watch": [], "history": {}}
+        assert client.post("/api/watch", json={"symbol": "../x"}).status_code == 422 and not calls
+        w = client.post("/api/watch", json={"symbol": "newco"}).json()["watch"]
+        assert [(x["symbol"], x["name"], x["price"]) for x in w] == [("NEWCO", "New Co Limited", 311.0)], w
+        client.post("/api/watch", json={"symbol": "NEWCO"})
+        assert len(client.get("/api/watch").json()["watch"]) == 1
+        # refresh: only the stale or missing quote is asked for (NEWCO's is minutes old), then a history point each
+        n = len(calls)
+        ev = [json.loads(x) for x in client.post("/api/watch/prices").text.splitlines()]
+        assert [e["step"] for e in ev if "step" in e] == ["Checking today’s prices on NSE: TESTIND (1 of 1)…"], ev
+        assert ev[-1] == {"done": True, "checked": 1, "missed": 0, "stopped": False, "left": 0} and len(calls) == n + 1, ev
+        r1 = row()
+        assert r1["price"] == 1650 and r1["price_saved"] == saved and r1["price_live"], r1
+        assert r1["values"]["base"] is not None and r1["implied"] != r0["implied"], (r0, r1)  # recomputed at today's price
+        h = client.get("/api/watch").json()["history"]
+        assert set(h) == {"ticker-co", "test-industries-ltd"} and h["ticker-co"][0][1:3] == [1650.0, round(r1["values"]["bear"], 2)], h
+        # the opened model keeps its own saved price (Refresh there saves today's); a typed price is never replaced
+        assert server.load_model(mid, root).company.market.price == saved
+        typed = dict(by_ticker, valuation=dict(data["valuation"], price=999.0))
+        server.save_model(server.ModelDoc.model_validate(typed), root, now=datetime(2026, 10, 2, 9, 0))
+        assert row()["price"] == 999.0
+        # again within 15 minutes: no request; same day: still one point; the next day adds one
+        n = len(calls)
+        list(server.refresh_prices(root))
+        assert len(calls) == n and len(server._watch(root)["history"]["ticker-co"]) == 1
+        list(server.refresh_prices(root, now=datetime.now() + timedelta(days=1)))
+        assert len(server._watch(root)["history"]["ticker-co"]) == 2
+        # offline: stale quotes are still listed (with their time); a refresh says which failed and stops after two
+        for f in (root / server.CACHE / "nse").glob("*.bin"):
+            os.utime(f, (0, 0))
+        online[0] = False
+        ev = [json.loads(x) for x in client.post("/api/watch/prices").text.splitlines()]
+        assert [e["failed"]["symbol"] for e in ev if "failed" in e] == ["TESTIND", "NEWCO"] and ev[-1]["stopped"], ev
+        assert "didn’t answer" in next(e for e in ev if "failed" in e)["failed"]["text"]
+        assert client.get("/api/watch").json()["watch"][0]["price"] == 311.0
+        assert next(m for m in server.list_models(root) if m["id"] == mid)["price"] == 1650
+        online[0] = True
+        # remove; a damaged file is never overwritten (409), and reads as empty
+        assert client.delete("/api/watch/NEWCO").json()["watch"] == []
+        (root / server.WATCH).write_text("{oops")
+        assert client.post("/api/watch", json={"symbol": "NEWCO"}).status_code == 409
+        assert client.get("/api/watch").json() == {"watch": [], "history": {}} and (root / server.WATCH).read_text() == "{oops"
+        assert "error" in json.loads(client.post("/api/watch/prices").text.splitlines()[-1])
+    finally:
+        server.MODELS, ai.llm = models, llm
+        server._clients.clear()
 
 
 if __name__ == "__main__":

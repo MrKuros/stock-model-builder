@@ -1167,3 +1167,32 @@ a.cov-open { color: var(--ink); text-decoration: none; }
 .peer-table tr.peer-rank td { font: 12px var(--num); color: var(--ink-2); }
 .peer-line { margin: 14px 0 0; font-size: 14px; color: var(--ink-2); line-height: 1.5; }
 .peer-line a { white-space: nowrap; }
+
+/* 5.4 coverage page: prices, sort and filter, history sparkline, watched tickers */
+.cov-open { grid-template-columns: minmax(180px, 1.2fr) minmax(0, 1.5fr) minmax(160px, 1.1fr) 130px; }
+.cov-row .rng { display: grid; gap: 4px; min-width: 0; }
+.spark-w { display: inline-flex; align-items: center; gap: 8px; }
+.cov-spark { flex: none; overflow: visible; }
+.cov-spark polyline { fill: none; stroke-width: 1.6; stroke-linejoin: round; }
+.cov-spark .sp-ours { stroke: var(--ours); }
+.cov-spark .sp-mkt { stroke: var(--market); }
+.cov-row .fl { display: grid; gap: 3px; justify-items: start; }
+.cov-row .fl .up { font: 600 17px/1.1 var(--num); font-variation-settings: 'wdth' 85; }
+.cov-row .fl .up .small { font: 400 11.5px var(--ui); color: var(--ink-3); }
+.cov-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin: 4px 0 12px; font-size: 13px; color: var(--ink-2); }
+.cov-tools select { font: inherit; font-size: 13.5px; color: var(--ink); background: var(--panel); border: 1px solid var(--rule-2); border-radius: 5px; padding: 6px 8px; min-height: 36px; margin-left: 6px; max-width: 100%; }
+.cov-tools label { display: inline-flex; align-items: center; flex-wrap: wrap; }
+.prices { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 10px; }
+.prices .warn { color: var(--ink); background: var(--market-soft); border-radius: 4px; padding: 2px 6px; }
+.lg-line { width: 14px !important; height: 2px !important; vertical-align: middle; background: currentColor; margin: 0 4px 0 0 !important; }
+.lg-line.ours { color: var(--ours); } .lg-line.mkt { color: var(--market); }
+details.fold.older { margin-top: 14px; }
+details.fold.older .cov-row:last-child { border-bottom: 0; }
+.pad-s { padding: 10px 0; }
+.watching { margin-top: 34px; }
+.watch-list .cov-row { display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(0, 1fr) auto; gap: 8px 24px; padding: 12px 6px; }
+.w-act { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+@media (max-width: 860px) {
+  .cov-open { grid-template-columns: minmax(0, 1fr); }
+  .watch-list .cov-row { grid-template-columns: minmax(0, 1fr); }
+}

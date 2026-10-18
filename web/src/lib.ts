@@ -296,7 +296,12 @@ export interface ModelSummary {
   why?: string | null; flags?: number; reviewed_at?: string | null
   symbol?: string | null // NSE symbol when it was added by ticker
   new_results?: string[] | null // 5.3: years reported since you last marked it reviewed
+  // 5.4: price is today's NSE price from the cache when there is one (values recomputed at it), price_saved the model's own
+  price_saved?: number | null; price_at?: string | null; price_live?: boolean; results_to?: string
 }
+/** GET /api/watch: tickers watched without a model, and the daily [date, price, bear, base, bull] per company slug. */
+export interface Watched { symbol: string; name: string; added_at: string; price: number | null; at: string | null; industry: string | null }
+export interface WatchList { watch: Watched[]; history: Record<string, [string, number, number | null, number, number | null][]> }
 /** GET /api/models/{id}: the document plus what the dashboard derives from the company. */
 export interface Opened { id?: string; doc?: ModelDoc; parsed: Parsed }
 export interface Projection {

@@ -305,7 +305,7 @@ export default function App() {
                     <p className="purpose">{missing}</p><p><a className="btn" href="/">See all your companies</a></p></div>
                 : <p className="muted pad" role="status">Opening {route.slug.replace(/-/g, ' ')}…</p>}
             </main>
-          : <Landing models={models} error={listError} onAdd={add} onDeleted={deleted} onChecked={checked} />}
+          : <Landing models={models} error={listError} onAdd={add} onDeleted={deleted} onChecked={checked} onReload={loadList} />}
       </div>
     </div>
   )

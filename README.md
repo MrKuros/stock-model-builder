@@ -12,7 +12,7 @@ Numbers come from fixed rules. Words come from an AI command you choose, and eve
 <td><img src="docs/screenshots/note-dark.png" alt="The Overview in dark mode" /></td>
 </tr>
 <tr>
-<td colspan="2"><img src="docs/screenshots/landing.png" alt="Your companies: every company's price against our value range" /></td>
+<td colspan="2"><img src="docs/screenshots/landing.png" alt="Your companies: today's price against our value range for every company, sorted cheapest against our value" /></td>
 </tr>
 </table>
 
@@ -22,7 +22,7 @@ Every company has six pages, each with its own address, so a link, a bookmark, a
 
 | Page | Address | What it answers |
 |---|---|---|
-| Your companies | `/` | Every saved company's price against our value range; add one by dropping a Export export or try the sample |
+| Your companies | `/` | The watchlist: every company's price today against our value range, upside to our base, what the price assumes, warning signs and its latest results, sorted and filtered in plain words; tickers you watch before modelling them; add a company by name or NSE symbol, by Export export, or try the sample |
 | Overview | `/c/<company>/overview` | What the price assumes against what the business does: the verdict, the business in five numbers, price against value, rule checks, thesis, risks and key numbers |
 | Fundamentals | `/c/<company>/fundamentals` | How the business has done: growth over 3, 5 and 10 years, eight charts (revenue, margin, profit, cash against profit, returns, free cash and dividends, receivable days, net cash) and a table of key ratios, each opening the statement row behind it |
 | Statements | `/c/<company>/statements/<profit-and-loss, balance-sheet, cash-flow, ratios, quarters>` | Every reported line, then the forecast in blue |
@@ -34,6 +34,7 @@ The case (bear, base, bull), the forecast years, the Excel download, the save an
 
 ## What it does
 
+- **Add a company by ticker:** type a name or NSE symbol and the app reads NSE's own results filings (XBRL, by rules), today's price and share count, and the latest annual report and call transcript, showing each step in plain words with Stop. It says which years came from where and which are missing; a Export export fills older years, and where both have a year the filing wins and differences over 1% are listed. The client is polite (one request a second, short timeouts, only NSE's hosts) and keeps what it downloads, so it works offline from what it has.
 - **Import:** reads a [Export.in](https://www.export.in) "Export to Excel" workbook: up to 10 years of P&L, balance sheet and cash flow, in ₹ crore.
 - **Data checks:** checks the books before modelling: assets equal liabilities, lines add up to their totals, PBT less tax matches net profit, and year-end changes are flagged. Banks, NBFCs and insurers are detected and rejected with a clear message, because they need a different model.
 - **Defaults from history:** revenue CAGR, three-year ratio-of-sums margins and working-capital days, and a median for lumpy items like capex and other income.
@@ -57,6 +58,9 @@ The case (bear, base, bull), the forecast years, the Excel download, the save an
 - **Forensic radar:** 15 rules for cash conversion, receivable and inventory days, capital WIP, other income, tax swings, debt and interest cover, working capital, a Beneish-style M-score, and (from approved annual-report notes) contingent liabilities, related parties, promoter pledge and the auditor. Each lit flag can be explained from the annual report with a checked quote.
 - **Drafted assumptions:** attach annual reports, earnings-call transcripts or investor presentations, and the AI command proposes bear, base and bull for every driver with a page and a quote. Rules check the quote, the bounds, the company's own 10-year history (a value outside it needs a quote that prints that figure; a quote with no number gets a "size not in the source" note), the order of the cases and the cash consequences; you accept, edit or reject each one.
 - **Thesis writer:** "Write the note" sends the AI command only the numbers on the note (verdict, what moves value, break-evens, key numbers, lit flags, inputs and their sources) and the quotes you approved, never whole pages. It writes a headline, three thesis points, what is priced in, risks, bull and bear triggers and what to watch. Rules reject it unless every number is one the app computed or one in a cited quote, every reference exists, every quote is on its page (a quote from a report whose text is gone only if it was approved), nothing says buy, sell, target price or recommend, nothing says never, always or ever (the history starts at the export's first year), and each part fits its length; a failure is retried once with the reasons, then shown. The saved note is marked AI-written; when an input changes it is marked "written for earlier inputs", and it is only rewritten when you ask.
+- **Peers:** rules list companies in the same NSE sector, close in size, same industry first; the AI command picks 4–8 with a one-line reason each, rules check every pick (on the list, not the company itself, data available, no buy/sell words), and you tick and approve them. Rules then build the comparison table (growth, margins, returns, cash conversion, leverage, P/E, EV/EBITDA, P/B) and rank the company; the Excel export adds a Peers sheet.
+- **Tracking new results:** when new annual results come in, the forecast as it stood is kept, scored input by input against what was reported (a hit is within one step), and the Overview shows what changed: the lines against the forecast, the value range and the growth the price needs before and after, and new or cleared warning signs. Inputs that missed are offered the new rule default; assumptions never change by themselves.
+- **Watchlist:** Your companies shows each company's price today (refreshed from NSE when the page opens and the price is over 15 minutes old, with the time it was checked) against our value range, upside to our base value, what the price assumes against our growth, warning signs, the latest results and a "new results" tag, sorted by cheapest against our value, most warning signs or recently changed, and filtered the same way. A small line per company draws price against our base value day by day. Tickers can be watched before modelling them, with a Build model button. Offline, the last prices kept are shown with their time.
 - **Model library:** models autosave to `models/` locally, and you can reopen any of them from Your companies or the company switcher.
 - **An installable app:** a web app manifest and icons, so Chrome or Edge offers "Install app" and opens it in its own window. Old `#note`, `#model` and `#evidence` links still open the right page.
 - **Excel export:** every projected statement cell is a live formula. Inputs are blue, and a scenario selector switches the whole workbook between base, bull and bear.
@@ -93,10 +97,11 @@ Then open the app, drop in a Export.in export, or click **Try the sample company
 
 ```
 model.py          parse, checks, defaults, projection, ratios, one-offs, valuation, Excel export
-server.py         API + local model library
+server.py         API + local model library and watchlist
+sources.py        NSE client: search, quote, results filings, reports; polite, allow-listed, cached
 ai.py             LLM_CMD calls, PDF page text and picking, quote and number checks
 test_model.py     self-check incl. Excel parity
-web/src/          App (routing, autosave, tab sync), Shell, Workspace, Landing, Note (Overview), Fundamentals, Statements,
+web/src/          App (routing, autosave, tab sync), Shell, Workspace, Landing + Watch (Your companies), Fetch, Peers, Tracking, Note (Overview), Fundamentals, Statements,
                   Model (Forecast), Valuation, Evidence (Checks), Ruler, Draft, DriverStrip, Chart, Sources, route
 ```
 
@@ -110,7 +115,7 @@ web/src/          App (routing, autosave, tab sync), Shell, Workspace, Landing, 
 
 ## Limitations
 
-- Input is Export.in exports plus optional BSE/NSE XBRL results filings.
+- Input is NSE's filings by ticker, Export.in exports, or both. NSE's XBRL results only build full years from FY2023 (earlier filings have no balance sheet), so a company added by ticker alone has about four years until a Export export fills the rest. Exchange sites can change their pages or refuse automated requests for a while; the app then says so, keeps what it already downloaded, and uploading a Export export or an XBRL file by hand always works. BSE-only companies aren't fetched yet.
 - Inventory and payable days run on COGS (Export's raw material cost less change in inventory) when COGS is at least 10% of revenue in each of the last three years, else on revenue. Trade payables, lease liabilities and capex from the cash-flow statement come only from attached annual XBRL filings (capex also from an approved annual-report note); without them payables stay inside other liabilities, leases inside borrowings, and capex is inferred from the change in net block. Lease liabilities count as debt in the valuation and are held flat in the projection.
 - Annual-report reading needs a text PDF (scanned reports have no text) and checks only what it can tie: it reads up to three pages per topic and can miss a note printed elsewhere, and contingent liabilities and related-party items have no total to tie to, so the quote checks are their only guard. Maturity tables that show undiscounted cash flows won't tie to the carrying value of borrowings and come back rejected.
 - The thesis writer checks numbers by value, not by meaning: a number that matches a computed fact passes even if the sentence attaches it to the wrong thing, so read the note before marking it reviewed. It knows only what the app computed and the quotes you approved: no management access, channel checks or industry news.
@@ -123,4 +128,4 @@ web/src/          App (routing, autosave, tab sync), Shell, Workspace, Landing, 
 2. ~~Valuation: DCF (FCFF), sensitivity tables, reverse DCF, multiples~~ ✓
 3. ~~Richer data: BSE/NSE XBRL, AI-proposed mappings, annual-report notes, quarterly/TTM~~ ✓
 4. ~~The analyst: research note first, assumptions proposed from filings and concalls, forensic red-flag radar, thesis writer~~ ✓
-5. Hands-off coverage: fetch by ticker, automatic peers, tracking results against the forecast
+5. ~~Hands-off coverage: fetch by ticker, automatic peers, tracking results against the forecast, watchlist~~ ✓

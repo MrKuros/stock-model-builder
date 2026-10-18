@@ -74,15 +74,17 @@ class Client:
     def path(self, url):
         return self.cache / (hashlib.sha1(url.encode()).hexdigest()[:24] + ".bin")
 
-    def get(self, url, max_age=LIST_AGE, limit=MAX_JSON):
+    def get(self, url, max_age=LIST_AGE, limit=MAX_JSON, cached=False):
         """(bytes, age in seconds): the cached copy while fresh (max_age None = forever), else the site's; when the site
-        fails, a stale copy is better than nothing. Offline when there's neither."""
+        fails, a stale copy is better than nothing. Offline when there's neither. cached=True never goes online."""
         if not allowed(url, self.hosts):
             raise Offline(f"Not fetched: {urllib.parse.urlsplit(url or '').hostname or url!r} isn't one of the sites this app reads.")
         p = self.path(url)
         age = time.time() - p.stat().st_mtime if p.is_file() else None
-        if age is not None and (max_age is None or age < max_age):
+        if age is not None and (cached or max_age is None or age < max_age):
             return p.read_bytes(), age
+        if cached:
+            raise Offline("Not checked yet.")
         try:
             data = self.fetch(url, limit)
         except Offline:
@@ -96,8 +98,8 @@ class Client:
         os.replace(tmp, p)
         return data, 0.0
 
-    def json(self, url, max_age=LIST_AGE):
-        data, age = self.get(url, max_age)
+    def json(self, url, max_age=LIST_AGE, cached=False):
+        data, age = self.get(url, max_age, cached=cached)
         try:
             return json.loads(data), age
         except ValueError:
@@ -189,12 +191,17 @@ def search(c, q):
 SERIES = ("EQ", "BE", "SM", "ST")  # main board; trade-for-trade (new listings often start here); SME boards
 
 
-def quote(c, sym, max_age=PRICE_AGE):
+def quote(c, sym, max_age=PRICE_AGE, cached=False):
     """{name, price (Rs), shares (crore), face_value, industry, sector, isin, listed, as_of, age} from NSE's quote,
-    trying the series a share may trade in."""
+    trying the series a share may trade in. cached=True: the last quote kept, however old, never online."""
     for series in SERIES:
-        d, age = c.json(f"{NSE}/api/NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N"
-                        f"&series={series}&symbol={urllib.parse.quote(sym)}", max_age)
+        try:
+            d, age = c.json(f"{NSE}/api/NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N"
+                            f"&series={series}&symbol={urllib.parse.quote(sym)}", max_age, cached)
+        except Offline:
+            if cached:
+                continue
+            raise
         try:
             e = d["equityResponse"][0]
             meta, trade, sec = e.get("metaData") or {}, e.get("tradeInfo") or {}, e.get("secInfo") or {}

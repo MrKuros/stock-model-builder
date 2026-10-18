@@ -49,8 +49,9 @@ type Option = { key: string; kind: 'open'; name: string; href: string } | { key:
 
 /** "Add a company": one box for a name or an NSE symbol, with suggestions (your saved companies first, then NSE's).
  * Picking a saved one opens it; picking an NSE one calls onAdd(symbol). */
-export function AddBox({ models, onAdd, upload, compact, busy }: {
-  models: ModelSummary[] | null; onAdd: (symbol: string) => void; upload: ReactNode; compact?: boolean; busy?: boolean
+export function AddBox({ models, onAdd, onWatch, upload, compact, busy }: {
+  models: ModelSummary[] | null; onAdd: (symbol: string) => void; onWatch?: (symbol: string) => void; upload: ReactNode
+  compact?: boolean; busy?: boolean
 }) {
   const id = useId()
   const [q, setQ] = useState('')
@@ -109,6 +110,9 @@ export function AddBox({ models, onAdd, upload, compact, busy }: {
             else if (e.key === 'Escape' && shown) { e.preventDefault(); setOpen(false) }
           }} />
         <button type="button" className="primary" disabled={busy || !options.length} onClick={() => pick(options[shown ? active : 0])}>Add</button>
+        {onWatch && (() => { const o = (shown && options[active]?.kind === 'add' ? options[active] : options.find(x => x.kind === 'add')) as Extract<Option, { kind: 'add' }> | undefined
+          return <button type="button" className="btn" disabled={busy || !o} title="Follow its price on Your companies without building a model yet"
+            onClick={() => { if (o) { setQ(''); setOpen(false); onWatch(o.symbol) } }}>Watch</button> })()}
         {shown && <ul className="add-list" role="listbox" id={`${id}-list`} aria-label="Suggestions">
           {options.map((o, i) => (
             <li key={o.key} id={optId(i)} role="option" aria-selected={i === active} className={i === active ? 'on' : undefined}
@@ -121,7 +125,7 @@ export function AddBox({ models, onAdd, upload, compact, busy }: {
       </div>
       <p className="small muted" id={`${id}-hint`} aria-live="polite">
         {error ? <span className="bad">{error} </span> : searching ? 'Looking on NSE… ' : text.length >= 2 && !options.length ? 'Nothing on NSE matches that. ' : null}
-        Numbers come from NSE’s filings, read by rules. {upload}
+        Numbers come from NSE’s filings, read by rules.{onWatch ? ' Watch follows the price only, without a model.' : ''} {upload}
       </p>
     </div>
   )
