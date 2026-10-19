@@ -925,7 +925,7 @@ def _debt(r):
     return r["borrowings"] + (r.get("lease") or 0.0)
 
 
-def upgrade(co, filings=(), capex=None):
+def upgrade(co, filings=(), capex=None, out=None):
     """The company with what attached annual XBRL filings add, by rules (no AI): a copy, co is untouched. A filing is
     used for the reported year ending on its period end when its revenue is within 1% of the export's (consolidated
     first, one filing per year). Per year it can add
@@ -935,11 +935,13 @@ def upgrade(co, filings=(), capex=None):
         FY2024: 87,984 - 85,575 = 2,409 = the export's own lease line);
       - capex = purchase of PP&E + intangibles from its cash flow, instead of the net block change.
     `capex` {year label: Rs crore} is cash-flow capex read from annual reports and approved by the user (3.3); it
-    fills years no filing gives. Totals never change, so the balance sheet still ties. Adds "sources": {basis,
-    drivers {key: text}, notes}."""
+    fills years no filing gives. Totals never change, so the balance sheet still ties. `out` {revenue, ebitda, reason}
+    (Rs crore): a business sold, deconsolidated or moved to a JV, approved by the user; the last reported year keeps its
+    reported lines and carries it as revenue_out / ebitda_out, which project() and the margin default take out of the
+    base (move_out()). Adds "sources": {basis, drivers {key: text}, notes}."""
     hist, lab = [dict(h) for h in co["hist"]], labels(co["dates"])
     at = {d.date(): i for i, d in enumerate(co["dates"])}
-    used, notes, done = {"payables": [], "lease": [], "capex": [], "capex_ar": []}, [], set()
+    used, notes, done = {"payables": [], "lease": [], "capex": [], "capex_ar": [], "moved_out": []}, [], set()
     for f in sorted(filings, key=lambda f: f.get("consolidated") is not True):
         end = _iso(f.get("period_end") or "")
         i = at.get(end.date()) if end else None
@@ -990,8 +992,39 @@ def upgrade(co, filings=(), capex=None):
             used["capex_ar"].append(y)
     for i, h in enumerate(hist):
         h.update(returns(h, hist[i - 1] if i else None))
+    moved = move_out(hist[-1], out)
+    if isinstance(moved, str):
+        notes.append(moved)
+    elif moved:
+        hist[-1].update(moved)
+        used["moved_out"].append(lab[-1])
     used = {k: sorted(v, key=lab.index) for k, v in used.items()}
-    return {**co, "hist": hist, "sources": _sources(co["hist"], used, notes)}
+    src = _sources(co["hist"], used, notes)
+    if moved and not isinstance(moved, str):
+        src["moved_out"] = {**moved, "year": lab[-1], "reason": out.get("reason") or "", "from": out.get("from") or ""}
+        src["drivers"]["growth"] = (f"Grows from {lab[-1]} revenue less Rs {_inr(moved['revenue_out'])} cr moved out "
+                                    f"({out.get('reason') or 'a business that left the group'})")
+        src["drivers"]["ebitda_margin"] = (f"3-yr ratio of sums, with {lab[-1]} less the Rs {_inr(moved['revenue_out'])} cr "
+                                           f"of revenue and Rs {_inr(moved['ebitda_out'])} cr of EBITDA moved out")
+    return {**co, "hist": hist, "sources": src}
+
+
+def move_out(last, out):
+    """{revenue_out, ebitda_out} to take out of the base year `last`, or a sentence why `out` can't be used, or None
+    without one. Rules: revenue moved out is above zero and below the year's revenue; EBITDA moved out is at most
+    the revenue moved out either way (a loss-making business leaving lifts the margin). EBITDA not given = the
+    year's own margin, so the margin default doesn't move."""
+    if not out:
+        return None
+    r, e = out.get("revenue"), out.get("ebitda")
+    if not isinstance(r, (int, float)) or not math.isfinite(r) or not 0 < r < last["revenue"]:
+        return (f"The business moved out isn't used: its revenue must be above zero and below the year's "
+                f"Rs {_inr(last['revenue'])} cr.")
+    if e is None:
+        e = r * last["ebitda"] / last["revenue"]
+    if not isinstance(e, (int, float)) or not math.isfinite(e) or abs(e) > r:
+        return "The business moved out isn't used: its EBITDA can't be larger than its revenue."
+    return {"revenue_out": float(r), "ebitda_out": float(e)}
 
 
 def _sources(hist, used, notes):
@@ -1107,7 +1140,9 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
     return {
         # the product telescopes to the plain CAGR
         "growth": math.prod(h["revenue"] / p["revenue"] for p, h in gp) ** (1 / len(gp)) - 1 if gp and pos else 0.0,
-        "ebitda_margin": per_rev(lambda h: h["ebitda"]),
+        # pro forma: a base year with a business moved out (move_out) counts without it
+        "ebitda_margin": _ros((h["ebitda"] - (h.get("ebitda_out") or 0.0), h["revenue"] - (h.get("revenue_out") or 0.0))
+                              for h in w),
         # ponytail: other income includes exceptional items (the export's way, and filing_row's); the median drops a one-off year
         "oi_pct": max(statistics.median(oi), 0.0) if oi else 0.0,
         "dep_pct": _ros((h["dep"], p["net_block"]) for p, h in pw),
@@ -1587,7 +1622,8 @@ def project(hist, a, n=5):
     for t in range(n):
         y = {k: v[t] if isinstance(v, list) else v for k, v in a.items()}  # this year's inputs
         c = {}
-        c["revenue"] = p["revenue"] * (1 + y["growth"])
+        # a business that left the group (move_out) leaves the base before growth applies
+        c["revenue"] = (p["revenue"] - (p.get("revenue_out") or 0.0)) * (1 + y["growth"])
         # memo line: COGS only sets the base for inventory and payable days; EBITDA still comes from the margin
         c["cogs"] = c["revenue"] * y["cogs_pct"]
         wc = c["cogs"] if cogs else c["revenue"]
@@ -1688,8 +1724,8 @@ def _burn(rows, tax):
     revenue against a 13% EBITDA margin."""
     r = rows[-1]
     rev, f = r["revenue"], r["fcff"]
-    head = (f"Final-year free cash flow is negative (Rs {_inr(f)} cr in the last projected year), so there is no value: "
-            "a perpetuity on a cash burn means nothing.")
+    head = (f"Final-year free cash flow is negative (Rs {_inr(f)} cr in the last projected year), and a perpetuity on a "
+            "cash burn means nothing.")
     if rev <= 0:
         return head + " Raise revenue growth or the EBITDA margin, or lower capex, in the last years."
     g = rev / rows[-2]["revenue"] - 1 if len(rows) > 1 and rows[-2]["revenue"] > 0 else None
@@ -2527,6 +2563,8 @@ def to_excel(co, scenarios, n=5, active="base", val=None, peers=None, at=None):
     ar = ", ".join(used.get("capex_ar") or [])
     ws["A2"] = ("Rs crore. Source: Excel export" + (f", plus XBRL filings ({got})" if got else "")
                 + (f", plus cash-flow capex read from the annual report and approved ({ar})" if ar else "")
+                + (f"; the forecast's base leaves out a business moved out of {used['moved_out'][0]} (inputs under the table)"
+                   if used.get("moved_out") else "")
                 + ". Blue = input (B3 and the Scenarios sheet), green = picked from the Scenarios sheet, black = formula. "
                 + f"Inventory and payable days are on {'COGS' if cogs else 'revenue'}.")
     ws["A2"].font = Font(italic=True, color="808080")
@@ -2549,6 +2587,10 @@ def to_excel(co, scenarios, n=5, active="base", val=None, peers=None, at=None):
                "x": '0.0"x";-0.0"x"'}
     drivers = {k for k, _, _ in DRIVERS}
     src = _scenario_sheet(wb, scenarios, n, headers[nh:], formats, head_fill)
+    # a business moved out of the base year (move_out): two inputs under the table, in the base year's column
+    last, moved = co["hist"][-1], co["hist"][-1].get("revenue_out") is not None
+    out_row, base_col = top + len(LAYOUT) + 2, get_column_letter(1 + nh)
+    out_ref = f"${base_col}${out_row}"
 
     ws.cell(top, 1, "Rs crore").font = bold
     for j, h in enumerate(headers):
@@ -2577,6 +2619,8 @@ def to_excel(co, scenarios, n=5, active="base", val=None, peers=None, at=None):
                               or (key == "capex" and h.get("capex_cf") is not None)
                               # =cfo-capex needs no earlier column when the year's capex is a cash-flow value
                               else _hist_formula(key, x, j > 0 or (key == "fcf" and h.get("capex_cf") is not None), cogs))
+            elif key == "revenue" and j == nh and moved:
+                cell.value = f'=({x("revenue", 1)}-{out_ref})*(1+{x("growth")})'
             else:
                 cell.value = (f"=CHOOSE($B$3,{','.join(src(s, key, j - nh) for s in SCENARIOS)})"
                               if key in drivers else _proj_formula(key, x, cogs))
@@ -2584,6 +2628,18 @@ def to_excel(co, scenarios, n=5, active="base", val=None, peers=None, at=None):
             cell.font = Font(bold=key in totals, color="008000" if j >= nh and key in drivers else None)
         ws.cell(r, 1).font = Font(bold=key in totals)
 
+    if moved:
+        y = headers[nh - 1]
+        reason = (co.get("sources") or {}).get("moved_out", {}).get("reason") or "a business that left the group"
+        for k, (label, v) in enumerate(((f"Revenue moved out of the {y} base ({reason})", last["revenue_out"]),
+                                        (f"EBITDA moved out of the {y} base", last["ebitda_out"]))):
+            ws.cell(out_row + k, 1, label).data_type = "s"
+            c = ws.cell(out_row + k, 1 + nh, v)
+            c.font, c.number_format = Font(color="0000FF"), formats["num"]
+        rev, ebitda = f"{base_col}{rows['revenue']}", f"{base_col}{rows['ebitda']}"
+        ws.cell(out_row + 2, 1, f"{y} EBITDA margin without it (the default margin uses this year)")
+        c = ws.cell(out_row + 2, 1 + nh, f"=IFERROR(({ebitda}-{base_col}{out_row + 1})/({rev}-{out_ref}),\"\")")
+        c.number_format = formats["pct"]
     ws.column_dimensions["A"].width = 34
     for j in range(len(headers)):
         ws.column_dimensions[get_column_letter(2 + j)].width = 11

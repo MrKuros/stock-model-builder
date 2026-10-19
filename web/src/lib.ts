@@ -154,7 +154,7 @@ export type Drafted = Record<Scenario, Path>
 /** Where each scenario's driver came from: an accepted proposal's id, "history" (the rule default) or "manual". */
 export type AssumptionSources = Partial<Record<Scenario, Record<string, string>>>
 /** One value of an annual-report note, in Rs crore (converted by rules), with where it was read. */
-export interface ArRow { label: string; amount: number | null; raw: unknown; page: number; quote: string }
+export interface ArRow { label: string; amount: number | null; raw: unknown; page: number; quote: string; unit?: string } // unit: operating numbers, as printed
 /** An annual-report note's value (proposal.value for kind ar_note): rows, their sum, and what it's compared with. */
 export interface ArValue {
   rows: ArRow[]; total: number; against: { label: string; value: number } | null
@@ -264,7 +264,11 @@ export interface Sources {
   drivers: Record<string, string> // driver key (and 'lease') -> a short sentence, e.g. "Trade payables from XBRL FY2024, on COGS"
   notes: string[] // filings that weren't used, and why
   used: Record<'payables' | 'lease' | 'capex', string[]> & { capex_ar?: string[] } // year labels; capex_ar: approved annual-report capex
+  // a business that left the group, taken out of the last reported year before growth (yours or an approved note)
+  moved_out?: { revenue_out: number; ebitda_out: number; year: string; reason: string; from: 'you' | 'annual report' }
 }
+/** notes['adj:moved_out']: a business sold or moved to a JV, typed by you with a reason (wins over an approved note). */
+export interface MovedOut { year: string; revenue: number; ebitda: number | null; reason: string }
 export interface Parsed {
   company: Company
   hist?: Row[] // company.hist with the filings' payables, leases and cash-flow capex (missing on an old server)

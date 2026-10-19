@@ -6,7 +6,7 @@ import { FundStrip } from './Fundamentals'
 import { PeerLine } from './Peers'
 import { useHref } from './route'
 import {
-  api, fmt, money, postJson, rs, when, type Cagr, type Impact, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
+  api, fmt, type ArNote, money, postJson, rs, when, type Cagr, type Impact, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
   type Path, type Projection, type RuleCheck, type Row, type ThesisNote, type ValInputs, type Valuation,
 } from './lib'
 
@@ -145,7 +145,7 @@ export default function Note({ parsed, doc, setDoc, projection, provenance, chan
   const fix = (to: string, label: string) => <> <a href={to === 'capex_pct' ? href('forecast', to) : href('valuation', to === 'valuation' ? '' : to)}>{label}</a></>
   if (value == null) {
     const why = !v ? 'the model is still calculating, or the inputs gave an error (see the line at the top).'
-      : v.error ?? sv?.error ?? (v.shares == null ? 'there is no share count. Type one on the Valuation page.' : 'see the Valuation page.')
+      : v.error ?? (sv?.error && sv.error[0].toLowerCase() + sv.error.slice(1)) ?? (v.shares == null ? 'there is no share count. Type one on the Valuation page.' : 'see the Valuation page.')
     const to = !v ? null : !v.error && v.shares == null ? 'v-shares' : !v.error && sv?.error?.startsWith('Final-year free cash flow') ? 'capex_pct' : 'valuation'
     h1 = <>No value yet.</>
     stand = <>Our base case has no value per share: {why}{to && fix(to, to === 'v-shares' ? 'Type the share count' : to === 'capex_pct' ? 'Open capex' : 'Open Valuation')} The
@@ -260,6 +260,7 @@ export default function Note({ parsed, doc, setDoc, projection, provenance, chan
         </div>
         <div className="col">
           <KeyNumbers parsed={parsed} proj={projection?.scenarios.base[0] ?? null} next={projection?.years[0]} checks={checks} v={v} />
+          <OperatingNumbers notes={doc.notes} />
         </div>
       </div>
 
@@ -533,6 +534,27 @@ function KeyNumbers({ parsed, proj, next, checks, v }: {
         </tbody>
       </table>
       <p className="small-note">Black = reported. Grey = median of the three years before ({pe ? 'P/E: all years' : 'rules'}). Blue = our base projection. Circled = a rule check lit.</p>
+    </section>
+  )
+}
+
+/** Operating numbers from the latest approved annual-report note (order book, headcount, attrition, volumes...), each in
+ * the unit printed, with its quote. Read by AI, checked by rules, approved by you; they never feed a number. */
+function OperatingNumbers({ notes }: { notes: Record<string, unknown> }) {
+  const href = useHref()
+  const n = Object.entries(notes).filter(([k]) => k.startsWith('ar:kpis:')).map(([, x]) => x as ArNote)
+    .sort((a, b) => b.year.localeCompare(a.year))[0]
+  return (
+    <section className="sec kpis" aria-labelledby="kpis-h">
+      <h2 id="kpis-h" className="label sec-label"><span>Operating numbers · <b>{n ? `${n.year}, from the annual report` : 'none read yet'}</b></span></h2>
+      {n ? <>
+        <ul className="kpi-list">{n.rows.map((r, i) => (
+          <li key={i}><span>{r.label}</span> <b className="num">{r.amount == null ? '–' : r.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })} {r.unit}</b>
+            <span className="small dim"> p.{r.page}<span className="sr">: “{r.quote}”</span></span></li>))}</ul>
+        <p className="small-note">As printed in {n.file ?? 'the annual report'}, read by AI and approved by you; they don’t change any
+          number in the model. <a href={href('checks', 'documents')}>Quotes</a></p>
+      </> : <p className="small-note">Order book, headcount, attrition or volumes, as the annual report prints them: attach the
+        report on <a href={href('checks', 'documents')}>Checks → Documents</a> and read “Operating numbers”.</p>}
     </section>
   )
 }

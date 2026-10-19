@@ -1196,3 +1196,19 @@ details.fold.older .cov-row:last-child { border-bottom: 0; }
   .cov-open { grid-template-columns: minmax(0, 1fr); }
   .watch-list .cov-row { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* "Did a business leave the group?" on Forecast (a business moved out of the base year) */
+details.moved > summary { cursor: pointer; min-height: 32px; margin: 0; }
+details.moved > summary::after { content: 'Show ▾'; font-size: 12px; font-weight: 400; color: var(--ours); text-decoration: underline; }
+details.moved[open] > summary::after { content: 'Hide ▴'; }
+details.moved > summary::-webkit-details-marker { display: none; }
+details.moved > summary { list-style: none; }
+details.moved > :not(summary) { margin-top: 8px; }
+.moved-f { display: grid; gap: 8px; }
+.moved-f label { display: grid; gap: 3px; font-size: 13px; }
+.moved-f input { font: inherit; font-size: 14px; color: var(--ink); background: var(--ground); border: 1px solid var(--rule-2); border-radius: 5px; padding: 7px 9px; min-height: 36px; width: 100%; }
+/* operating numbers on the Overview */
+.kpis { margin-top: 18px; }
+.kpi-list { list-style: none; margin: 8px 0 6px; padding: 0; display: grid; gap: 4px; }
+.kpi-list li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 4px 0; border-bottom: 1px solid var(--rule); font-size: 14px; }
+.kpi-list li > span:first-child { flex: 1 1 140px; }

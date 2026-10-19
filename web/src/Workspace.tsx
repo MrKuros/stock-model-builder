@@ -12,7 +12,7 @@ import { Changed } from './Tracking'
 import { HrefCtx, PAGES, STATEMENTS, pathOf, placed, type Href, type Route } from './route'
 import type { SaveState } from './App'
 import {
-  NAMES, api, clock, flat, groupKeys, money, postJson, rs, when, SCENARIOS,
+  NAMES, api, clock, flat, fmt, groupKeys, money, postJson, rs, when, SCENARIOS,
   type Company, type Filing, type ModelDoc, type ModelSummary, type Parsed, type Projection, type Proposal, type Scenario,
 } from './lib'
 
@@ -71,7 +71,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
 
   // A filing attached or removed changes the history (payables, leases, cash-flow capex) and so the defaults; like
   // excluding a year, it never changes the assumptions by itself. The upgraded defaults are offered in one click.
-  const filingIds = JSON.stringify([filings.map(f => [f.id, f.facts]), Object.entries(notes).filter(([k]) => k.startsWith('ar:'))])
+  const filingIds = JSON.stringify([filings.map(f => [f.id, f.facts]), Object.entries(notes).filter(([k]) => k.startsWith('ar:') || k.startsWith('adj:'))])
   const seenIds = useRef(filingIds)
   const [upgrades, setUpgrades] = useState<Upgrade[]>([])
   const byKey = Object.fromEntries(drivers.map(d => [d[0], d]))
@@ -83,7 +83,9 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
       .then(p => {
         setParsed(p)
         const keys = UPGRADED.filter(k => upgrades.some(u => u.key === k) || Math.abs((p.defaults[k] ?? 0) - (before[k] ?? 0)) > 1e-9)
-        setUpgrades(keys.filter(k => p.defaults[k] != null && Math.abs((scenarios.base[k]?.start ?? 0) - p.defaults[k]) > 1e-9)
+        // a move too small to show (15.3% to 15.3%) isn't offered: the button would change nothing you can see
+        const kind = (k: string) => (byKey[k]?.[2] ?? 'pct') as Upgrade['kind']
+        setUpgrades(keys.filter(k => p.defaults[k] != null && fmt(scenarios.base[k]?.start ?? 0, kind(k)) !== fmt(p.defaults[k], kind(k)))
           .map(k => ({ key: k, label: byKey[k]?.[1] ?? k, kind: byKey[k]?.[2] ?? 'pct', from: scenarios.base[k]?.start ?? 0, to: p.defaults[k] })))
       })
       .catch(e => setError((e as Error).message))

@@ -9,7 +9,7 @@ import { PageHead, Toc } from './Shell'
 import { useHref } from './route'
 import {
   DOC_KINDS, copyBase, defaultPaths, drifted, fmt, flat, groupKeys, isAnnual, money, seed, SCENARIOS, SHIFT, shortYear, type Proposal,
-  type Kind, type ModelDoc, type Parsed, type Paths, type Projection, type Row, type Scenario, type Ttm,
+  type Kind, type ModelDoc, type MovedOut, type Parsed, type Paths, type Projection, type Row, type Scenario, type Sources, type Ttm,
 } from './lib'
 
 const GROUPS: [string, string[]][] = [
@@ -47,9 +47,12 @@ const RULE: Record<string, string> = {
   mi_pct: '3-yr ratio of sums, kept between −50% and 50%',
 }
 const ruleOf = (k: string) => RULE[k] ?? '3-yr ratio of sums (each year weighted by its size)'
-// defaults an attached annual filing can move (payables, cash-flow capex); inventory days and COGS come from the export
-export const UPGRADED = ['dpo', 'ol_pct', 'capex_pct']
+// defaults an attached annual filing or an approved note can move (payables, cash-flow capex, a business moved out);
+// inventory days and COGS come from the export
+export const UPGRADED = ['dpo', 'ol_pct', 'capex_pct', 'ebitda_margin']
 /** A default the filings moved, offered to all three scenarios in one click: base's value now, the new default. */
+/** "Payable days" -> "payable days", "EBITDA margin" stays. */
+export const lower = (s: string) => (/^[A-Z]{2}/.test(s) ? s : s.charAt(0).toLowerCase() + s.slice(1))
 export interface Upgrade { key: string; label: string; kind: Kind; from: number; to: number }
 const METRICS: [string, string, (r: Row) => number | null][] = [
   ['revenue', 'Revenue', r => r.revenue],
@@ -169,7 +172,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
       {upgrades.length > 0 && (
         <div className="src-upgrade" role="status">
           <p className="small">The filings and approved notes moved these defaults:{' '}
-            {upgrades.map((u, i) => <span key={u.key}>{i > 0 && '; '}{u.label.toLowerCase()} now{' '}
+            {upgrades.map((u, i) => <span key={u.key}>{i > 0 && '; '}{lower(u.label)} now{' '}
               <span className="pencil-num">{fmt(u.to, u.kind)}</span> (base uses {fmt(u.from, u.kind)})</span>)}.
             Your assumptions haven’t changed.</p>
           <button type="button" onClick={onApply}>Use the new defaults in base, bull and bear</button>
@@ -249,6 +252,8 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
             </p>}
             <p className="small dim">{selKey === 'growth' ? 'Revenue, Rs crore' : 'Each year as reported'}, from the Excel export{doc.excluded_years.length ? `; left out: ${doc.excluded_years.join(', ')}` : ''}.</p>
           </div>
+          {(selKey === 'growth' || selKey === 'ebitda_margin') && <MovedOutCard doc={doc} setDoc={setDoc} year={histYears[nHist - 1]}
+            revenue={hist[nHist - 1].revenue ?? 0} used={sources?.moved_out ?? null} />}
           {(flags.length > 0 || lit) && <div className="card flag">
             <div className="card-h"><span>Warning sign</span><span className="tag flag">{lit?.status === 'red' || flags.some(f => f.year === histYears[nHist - 1]) ? 'High' : 'Watch'}</span></div>
             {flags.map(f => <p key={f.year} className="small">{f.note}. The default may carry it; in Checks you can leave the year out or explain it.</p>)}
@@ -366,5 +371,55 @@ function AiCard({ p, kind, current, doc, active, inUse, busy, onApprove, onKeep 
       </>}
       {p.status !== 'proposed' && !inUse && <p className="small dim">Changed since; the input no longer uses this proposal.</p>}
     </div>
+  )
+}
+
+/** "Did a business leave the group?": revenue (and EBITDA) of a business sold, demerged or moved to a joint venture,
+ * taken out of the last reported year before growth applies. Yours needs a reason; an approved annual-report note
+ * (Checks → Documents) does the same with its quote. Rules check the size; the Excel export shows both as inputs. */
+function MovedOutCard({ doc, setDoc, year, revenue, used }: {
+  doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; year: string; revenue: number; used: Sources['moved_out'] | null
+}) {
+  const href = useHref()
+  const mine = doc.notes['adj:moved_out'] as MovedOut | undefined
+  const [rev, setRev] = useState(mine?.revenue != null ? String(mine.revenue) : '')
+  const [ebitda, setEbitda] = useState(mine?.ebitda != null ? String(mine.ebitda) : '')
+  const [reason, setReason] = useState(mine?.reason ?? '')
+  const [msg, setMsg] = useState('')
+  const [opened] = useState(!!used) // open while in use when the page opens; your own toggling stays yours
+  const r = Number(rev.replace(/,/g, '')), e = ebitda.trim() === '' ? null : Number(ebitda.replace(/,/g, ''))
+  const bad = !rev.trim() ? 'Type the revenue that left.' : !(r > 0 && r < revenue) ? `Revenue must be above 0 and below ${year}’s Rs ${money(revenue)} cr.`
+    : e != null && !(Number.isFinite(e) && Math.abs(e) <= r) ? 'EBITDA can’t be larger than that revenue.'
+    : !reason.trim() ? 'Say what happened (e.g. “Unit X moved into a JV from April”).' : null
+  const save = () => {
+    if (bad) return setMsg(bad)
+    setDoc(d => ({ ...d, notes: { ...d.notes, 'adj:moved_out': { year, revenue: r, ebitda: e, reason: reason.trim() } satisfies MovedOut } }))
+    setMsg(`Saved: the forecast now grows from ${year} revenue less Rs ${money(r)} cr.`)
+  }
+  const remove = () => {
+    setDoc(d => { const { ['adj:moved_out']: _, ...notes } = d.notes; return { ...d, notes } })
+    setRev(''); setEbitda(''); setReason('')
+    setMsg('Removed: the forecast grows from the full reported revenue again.')
+  }
+  return (
+    <details className="card moved" open={opened || undefined}>
+      <summary className="card-h"><span>Did a business leave the group?</span>{used && <span className="tag you">In use</span>}</summary>
+      <p className="small">If a business was sold, demerged or moved into a joint venture, take its revenue out of {year}, the year
+        the forecast grows from. Otherwise growth is applied to revenue the company no longer has.</p>
+      {used && <p className="small"><b>In use:</b> Rs {money(used.revenue_out)} cr of revenue and Rs {money(used.ebitda_out)} cr of
+        EBITDA left out of {used.year} ({used.reason}).{used.from === 'annual report' && <> From an approved note: <a href={href('checks', 'documents')}>see its quote</a>.</>}</p>}
+      <div className="moved-f">
+        <label>Revenue that left, Rs crore<input inputMode="decimal" value={rev} onChange={x => setRev(x.target.value)} /></label>
+        <label>Its EBITDA, Rs crore <span className="dim">(optional: blank = at {year}’s margin)</span>
+          <input inputMode="decimal" value={ebitda} onChange={x => setEbitda(x.target.value)} /></label>
+        <label>What happened<input value={reason} maxLength={200} onChange={x => setReason(x.target.value)}
+          placeholder="e.g. Steel unit moved into a JV from April" /></label>
+      </div>
+      <div className="prop-actions">
+        <button type="button" onClick={save}>{mine ? 'Update' : 'Take it out of the base'}</button>
+        {mine && <button type="button" onClick={remove}>Remove</button>}
+      </div>
+      <p className="small dim" role="status">{msg || 'An AI reading of the annual report can propose this with a quote: Checks → Documents → read “Business moved out”.'}</p>
+    </details>
   )
 }

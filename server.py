@@ -294,7 +294,7 @@ class ModelRequest(BaseModel):
 
     def upgraded(self):
         """The company with what the attached filings and approved capex notes add (model.upgrade), as the engine uses it."""
-        return model.upgrade(self.company.model_dump(), [f.model_dump() for f in self.filings], ar_capex(self.notes))
+        return upgraded(self.company.model_dump(), [f.model_dump() for f in self.filings], self.notes)
 
     def args(self):
         if not 1 <= self.n <= 15:
@@ -374,10 +374,43 @@ def ar_capex(notes):
     return out
 
 
+MOVED_REV = re.compile(r"\s*(?:revenue|turnover|sales|income from operations)", re.I)  # the label starts with it
+MOVED_EBITDA = re.compile(r"\s*(?:ebitda|operating profit|profit before (?:depreciation|interest))", re.I)
+
+
+def moved_out(notes, co):
+    """The business that left the group, for model.upgrade: {revenue, ebitda (None = at the year's margin), reason,
+    from} in Rs crore, or None. Yours ("adj:moved_out", typed with a reason) wins over an approved annual-report note
+    ("ar:moved_out:<year>", AI-read, rule-checked); either only for the last reported year, the forecast's base."""
+    notes, last = notes or {}, model.labels(co["dates"])[-1]
+    m = notes.get("adj:moved_out")
+    if isinstance(m, dict) and m.get("year") == last and str(m.get("reason") or "").strip():
+        return {"revenue": m.get("revenue"), "ebitda": m.get("ebitda"), "reason": str(m["reason"]).strip()[:200], "from": "you"}
+    n = notes.get(f"ar:moved_out:{last}")
+    rows = n.get("rows") if isinstance(n, dict) else None
+    if not rows:
+        return None
+    rev, ebitda = _moved_rows(rows)
+    return {"revenue": rev.get("amount"), "ebitda": ebitda and ebitda.get("amount"),
+            "reason": f"{n.get('file') or 'the annual report'} p.{rev.get('page')}, approved", "from": "annual report"}
+
+
+def _moved_rows(rows):
+    """(revenue row, EBITDA row or None) of a business-moved-out note, by their labels; the first row is the revenue
+    when no label says so."""
+    pick = lambda pat: next((r for r in rows if isinstance(r, dict) and pat.match(str(r.get("label") or ""))), None)  # noqa: E731
+    return pick(MOVED_REV) or (rows[0] if rows else None), pick(MOVED_EBITDA)
+
+
+def upgraded(co, filings=(), notes=None):
+    """model.upgrade with what approved notes add: annual-report capex, and a business moved out of the base year."""
+    return model.upgrade(co, filings, ar_capex(notes), moved_out(notes, co))
+
+
 def _company_payload(co, excluded=(), filings=(), notes=None):
     """What the dashboard derives from the company. Ratios, defaults and one-offs use the upgraded history (with the
     filings' payables, leases and cash-flow capex); "company" stays as parsed, for the document."""
-    labels, q, up = model.labels(co["dates"]), co.get("quarters"), model.upgrade(co, filings, ar_capex(notes))
+    labels, q, up = model.labels(co["dates"]), co.get("quarters"), upgraded(co, filings, notes)
     return {
         "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
                     "market": co.get("market") or Market().model_dump(),
@@ -622,7 +655,7 @@ def explain(req: ExplainRequest):
     if not ai.available():
         raise HTTPException(503, ai.NOT_SET)
     co = req.company.model_dump()
-    labels, up = model.labels(co["dates"]), model.upgrade(co, [f.model_dump() for f in req.filings], ar_capex(req.notes))
+    labels, up = model.labels(co["dates"]), upgraded(co, [f.model_dump() for f in req.filings], req.notes)
     flags = [o for o in model.detect_oneoffs(up["hist"], labels) if o["year"] == req.year]
     if not flags:
         raise HTTPException(422, f"{req.year} isn't flagged as an unusual year.")
@@ -679,7 +712,7 @@ def explain_flag(req: FlagRequest):
     if not ai.available():
         raise HTTPException(503, ai.NOT_SET)
     co = req.company.model_dump()
-    labels, up = model.labels(co["dates"]), model.upgrade(co, [f.model_dump() for f in req.filings], ar_capex(req.notes))
+    labels, up = model.labels(co["dates"]), upgraded(co, [f.model_dump() for f in req.filings], req.notes)
     flag = next((f for f in model.forensic(up["hist"], labels, req.notes) if f["key"] == req.key), None)
     if flag is None or flag["severity"] not in SEVERITY_WORD:
         raise HTTPException(422, f"{flag['title'] if flag else req.key} isn't flagged.")
@@ -734,7 +767,7 @@ def _draft_ctx(req):
     """What the rules know before reading anything: the upgraded history, its ratios and ranges, the rule defaults,
     the drivers worth asking about (COGS % only on a COGS basis, payable days only once payables exist)."""
     co = req.company.model_dump()
-    labels, up = model.labels(co["dates"]), model.upgrade(co, [f.model_dump() for f in req.filings], ar_capex(req.notes))
+    labels, up = model.labels(co["dates"]), upgraded(co, [f.model_dump() for f in req.filings], req.notes)
     hist, r = up["hist"], model.ratios(up["hist"])
     try:
         d = model.default_assumptions(hist, exclude=set(req.excluded_years), labels=labels)
@@ -929,7 +962,10 @@ def _ar_note(req, topic, reply, sent, pages):
     h, r = req.company.hist[i], req.report
     ag = _against(req, topic, i)
     rows, total, checks = ai.note_checks(topic, reply, pages, sent, end, ag)
-    ref = {"contingent": ("Net worth", h["share_cap"] + h["reserves"]), "related": ("Revenue", h["revenue"])}.get(topic)
+    if topic == "moved_out":
+        checks += _moved_checks(rows, h, r.year, model.labels(req.company.dates)[-1])
+    ref = {"contingent": ("Net worth", h["share_cap"] + h["reserves"]), "related": ("Revenue", h["revenue"]),
+           "moved_out": ("Revenue", h["revenue"])}.get(topic)
     against = (ag or [None])[0] or ref
     first = rows[0]
     ok = all(c["pass"] is not False for c in checks)
@@ -938,12 +974,27 @@ def _ar_note(req, topic, reply, sent, pages):
         value.update(auditor=reply["auditor"].strip()[:120], opinion=reply["opinion"], changed=reply["changed"])
     return {"id": hashlib.sha1(f"ar:{topic}:{r.id}:{json.dumps(reply, sort_keys=True)}".encode()).hexdigest()[:12],
             "kind": "ar_note", "field": topic, "value": value,
-            "unit": {"pledge": "% of promoter shares", "auditor": None}.get(topic, "Rs crore"), "period": r.year,
+            "unit": {"pledge": "% of promoter shares", "auditor": None, "kpis": None}.get(topic, "Rs crore"), "period": r.year,
             "source": {"file": r.file, "page": first["page"], "quote": first["quote"], "tag": None},
             "report": r.id, "pages": sent, "reply": reply,
             "reasoning": f"{ai.TOPICS[topic][0]} read from PDF page{'s' if len(sent) > 1 else ''} "
                          f"{', '.join(map(str, sent))}" + (f"; printed in {reply['unit']}." if reply.get("unit") else "."),
             "checks": checks, "status": "proposed" if ok else "rejected", "ai": True}
+
+
+def _moved_checks(rows, h, year, last):
+    """Rules on a business moved out (beyond the quotes): model.move_out's (revenue above zero and below the year's,
+    EBITDA no larger than that revenue), and whether the note is for the forecast's base year (only then is it used)."""
+    rev, ebitda = _moved_rows(rows)
+    m = model.move_out(h, {"revenue": rev and rev.get("amount"), "ebitda": ebitda and ebitda.get("amount")})
+    return [{"name": "Fits the year", "pass": not isinstance(m, str),
+             "detail": m if isinstance(m, str) else f"Revenue moved out Rs {model._inr(m['revenue_out'])} cr of the year's "
+             f"Rs {model._inr(h['revenue'])} cr; EBITDA Rs {model._inr(m['ebitda_out'])} cr"
+             + ("." if ebitda else " (not printed: taken at the year's own margin).")},
+            {"name": "Base year", "pass": True if year == last else None,
+             "detail": f"{year} is the last reported year, so approving it takes the business out of the forecast's base."
+             if year == last else f"Only a note for {last}, the forecast's base, changes the forecast; this one is kept "
+             "for the record."}]
 
 
 def _topic(t):
@@ -1107,6 +1158,9 @@ def _thesis_facts(doc: "ModelDoc"):
         f["cash_jump"] = f"Cash {last}: {model._cr(c)}, up from {model._cr(hist[-2]['cash'])} in {labels[-2]}"
     if g := model.share_gap(co):
         f["shares"] = f"Share count: {g['text']}"
+    if mo := co["sources"].get("moved_out"):
+        f["moved_out"] = (f"Our {last} base leaves out {model._cr(mo['revenue_out'])} of revenue and {model._cr(mo['ebitda_out'])} "
+                          f"of EBITDA of a business that left the group ({mo['reason']}); growth applies to the rest")
     nb = v.get("note") or {}
     unit = lambda key, x: f"{x:.0f} days" if key in ("dso", "dio", "dpo") else _pc(x)  # noqa: E731
     ours = lambda key: v["wacc"] if key == "wacc" else v["g"] if key == "g" else avg(key)  # noqa: E731

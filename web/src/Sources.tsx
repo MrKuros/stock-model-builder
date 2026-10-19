@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Upgrade } from './Model'
+import { lower, type Upgrade } from './Model'
 import {
   api, dec2, DOC_KINDS, fmt, isAnnual, money, postJson, type ArNote, type DocKind, type ArValue, type Check, type Company, type Decided, type Filing,
   type FlagNote, type Forensic, type NotesPlan, type OneOffNote, type Proposal, type Report, type Sources as Used,
@@ -60,6 +60,7 @@ export function useAi() {
 export const TOPICS: Record<string, string> = {
   segments: 'Segment revenue', maturity: 'Debt maturity', capex: 'Capex', contingent: 'Contingent liabilities',
   related: 'Related-party transactions', pledge: 'Promoter pledge', exceptional: 'Exceptional items', auditor: 'Auditor’s report',
+  moved_out: 'Business moved out', kpis: 'Operating numbers',
 }
 
 /** doc.flag_notes from the approved flag_note proposals: one per flag (decideNote keeps one approved). */
@@ -71,6 +72,8 @@ export const withFlagNotes = (ps: Proposal[]): FlagNote[] => ps.filter(p => p.ki
 export const arHeadline = (topic: string, v: ArValue) => (topic === 'pledge' ? `${fmt(v.total / 100, 'pct')} pledged`
   : topic === 'auditor' ? `${v.opinion ?? '–'} opinion, ${v.auditor ?? '–'}${v.changed ? ', changed' : ''}`
   : topic === 'exceptional' ? `${v.rows[0]?.label ?? '–'} Rs ${v.rows[0]?.amount != null ? money(v.rows[0].amount) : '–'} cr` // a profit and its charges: no sum
+  : topic === 'moved_out' ? `revenue Rs ${money(v.total)} cr leaves the group`
+  : topic === 'kpis' ? `${v.rows.length} operating number${v.rows.length === 1 ? '' : 's'}` // mixed units: no sum
   : `Rs ${money(v.total)} cr`)
 
 /** notes with the one-off and annual-report entries rebuilt from the approved proposals (one per year, or per topic
@@ -201,7 +204,11 @@ export default function Sources({
         const r = await api<Proposal>('/api/notes/approve', postJson({ company, filings, report, proposal: p }))
         onProposals(ps => decideNote(ps.map(x => (x.id === p.id ? r : x)), r, 'approved'))
         setNote(`Approved: ${TOPICS[p.field] ?? p.field} ${p.period}, from ${p.source.file}.` +
-          (p.field !== 'capex' ? '' : sources?.used.capex.includes(p.period ?? '')
+          (p.field === 'moved_out' ? (p.period === years[years.length - 1]
+            ? ` The forecast now grows from ${p.period} revenue without it; the Forecast page offers the new margin default.`
+            : ` Kept for the record: only a ${years[years.length - 1]} note changes the forecast.`)
+            : p.field === 'kpis' ? ' They show on the Overview and never change a number.'
+            : p.field !== 'capex' ? '' : sources?.used.capex.includes(p.period ?? '')
             ? ' The XBRL cash flow already gives that year’s capex, and the two agree.'
             : ' It is now that year’s capex in the model’s history.'))
       } catch (e) { setError((e as Error).message) } finally { setBusy(null) }
@@ -263,7 +270,7 @@ export default function Sources({
           <div className="src-upgrade">
             <p className="small">
               The filings and approved notes moved these defaults:{' '}
-              {upgrades.map((u, i) => <span key={u.key}>{i > 0 && '; '}{u.label.toLowerCase()} now{' '}
+              {upgrades.map((u, i) => <span key={u.key}>{i > 0 && '; '}{lower(u.label)} now{' '}
                 <span className="pencil-num">{fmt(u.to, u.kind)}</span> (base uses {fmt(u.from, u.kind)})</span>)}.
               Your assumptions haven’t changed.
             </p>
@@ -439,6 +446,7 @@ export function ProposalItem({ p, busy, onDecide, as: H = 'h4', title }: {
 /** The values of an annual-report note as read: label, Rs crore, PDF page and the quote it was checked against. */
 function ArRows({ v, caption, pct }: { v: ArValue; caption: string; pct?: boolean }) {
   const words = v.rows.every(r => r.amount == null) // the auditor's report: quotes only
+  if (v.rows.some(r => r.unit)) return <KpiRows v={v} caption={caption} /> // operating numbers: each in its own unit
   return (
     <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={caption}>
       <table className="src-table ar-table">
@@ -447,6 +455,23 @@ function ArRows({ v, caption, pct }: { v: ArValue; caption: string; pct?: boolea
         <tbody>{v.rows.map((r, i) => (
           <tr key={i}><th scope="row">{r.label}</th>{!words && <td>{pct ? dec2(r.amount ?? NaN) : money(r.amount)}</td>}<td>{r.page}</td>
             <td className="ar-quote">“{r.quote}”</td></tr>
+        ))}</tbody>
+      </table>
+    </div>
+  )
+}
+
+/** Operating numbers (the kpis topic): each with the unit printed beside it, never added up. */
+export function KpiRows({ v, caption }: { v: ArValue; caption: string }) {
+  return (
+    <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={caption}>
+      <table className="src-table ar-table">
+        <caption className="visually-hidden">{caption}</caption>
+        <thead><tr><th scope="col">Measure</th><th scope="col">As printed</th><th scope="col">Page</th><th scope="col">Quote</th></tr></thead>
+        <tbody>{v.rows.map((r, i) => (
+          <tr key={i}><th scope="row">{r.label}</th>
+            <td className="num">{r.amount == null ? '–' : r.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })} {r.unit}</td>
+            <td>{r.page}</td><td className="ar-quote">“{r.quote}”</td></tr>
         ))}</tbody>
       </table>
     </div>
@@ -491,7 +516,17 @@ function ArNoteView({ n, sources }: { n: ArNote; sources?: Used }) {
             <td>{pct(r.amount, n.against?.value)}</td><td>{cite(r)}</td></tr>)}</tbody>
         </table></div>
       )}
-      {(n.topic === 'pledge' || n.topic === 'auditor') ? <>
+      {n.topic === 'kpis' ? <>
+        <p className="small ar-sum">Shown on the Overview with these quotes. They never change a number in the model.</p>
+        <KpiRows v={n} caption={`${title}, ${n.year}`} />
+      </> : n.topic === 'moved_out' ? <>
+        <p className="small ar-sum">Revenue Rs {money(n.total)} cr{n.against && <> ({pct(n.total, n.against.value)} of {n.year} revenue)</>}.{' '}
+          {sources?.moved_out?.from === 'annual report' && sources.moved_out.year === n.year
+            ? 'The forecast’s base leaves it out (see Forecast → Revenue growth).'
+            : sources?.moved_out?.from === 'you' ? 'Your own figure on the Forecast page is used instead.'
+            : 'Kept for the record: only a note for the last reported year changes the forecast.'}</p>
+        <ArRows v={n} caption={`${title}, ${n.year}, as read`} />
+      </> : (n.topic === 'pledge' || n.topic === 'auditor') ? <>
         <p className="small ar-sum">{n.topic === 'pledge'
           ? <><b>{fmt(n.total / 100, 'pct')}</b> of promoter shares pledged or encumbered.</>
           : <>{n.auditor}: <b>{n.opinion}</b> opinion{n.changed ? '; the auditor changed this year' : ''}.</>}</p>

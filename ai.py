@@ -314,7 +314,25 @@ TOPICS = {
                 (("independent auditor", 4), ("basis for opinion", 4), ("qualified opinion", 4), ("true and fair view", 3),
                  ("statutory auditor", 3), ("firm's registration", 3), ("firm registration", 3), ("chartered accountants", 2),
                  ("key audit matters", 2), ("auditor", 1))),
+    # a business leaving the group: an approved note takes it out of the forecast's base year (server.moved_out)
+    "moved_out": ("Business moved out", "for a business, subsidiary or division the report says was sold, deconsolidated, "
+                  "demerged or moved into a joint venture, or is held for sale or shown as a discontinued operation: its "
+                  "revenue from operations for the year (an item whose label starts with \"Revenue\") and, if printed, "
+                  "its EBITDA or operating profit before depreciation (an item whose label starts with \"EBITDA\"); after "
+                  "the word, name the business and what happened to it, e.g. \"Revenue: XYZ Ltd, moved into a joint venture\"",
+                  (("discontinued operation", 4), ("deconsolidat", 4), ("held for sale", 4), ("loss of control", 4),
+                   ("demerger", 4), ("slump sale", 4), ("ceased to be a subsidiary", 4), ("disposal of", 3),
+                   ("divestment", 3), ("joint venture", 1))),
+    # operating numbers in their own units: shown on the Overview with their quotes, never fed to a number
+    "kpis": ("Operating numbers", "the operating metrics the report gives for the year, at most 10: headcount, attrition, "
+             "order book, constant-currency growth, volumes sold, capacity and its utilisation, stores, customers. Label each "
+             "with the metric (e.g. \"Order book\", \"Attrition, last twelve months\") and give each its own unit as "
+             "printed (\"employees\", \"%\", \"Rs crore\", \"tonnes\", \"MW\")",
+             (("order book", 4), ("attrition", 4), ("headcount", 4), ("constant currency", 4), ("capacity utilisation", 4),
+              ("capacity utilization", 4), ("sales volume", 3), ("employees", 2), ("customers", 2), ("tonnes", 2))),
 }
+MIXED = {"kpis"}  # topics whose items each carry their own unit, kept as printed (no conversion to Rs crore)
+SIGNED = {"segments", "moved_out"}  # amounts kept with their sign (a loss-making business moved out has negative EBITDA)
 TOPIC_PAGES = 3  # ponytail: the 3 best pages per topic, cut to 8k characters; a missed note means attach + read again
 UNITS = {"crore": 1.0, "lakh": 0.01, "million": 0.1, "billion": 100.0, "thousand": 1e-4, "rupees": 1e-7}
 # unit words as whole words on norm() text ("cr" must not match "credit", "lac" not "place")
@@ -381,11 +399,14 @@ def note_prompt(topic, year, end: date, pages):
             "in the report's unit), the page number it is on, and a quote copied character for character from that "
             "page that contains the amount (the table row or sentence, 3 to 40 words). "
             + ('The amount is a percentage (12.5 for 12.5%); give the unit "percent". ' if topic == "pledge" else
+               'Give each item the unit printed with it ("%", "employees", "Rs crore"...). ' if topic in MIXED else
                'Give the unit the amounts are in: "crore", "lakh", "million", "billion", "thousand" or "rupees". ')
             + "Never convert, add up or estimate; "
             'if the pages don\'t show it, answer {"found": false}.\n'
-            'Answer as a JSON object: {"found": true, "unit": "crore", "items": [{"label": "...", "amount": 123.4, '
-            '"page": 12, "quote": "..."}]}.')
+            + ('Answer as a JSON object: {"found": true, "items": [{"label": "...", "amount": 123.4, "unit": "...", '
+               '"page": 12, "quote": "..."}]}.' if topic in MIXED else
+               'Answer as a JSON object: {"found": true, "unit": "crore", "items": [{"label": "...", "amount": 123.4, '
+               '"page": 12, "quote": "..."}]}.'))
 
 
 def note_shape(v, topic=None):
@@ -409,7 +430,10 @@ def note_shape(v, topic=None):
                    and isinstance(x.get("quote"), str) for x in items):
             return 'each item must be {"label": string, "page": number, "quote": string}'
         return None
-    if v.get("unit") not in (("percent",) if topic == "pledge" else UNITS):
+    if topic in MIXED:
+        if not all(isinstance(x, dict) and isinstance(x.get("unit"), str) and 0 < len(x["unit"].strip()) <= 30 for x in items):
+            return 'each item needs its own "unit" (a short string, as printed)'
+    elif v.get("unit") not in (("percent",) if topic == "pledge" else UNITS):
         return '"unit" must be "percent"' if topic == "pledge" else f'"unit" must be one of {", ".join(UNITS)}'
     for x in items:
         if not (isinstance(x, dict) and isinstance(x.get("label"), str) and isinstance(x.get("page"), int)
@@ -478,7 +502,7 @@ def note_checks(topic, reply, pages, sent, end: date, against=None):
     [(label, Rs crore)] where the topic has a tie (TIE). Returns (rows in Rs crore, total, checks)."""
     if topic == "auditor":
         return auditor_checks(reply, pages, sent, end)
-    unit, items = reply["unit"], reply["items"]
+    unit, items = reply.get("unit"), reply["items"]
     rows, bad_page, bad_quote, short, bad_num, bad_col, col_known = [], [], [], [], [], [], 0
     for x in items:
         page, quote, v = x["page"], norm(x["quote"]), amount(x["amount"])
@@ -499,16 +523,19 @@ def note_checks(topic, reply, pages, sent, end: date, against=None):
             col_known += first is not None
             if first is not None and abs(abs(first) - abs(v)) > 0.005 + 1e-9 * abs(v):
                 bad_col.append(x["label"])
-        if v is not None and topic != "segments":
+        if v is not None and topic not in SIGNED and topic not in MIXED:
             v = abs(v)  # capex, debt due, claims and transactions are sizes; a cash outflow prints in brackets
-        rows.append({"label": x["label"].strip()[:120], "amount": None if v is None else v * UNITS.get(unit, 1.0), "raw": x["amount"],
-                     "page": page, "quote": x["quote"].strip()[:400]})
+        rows.append({"label": x["label"].strip()[:120], "amount": None if v is None else v * (1.0 if topic in MIXED else UNITS.get(unit, 1.0)),
+                     "raw": x["amount"], "page": page, "quote": x["quote"].strip()[:400]}
+                    | ({"unit": x["unit"].strip()[:30]} if topic in MIXED else {}))
     cited = sorted({x["page"] for x in items if 1 <= x["page"] <= len(pages)})
     text = {p: norm(pages[p - 1][0]) for p in cited}
     heads = {p: {HEAD_UNIT[h[:2]] for h in UNIT_HEAD.findall(text[p])} for p in cited}
     said = set().union(*heads.values())
     # rules settle the unit: a table heading on a cited page wins; with none, the claimed unit must be printed there
-    if unit == "percent":
+    if topic in MIXED:
+        unit_seen, why = None, ""
+    elif unit == "percent":
         unit_seen = any("%" in t or "percent" in t for t in text.values())
         why = "" if unit_seen else " But no cited page prints a percentage."
     elif said:
@@ -524,7 +551,9 @@ def note_checks(topic, reply, pages, sent, end: date, against=None):
     n_items = len(items)
     what = lambda bad: ", ".join(bad[:4]) + (f" and {len(bad) - 4} more" if len(bad) > 4 else "")  # noqa: E731
     vals = [r["amount"] for r in rows if r["amount"] is not None]
-    total = (max(vals, default=0.0) if unit == "percent" else sum(vals))  # a pledge is one share, not a sum
+    # a pledge is one share, not a sum; operating numbers in mixed units have none; a business moved out is its revenue
+    total = (max(vals, default=0.0) if unit == "percent" else 0.0 if topic in MIXED
+             else (vals or [0.0])[0] if topic == "moved_out" else sum(vals))
     checks = [
         {"name": "Pages were read", "pass": not bad_page,
          "detail": f"Every item cites one of the pages sent ({', '.join(map(str, sent))})." if not bad_page
@@ -539,7 +568,8 @@ def note_checks(topic, reply, pages, sent, end: date, against=None):
          else f"The amount for {what(bad_num)} doesn't parse or isn't in its quote"
          + (", or isn't between 0 and 100." if topic == "pledge" else ".")},
         {"name": "Unit", "pass": unit_seen,
-         "detail": ("A percentage of promoter shares, kept as printed." if unit == "percent"
+         "detail": "Each number keeps the unit printed with it; nothing is converted or added up." if topic in MIXED
+         else ("A percentage of promoter shares, kept as printed." if unit == "percent"
                     else f"Amounts in {unit}, converted to Rs crore by rules (x {UNITS[unit]:g}).") + why},
         year_check(pages, end),
     ]
@@ -943,7 +973,8 @@ def thesis_prompt(name, facts, cites):
             "- If the margin or growth the price needs lies inside the company's own history (the range and seen-before "
             "facts), call it a bet on the cycle or a return to past results, not something the business has never done.\n"
             "- If a citation's description or quote mentions a sale, slump sale, demerger, transfer to a joint venture or "
-            "deconsolidation, say in words which business leaves the base from next year and that our base still includes it.\n"
+            "deconsolidation, say in words which business leaves the base from next year and that our base still includes it, "
+            "unless the moved_out fact says our base already leaves it out.\n"
             "- If there are trk_ and was_ facts, new results came in since our earlier forecast: make one thesis point what "
             "they changed (what came in against what we forecast, and our value or the growth the price needs before and "
             "now), and point what_to_watch at the next results.\n"

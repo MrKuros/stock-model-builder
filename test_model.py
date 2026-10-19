@@ -827,7 +827,7 @@ def upgrade_check(tmp, co, excel):
         assert all(u[k] == h[k] for k in RETURNS), u
     src = up["sources"]
     assert src["used"] == {"payables": ["FY2024", "FY2025"], "lease": ["FY2025"], "capex": ["FY2024", "FY2025"],
-                           "capex_ar": []}, src
+                           "capex_ar": [], "moved_out": []}, src
     assert src["basis"] == "cogs" and src["drivers"]["dpo"] == "Trade payables from XBRL FY2024, FY2025, on COGS", src
     assert src["notes"] == [], "the consolidated filing already covers FY2025; the second one is simply not needed"
     later = dict(co, dates=co["dates"][:-1], hist=co["hist"][:-1])  # FY2025 isn't in this file
@@ -869,12 +869,34 @@ def upgrade_check(tmp, co, excel):
     assert up_ar["sources"]["drivers"]["capex_pct"] == ("Cash-flow capex from XBRL FY2025 and the annual report FY2023 "
                                                        "(approved); other years from the net block change")
     assert model.upgrade(co, [], None)["hist"] == model.upgrade(co)["hist"] == co["hist"], "no notes: unchanged"
+    # a business moved out of the base year (JSW's BPSL to a JV): the base shrinks before growth, the margin default
+    # counts the base year without it, the reported lines stay as reported; EBITDA not given = the year's own margin
+    mov = {"revenue": 0.25 * h25["revenue"], "ebitda": 0.01 * h25["revenue"], "reason": "=HYPERLINK(1) unit sold"}
+    mo = model.upgrade(co, [], None, mov)
+    m25 = mo["hist"][-1]
+    assert m25["revenue"] == h25["revenue"] and m25["revenue_out"] == mov["revenue"] and m25["ebitda_out"] == mov["ebitda"]
+    assert mo["sources"]["used"]["moved_out"] == ["FY2025"] and mo["sources"]["moved_out"]["year"] == "FY2025"
+    assert "less Rs" in mo["sources"]["drivers"]["growth"], mo["sources"]["drivers"]
+    dm, d0 = model.default_assumptions(mo["hist"]), model.default_assumptions(co["hist"])
+    w = co["hist"][-3:]
+    want = (sum(h["ebitda"] for h in w) - mov["ebitda"]) / (sum(h["revenue"] for h in w) - mov["revenue"])
+    assert abs(dm["ebitda_margin"] - want) < 1e-12 and dm["ebitda_margin"] > d0["ebitda_margin"], (dm, want)
+    assert {k: x for k, x in dm.items() if k != "ebitda_margin"} == {k: x for k, x in d0.items() if k != "ebitda_margin"}
+    pm = model.project(mo["hist"], d0, 2)
+    assert abs(pm[0]["revenue"] - 0.75 * h25["revenue"] * (1 + d0["growth"])) < 1e-9 and abs(pm[0]["chk_bs"]) < 1e-6
+    assert model.project(co["hist"], d0, 2)[1]["revenue"] > pm[1]["revenue"]
+    flat = model.upgrade(co, [], None, {"revenue": 0.25 * h25["revenue"]})["hist"]
+    assert abs(model.default_assumptions(flat)["ebitda_margin"] - d0["ebitda_margin"]) < 1e-3  # the year keeps its own margin; only its weight in the 3 years shrinks
+    assert abs(flat[-1]["ebitda_out"] - 0.25 * h25["ebitda"]) < 1e-9
+    for bad in ({"revenue": 0.0}, {"revenue": 2 * h25["revenue"]}, {"revenue": 10.0, "ebitda": -11.0}, {"revenue": float("nan")}):
+        b = model.upgrade(co, [], None, bad)
+        assert "revenue_out" not in b["hist"][-1] and "isn't used" in b["sources"]["notes"][-1], (bad, b["sources"]["notes"])
     if not excel:
         return
     rows = {key: 5 + i for i, (_, key, _) in enumerate(model.LAYOUT) if key}
     first = model.labels(co["dates"])[0]  # cash-flow capex in the first reported year: FCF has no earlier column
     for name, comp in (("cogs", up), ("rev", up_rev), ("ar", model.upgrade(co, [], {"FY2023": 70.0})),
-                       ("ar0", model.upgrade(co, [], {first: 70.0}))):
+                       ("ar0", model.upgrade(co, [], {first: 70.0})), ("moved", mo)):
         base = {k: {"start": x, "end": None} for k, x in model.default_assumptions(comp["hist"]).items()}
         base.update(dpo={"start": 40.0, "end": 70.0}, cogs_pct={"start": 0.5, "end": 0.45}, debt_change={"start": -60.0, "end": None})
         sc = {"base": base, "bull": dict(base, growth={"start": 0.2, "end": None}),
@@ -899,8 +921,17 @@ def upgrade_check(tmp, co, excel):
                                     **{k: rh[j][k] for k in ("cogs_pct", "dio", "dpo", "int_rate", "capex_pct", "ol_pct",
                                                              "debt_change")}}, (name, "hist", j))
         assert ("annual report and approved (FY2023)" if name == "ar" else f"annual report and approved ({first})"
-                if name == "ar0" else "XBRL filings") in ws["A2"].value, ws["A2"].value
+                if name == "ar0" else "moved out of FY2025" if name == "moved" else "XBRL filings") in ws["A2"].value, ws["A2"].value
         assert ("on revenue" if name == "rev" else "on COGS") in ws["A2"].value
+        at = {c.value: c.row for c in ws["A"] if isinstance(c.value, str)}
+        moved = [k for k in at if k.startswith("Revenue moved out")]
+        assert bool(moved) == (name == "moved"), moved
+        if moved:  # two inputs in the base year's column, the pro-forma margin a live formula equal to the default's year
+            assert moved[0] == "Revenue moved out of the FY2025 base (=HYPERLINK(1) unit sold)", moved
+            col = 1 + len(comp["hist"])
+            assert ws.cell(at[moved[0]], col).value == mov["revenue"] and ws.cell(at[moved[0]] + 1, col).value == mov["ebitda"]
+            pf = ws.cell(at[moved[0]] + 2, col).value
+            assert abs(pf - (h25["ebitda"] - mov["ebitda"]) / (h25["revenue"] - mov["revenue"])) < 1e-9, pf
 
 
 def _flat_scenarios(co):
@@ -1811,6 +1842,11 @@ def ar_notes_check(server, root, co, data):
          "Qualified Opinion. In our opinion, except for the effects of the matter described in the",
          "Basis for Qualified Opinion section, the statements give a true and fair view.",
          "For A B Shah & Co LLP, Chartered Accountants"],
+        ["Discontinued operations for the year ended March 31, 2025 (Rs in crore)",
+         "The Coke unit ceased to be a subsidiary and moved into a joint venture.",
+         "Revenue from operations of the Coke unit 500.00", "EBITDA of the Coke unit 60.00"],
+        ["Operating highlights 2024-25", "Order book as at March 31, 2025 Rs 4,250 crore",
+         "Employees on the rolls 12,345", "Attrition for the year 14.2%"],
     ])
     item = lambda label, amount, page, quote: {"label": label, "amount": amount, "page": page, "quote": quote}  # noqa: E731
     segs = {"found": True, "unit": "crore", "items": [
@@ -1826,7 +1862,7 @@ def ar_notes_check(server, root, co, data):
         plan = client.post("/api/notes/plan", json=body).json()
         assert {t: x["pages"] for t, x in plan["topics"].items()} == {
             "segments": [2], "maturity": [3], "capex": [4], "contingent": [5], "related": [6], "pledge": [7], "exceptional": [],
-        "auditor": [8]}, plan
+        "auditor": [8], "moved_out": [9], "kpis": [10]}, plan
         pages = ai.pdf_pages(pdf)
         end = datetime(2025, 3, 31).date()
         want = len(ai.note_prompt("segments", "FY2025", end, [(2, ai.page_text(pages[1]))]))
@@ -1914,6 +1950,31 @@ def ar_notes_check(server, root, co, data):
                            (dict(aud, changed=True), {"Change of auditor"})):
             fake_llm(root / "llm", bad)
             assert failed(ext("auditor").json()) == names, names
+        # a business moved out: revenue and EBITDA with their sign, checked against the year; only the base year is used
+        moved = {"found": True, "unit": "crore", "items": [
+            item("Revenue: Coke unit, moved into a joint venture", 500, 9, "Revenue from operations of the Coke unit 500.00"),
+            item("EBITDA: Coke unit", 60, 9, "EBITDA of the Coke unit 60.00")]}
+        fake_llm(root / "llm", moved)
+        p_mo = ext("moved_out").json()
+        assert p_mo["status"] == "proposed" and p_mo["value"]["total"] == 500.0 and p_mo["unit"] == "Rs crore", p_mo
+        assert {c["name"]: c["pass"] for c in p_mo["checks"]}["Base year"] is True, p_mo["checks"]
+        fake_llm(root / "llm", dict(moved, items=[dict(moved["items"][0], amount=5000, quote="Revenue from operations of the Coke unit 500.00")]))
+        assert "Fits the year" in failed(ext("moved_out").json())
+        fake_llm(root / "llm", moved)
+        old_year = ext("moved_out", report=dict(rep, year="FY2024")).json()
+        assert {c["name"]: c["pass"] for c in old_year["checks"]}["Base year"] is None, old_year["checks"]
+        # operating numbers: each in its own unit, kept as printed, never added up
+        fake_llm(root / "llm", {"found": True, "items": [
+            {**item("Order book", "4,250", 10, "Order book as at March 31, 2025 Rs 4,250 crore"), "unit": "Rs crore"},
+            {**item("Employees", 12345, 10, "Employees on the rolls 12,345"), "unit": "employees"},
+            {**item("Attrition", 14.2, 10, "Attrition for the year 14.2%"), "unit": "%"}]})
+        p_kpi = ext("kpis").json()
+        assert p_kpi["status"] == "proposed" and p_kpi["unit"] is None and p_kpi["value"]["total"] == 0, p_kpi
+        assert [(r["amount"], r["unit"]) for r in p_kpi["value"]["rows"]] == [(4250, "Rs crore"), (12345, "employees"), (14.2, "%")]
+        assert {c["name"]: c["pass"] for c in p_kpi["checks"]}["Unit"] is None
+        assert "unit" in (root / "llm" / "prompt-0.txt").read_text() and "Attrition" in (root / "llm" / "prompt-0.txt").read_text()
+        fake_llm(root / "llm", {"found": True, "items": [item("Employees", 12345, 10, "Employees on the rolls 12,345")]})
+        assert ext("kpis").status_code == 502, "an operating number without its unit is asked again, then refused"
         fake_llm(root / "llm", {"found": False})
         r = ext("contingent")
         assert r.status_code == 422 and "found no contingent liabilities" in r.json()["detail"], r.text
@@ -1946,6 +2007,24 @@ def ar_notes_check(server, root, co, data):
             without = client.post("/api/project", json=req).json()
             assert with_note["scenarios"] == without["scenarios"], "history capex alone doesn't move projections"
             assert client.post("/api/export", json={**req, "notes": notes}).status_code == 200
+            # an approved business-moved-out note takes it out of the base year; yours (with a reason) wins over it
+            mo_note = {"ar:moved_out:FY2025": {**p_mo["value"], "proposal": p_mo["id"], "topic": "moved_out", "year": "FY2025",
+                                                "file": "ar.pdf", "ai": True}}
+            got = client.post("/api/company", json={"company": data["company"], "notes": mo_note}).json()
+            assert got["sources"]["moved_out"]["revenue_out"] == 500.0 and got["sources"]["moved_out"]["ebitda_out"] == 60.0
+            assert got["defaults"]["ebitda_margin"] != plain["defaults"]["ebitda_margin"], "the margin default is pro forma"
+            moved_p = client.post("/api/project", json={**req, "notes": mo_note}).json()
+            g0 = data["scenarios"]["base"]["growth"]["start"]
+            assert abs(moved_p["scenarios"]["base"][0]["revenue"] - (h["revenue"] - 500) * (1 + g0)) < 1e-6, moved_p["scenarios"]["base"][0]
+            mine = {**mo_note, "adj:moved_out": {"year": "FY2025", "revenue": 100.0, "ebitda": None, "reason": "sold the unit"}}
+            got = client.post("/api/company", json={"company": data["company"], "notes": mine}).json()
+            assert got["sources"]["moved_out"]["revenue_out"] == 100.0 and got["sources"]["moved_out"]["reason"] == "sold the unit"
+            nameless = {"adj:moved_out": {"year": "FY2025", "revenue": 100.0, "reason": " "}}
+            assert "moved_out" not in client.post("/api/company", json={"company": data["company"], "notes": nameless}).json()["sources"]
+            assert client.post("/api/export", json={**req, "notes": mine}).status_code == 200
+            kpi_note = {"ar:kpis:FY2025": {**p_kpi["value"], "proposal": p_kpi["id"], "topic": "kpis", "year": "FY2025"}}
+            assert client.post("/api/project", json={**req, "notes": kpi_note}).json()["scenarios"] == without["scenarios"], \
+                "operating numbers never feed a number"
             # the document keeps the proposals and notes (version 5)
             doc = dict(data, reports=[rep], proposals=[dict(p, status="approved"), p_short], notes=notes)
             mid, _ = server.save_model(server.ModelDoc.model_validate(doc), root, now=datetime(2026, 10, 16, 9, 0))
