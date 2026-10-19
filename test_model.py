@@ -2159,7 +2159,16 @@ def thesis_check(server, root, data):
         n = post(doc).json()
         assert n["status"] == "written" and n["rounds"] == 1 and calls() == 1 and not failed(n), n["checks"]
         assert [c["name"] for c in n["checks"]] == ["Numbers match", "Sources exist", "Quotes on page",
-                                                    "No recommendation wording", "No never or always", "Length"], n["checks"]
+                                                    "No recommendation wording", "No never or always", "No repeated points",
+                                                    "Length"], n["checks"]
+        # a risk said twice is merged by rule (refs joined); the note is written, no retry
+        twice = json.loads(json.dumps(good))
+        twice["risks"].append({"text": "Receivables from a large customer were delayed again.", "refs": ["flag_cash", "price"]})
+        calls = fake_llm(root / "llm", twice)
+        r = post(doc).json()
+        assert r["status"] == "written" and calls() == 1 and len(r["risks"]) == 1, r["risks"]
+        assert r["risks"][0]["refs"] == [*cited, "price"], r["risks"]
+        assert "different judgements" in (root / "llm" / "prompt-0.txt").read_text()
         # facts at the price's own horizon, the discount rate's parts and defaults, leverage even when it passed
         assert "best3" not in facts and "5-year" in facts["best5"] and "last3" in facts, facts.keys()
         assert "beta 1 x 7.0% premium" in facts["wacc"] and "app default" in facts["wacc"], facts["wacc"]
@@ -2185,9 +2194,15 @@ def thesis_check(server, root, data):
                 (lambda g: g["risks"][0].update(refs=["flag_cash", {"file": "ar.pdf", "page": 2,
                                                                      "quote": "receivables were written off"}]),
                  "Quotes on page" if ai.pdf_available() else "Sources exist", "written off" if ai.pdf_available() else "ar.pdf"),
-                (lambda g: g["thesis"][2].update(refs=["X9"]), "Sources exist", "X9"),
+                (lambda g: g["thesis"][2].update(refs=[*cited, "X9"]), "Sources exist", "X9"),
                 (lambda g: g["thesis"][0].update(head="It has never grown this fast"), "No never or always", '"never"'),
-                (lambda g: g.update(headline="x" * 200), "Length", "200 characters")]:
+                (lambda g: g.update(headline="x" * 200), "Length", "200 characters"),
+                # the same claim twice (thesis 3 repeats thesis 2, words reordered)
+                (lambda g: g["thesis"][2].update(head="The price sits above our value range", text=g["thesis"][1]["text"],
+                                                 refs=g["thesis"][1]["refs"]), "No repeated points", "thesis 2"),
+                # a number from a fact the point doesn't cite: scoped to its own refs (margin isn't one of them)
+                (lambda g: g["thesis"][2].update(text=g["thesis"][2]["text"] + f" Our margin is {at('margin')}."),
+                 "Numbers match", at("margin")[:-1])]:
             bad = json.loads(json.dumps(good))
             change(bad)
             calls = fake_llm(root / "llm", bad)

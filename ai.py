@@ -980,7 +980,9 @@ def thesis_prompt(name, facts, cites):
             "now), and point what_to_watch at the next results.\n"
             "- Rank risks by the rule checks: Red, then Amber, then the rest. Mention the auditor only if the opinion is "
             "modified or the auditor changed.\n"
-            '- "refs" lists the fact keys or citation ids behind the point, at least one each.\n\n'
+            '- "refs" lists the fact keys or citation ids behind the point, at least one each; every number in a point '
+            "must come from its own refs (the price and our values excepted).\n"
+            "- The three thesis points make three different judgements; never the same claim twice. Same for the risks.\n\n"
             "Answer as a JSON object:\n"
             '{"headline": "one sentence under 160 characters: what the price assumes against what the business does",\n'
             ' "thesis": [exactly 3 of {"head": "a short claim under 90 characters", "text": "2 or 3 sentences under 650 '
@@ -1037,15 +1039,59 @@ def thesis_items(v):
         yield f"Watch {i}", w, None, THESIS_LEN["watch"]
 
 
+# facts every point may quote besides its own refs: the price and our values, which the page shows at the top
+CORE_FACTS = ("price", "value_base", "value_bear", "value_bull", "upside", "gap", "over_bull", "under_bear")
+SAME_CLAIM = 0.6  # two points sharing this share of their content words make the same claim
+_STOP = set("that this with from their them they have been will would which what when while there than into over under "
+            "about more less also only just such some most much very each other ours year years".split())
+
+
+def _words(text):
+    return {w for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in _STOP}
+
+
+def same_claim(a, b):
+    """Two points make the same claim: the same head, or most of their content words shared (Jaccard >= SAME_CLAIM).
+    ponytail: word overlap, not meaning; a paraphrase with new words passes, and the retry names any it catches."""
+    if " ".join(a.lower().split()) == " ".join(b.lower().split()):
+        return True
+    x, y = _words(a), _words(b)
+    return bool(x and y) and len(x & y) / len(x | y) >= SAME_CLAIM
+
+
+def merge_repeats(v):
+    """The reply with a risk or a watch item that repeats an earlier one merged into it (refs joined, the first's words
+    kept). Thesis points aren't merged: there must be three, so a repeat is a failed check and the model is asked again."""
+    risks = []
+    for p in v["risks"]:
+        twin = next((q for q in risks if same_claim(q["text"], p["text"])), None)
+        if twin:
+            twin["refs"] = [*twin["refs"], *(r for r in p["refs"] if r not in twin["refs"])]
+        else:
+            risks.append({**p, "refs": list(p["refs"])})
+    watch = []
+    for w in v["what_to_watch"]:
+        if not any(same_claim(x, w) for x in watch):
+            watch.append(w)
+    return {**v, "risks": risks, "what_to_watch": watch}
+
+
 def thesis_checks(v, facts, cites, texts):
     """Rules on a note reply. A ref is a fact key, a citation id, or {file, page, quote}; texts(file, page) gives that
-    page's texts ([] = no such page, None = the document's text isn't on this machine). Every number must be any fact,
-    or in a quote the item cites (items without refs: any citation's quote). ponytail: facts aren't scoped to the item's
-    refs; a point quoting the price beside its cited fact is fine. [{name, pass, detail}]."""
+    page's texts ([] = no such page, None = the document's text isn't on this machine). Every number in a point with
+    refs must be in one of its own facts, the core facts (price and our values, CORE_FACTS) or a quote it cites; items
+    without refs (headline, priced in, triggers, watch) may use any fact or citation. No two thesis points make the same
+    claim (same_claim). [{name, pass, detail}]."""
     given, every = "\n".join(facts.values()), " ".join(c["quote"] for c in cites.values())
+    core = "\n".join(facts[k] for k in CORE_FACTS if k in facts)
     approved = {(c["file"], c["page"], c["quote"]) for c in cites.values()}
     bad = {k: [] for k in ("Numbers match", "Sources exist", "Quotes on page", "No recommendation wording",
-                           "No never or always", "Length")}
+                           "No never or always", "No repeated points", "Length")}
+    pts = v["thesis"]
+    for i in range(len(pts)):
+        for j in range(i):
+            if same_claim(pts[i]["head"], pts[j]["head"]) or same_claim(pts[i]["text"], pts[j]["text"]):
+                bad["No repeated points"].append(f"Thesis {i + 1} makes the same claim as thesis {j + 1}; make a different judgement")
     gone = set()
     for where, text, refs, lim in thesis_items(v):
         if len(text) > lim:
@@ -1077,15 +1123,18 @@ def thesis_checks(v, facts, cites, texts):
             quotes.append(c["quote"])
         if refs is not None and not refs and not head:
             bad["Sources exist"].append(f"{where} cites nothing")
-        if xs := unmatched(text, given, " ".join(quotes)):
+        own = given if refs is None else "\n".join([core, *(facts[r] for r in refs if isinstance(r, str) and r in facts)])
+        if xs := unmatched(text, own, " ".join(quotes)):
             bad["Numbers match"].append(f"{where}: {', '.join(xs[:3])}")
-    ok = {"Numbers match": "Every number is one the app computed or one in a cited quote.",
+    ok = {"Numbers match": "Every number is one the app computed (in the point's own facts) or one in a cited quote.",
+          "No repeated points": "Each thesis point makes its own claim; repeated risks were merged.",
           "Sources exist": "Every reference is a computed fact or an approved citation.",
           "Quotes on page": "Every cited quote occurs on its page.",
           "No recommendation wording": "No buy, sell, target-price or recommend wording.",
           "No never or always": "No never, always or ever: the history starts at the export's first year.",
           "Length": "Every part is within its length limit."}
-    why = {"Numbers match": " (neither computed by the app nor in a cited quote)",
+    why = {"Numbers match": " (not in the point's own facts, the price and our values, or a quote it cites: add the fact "
+                            "key to its refs)",
            "No never or always": " (the data starts at the export's first year; say since that year)"}
     out = [{"name": k, "pass": not xs, "detail": ok[k] if not xs else "; ".join(xs[:5]) + why.get(k, "") + "."}
            for k, xs in bad.items()]

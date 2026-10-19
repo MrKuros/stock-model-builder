@@ -1315,7 +1315,7 @@ def write_note(req: ModelDoc):
     prompt, why = ai.thesis_prompt(name, facts, cites), None
     try:
         for rounds in (1, 2):
-            reply = ai.write_thesis(prompt, why)
+            reply = ai.merge_repeats(ai.write_thesis(prompt, why))
             checks = ai.thesis_checks(reply, facts, cites, texts)
             failed = [c for c in checks if c["pass"] is False]
             if not failed:
