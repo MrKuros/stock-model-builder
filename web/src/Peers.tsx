@@ -307,7 +307,7 @@ function Why({ p }: { p: PeersDoc }) {
 export function peerWords(t: PeerTable, read: number, short: string) {
   const bit = (k: string, what: string, kind: 'pct' | 'x', cheap = false) => t.rank[k] == null || t.median[k] == null ? null
     : `${cheap && t.rank[k] === 1 ? 'the cheapest' : `${ordinal(t.rank[k]!)}${cheap ? ' cheapest' : ''}`} of ${t.of[k]} on ${what} (${fmt(t.own.metrics?.[k], kind)} against a median ${fmt(t.median[k], kind)})`
-  const parts = [bit('roce', 'ROCE', 'pct'), bit('g3', '3-year growth', 'pct'), bit('pe', 'P/E', 'x', true)].filter(Boolean) as string[]
+  const parts = [bit('roce', 'return on capital (ROCE)', 'pct'), bit('g3', '3-year growth', 'pct'), bit('pe', 'price to earnings (P/E)', 'x', true)].filter(Boolean) as string[]
   return `Against ${read} peer${read > 1 ? 's' : ''}, ${short} ranks ${parts.length
     ? parts.join(parts.length > 2 ? ', ' : ' and ').replace(/, (?=[^,]*$)/, ' and ') : 'on too few measures to say'}.`
 }

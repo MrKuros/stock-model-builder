@@ -393,7 +393,7 @@ export default function App() {
               {missing
                 ? <div className="gone"><h1 id="page-h" tabIndex={-1} className="h1">Couldn’t open this company</h1>
                     <p className="purpose">{missing} Your other companies are fine.</p><p><a className="primary" href="/">Back to your companies</a></p></div>
-                : <div aria-busy="true"><p className="label">Opening</p><h1 id="page-h" tabIndex={-1} className="h1">Opening {route.slug.replace(/-/g, ' ')}…</h1>
+                : <div aria-busy="true"><p className="label">Opening</p><h1 id="page-h" tabIndex={-1} className="h1">Opening {route.slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}…</h1>
                     <div className="skel-block" /></div>}
             </main>
           : route.top === 'none'

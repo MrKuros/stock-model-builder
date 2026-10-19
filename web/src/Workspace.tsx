@@ -482,8 +482,16 @@ function EffectBar({ e, now, price, active, save, changes, onUndo, onReset }: {
   const ch = e.from != null && now != null && e.from > 0 ? now / e.from - 1 : null
   const side = (x: number | null) => (x == null || price == null ? null : x >= price ? 'above' : 'below')
   const saved = save.error ? <span className="bad">Couldn’t save</span> : save.at && Date.parse(save.at) >= e.at - 1000 ? <>✓ Saved</> : <>Saving…</>
+  const bar = useRef<HTMLDivElement>(null)
+  // the bar is pinned to the window's bottom: lift the input you're editing above it instead of covering it
+  useEffect(() => {
+    const row = document.activeElement?.closest('.drow') ?? document.querySelector('.drow.open')
+    const top = bar.current?.getBoundingClientRect().top
+    const bottom = row?.getBoundingClientRect().bottom
+    if (top != null && bottom != null && bottom > top - 8) window.scrollBy({ top: bottom - top + 16 })
+  }, [e.at])
   return (
-    <div className="eff-wrap"><div className="effect" role="status" aria-live="polite">
+    <div className="eff-wrap"><div className="effect" ref={bar} role="status" aria-live="polite">
       <p className="eff-1">
         <span>Our {NAMES[active].toLowerCase()} value</span>{' '}
         {e.from != null && <s className="num">Rs {rs(e.from)}</s>} → <b className="num ours">{now != null ? `Rs ${rs(now)}` : 'no value'}</b>

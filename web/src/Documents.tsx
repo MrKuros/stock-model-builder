@@ -20,7 +20,7 @@ export function spans(ys: string[]) {
   }
   return out.map(([a, b]) => (a === b ? a : `${a}–${b.slice(-2)}`)).join(', ')
 }
-const LOCAL = 'your local data source'
+const LOCAL = 'a 10-year history kept on this computer'
 /** Where each reported year came from, in the allowed words only: [["NSE filings", "FY2023–26"], ["an Excel export", "FY2015–22"]]. */
 export function yearSources(company: Company, years: string[]): [string, string][] {
   const by = new Map<string, string[]>()
@@ -75,7 +75,7 @@ export default function Documents({ parsed, doc, setDoc, projection, versions, u
         <h2 id="docs-h">Documents</h2>
         <ul className="doc-rows">
           {from.filter(([l]) => l.startsWith('an Excel')).map(([, y]) => row(<>Excel export, {y}</>, 'Read by rules'))}
-          {from.filter(([l]) => l === LOCAL).map(([, y]) => row(<>Older years, {y}</>, 'Added automatically from your local data source · read by rules'))}
+          {from.filter(([l]) => l === LOCAL).map(([, y]) => row(<>Older years, {y}</>, 'NSE’s filings only go back to FY2023, so these came from a 10-year history kept on this computer · read by rules'))}
           {s?.symbol && row(<>NSE annual results filings, {from.find(f => f[0] === 'NSE filings')?.[1] ?? 'none'}</>, 'Read by rules')}
           {doc.filings.length > 0 && row(<>Results filings kept with the model ({doc.filings.length})</>, 'Read by rules',
             <a href="#filings" onClick={() => { const d = document.getElementById('filings') as HTMLDetailsElement | null; if (d) d.open = true }}>Review</a>)}
