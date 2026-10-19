@@ -76,14 +76,21 @@ export default function App() {
   // ---- routing: path URLs, links handled here, Back/Forward ----
   useEffect(() => {
     history.scrollRestoration = 'manual' // pages render after popstate; Workspace restores the place itself
-    const on = () => setRoute(readRoute())
+    // an old #note/#model/#evidence link opens its page under /c/, on a fresh load and on any move inside the app
+    // (a link, Back, or the hash typed in the address bar)
+    const on = () => {
+      const r = readRoute(), old = !r.slug && lastId() ? oldLink(location.hash, lastId()!) : null
+      if (old) navigate(old, true)
+      else setRoute(r)
+    }
     window.addEventListener('popstate', on)
+    window.addEventListener('hashchange', on)
     window.addEventListener('app:navigate', on)
     document.addEventListener('click', onLinkClick)
-    const old = !routeRef.current.slug && lastId() ? oldLink(location.hash, lastId()!) : null
-    if (old) navigate(old, true)
+    on()
     return () => {
       window.removeEventListener('popstate', on)
+      window.removeEventListener('hashchange', on)
       window.removeEventListener('app:navigate', on)
       document.removeEventListener('click', onLinkClick)
     }
@@ -151,8 +158,16 @@ export default function App() {
   }, [doc])
   useEffect(() => {
     const out = () => flushRef.current()
+    // leaving with an edit not yet saved (or one the server refused): start the save and let the browser ask first
+    const ask = (e: BeforeUnloadEvent) => {
+      if (!pending.current && !saving.current) return
+      flushRef.current()
+      e.preventDefault()
+      e.returnValue = '' // older browsers need it set to show the prompt
+    }
     window.addEventListener('pagehide', out)
-    return () => window.removeEventListener('pagehide', out)
+    window.addEventListener('beforeunload', ask)
+    return () => { window.removeEventListener('pagehide', out); window.removeEventListener('beforeunload', ask) }
   }, [])
 
   const openDoc = (p: Parsed, d: ModelDoc, id: string, ver: string | null) => {
