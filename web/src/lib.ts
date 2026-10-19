@@ -53,11 +53,13 @@ export interface SourceDoc { date: string | null; kind: DocKind; title: string; 
 export interface Source {
   symbol: string; exchange: 'NSE'; basis: 'consolidated' | 'standalone'; industry?: string | null
   fetched_at: string; price_at: string | null
-  years: Record<string, string> // FY2024 -> "NSE filing" | "Excel export"
+  years: Record<string, string> // FY2024 -> "NSE filing" | "Excel export" | "Excel export (restated)" (your one-click choice)
   missing: string[] // "FY2019 to FY2022: why"
   from: string | null // who filled the years filings lack: "your Excel export", "this model"...
   mismatches: { year: string; line: string; filing: number; export: number }[] // over 1%, on years both have
   notes: string[]; documents: SourceDoc[]
+  // years a later filing restated (model.merge): both numbers, and whether you switched to the restated one
+  restated?: { year: string; line: string; filed: number; restated: number; used: boolean }[]
 }
 export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market; quarters?: Quarters | null; source?: Source | null }
 /** Trailing twelve months (model.ttm): the four quarters ending `end`, each row summed (null if one is missing). */

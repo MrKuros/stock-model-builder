@@ -1212,3 +1212,5 @@ details.moved > :not(summary) { margin-top: 8px; }
 .kpi-list { list-style: none; margin: 8px 0 6px; padding: 0; display: grid; gap: 4px; }
 .kpi-list li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 4px 0; border-bottom: 1px solid var(--rule); font-size: 14px; }
 .kpi-list li > span:first-child { flex: 1 1 140px; }
+.restated-l li { margin-bottom: 6px; }
+.restated-l .btn { margin-top: 4px; }

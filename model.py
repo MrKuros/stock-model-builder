@@ -792,14 +792,18 @@ def merge(filed, other):
     have = {d.date(): i for i, d in enumerate(filed["dates"])}
     rows = {d: h for d, h in zip(filed["dates"], filed["hist"])}
     whence = ((other.get("source") or {}).get("years")) or {}
-    filled, mism, notes, gaps = [], [], [], {}
+    filled, mism, notes, gaps, pair = [], [], [], {}, {}
     for d, h in zip(other["dates"], other["hist"]):
         if d.date() not in have:
             rows[d] = h
             filled.append(fy(d))
             continue
         fd = filed["dates"][have[d.date()]]
+        if whence.get(fy(d)) == RESTATED_USE:  # you chose the restated year (use_restated): a refresh keeps it
+            rows[fd] = h
+            continue
         f = rows[fd] = dict(rows[fd])
+        pair[fy(d)] = (f, h)
         extra = h["borrowings"] - f["borrowings"]  # also for a refreshed fetched year: it keeps its leases
         if extra > MERGE_TOL * max(h["borrowings"], 1.0):
             f["borrowings"] += extra
@@ -815,6 +819,7 @@ def merge(filed, other):
                 gaps[fy(d)][k] = (a, b)
                 if abs(a - b) > MERGE_TOL * max(abs(b), 1.0):
                     mism.append({"year": fy(d), "line": line, "filing": a, "export": b})
+    restated = []
     for y, g in gaps.items():
         nxt = gaps.get(f"FY{int(y[2:]) + 1}", {})
         off = lambda gg, k, tol: k in gg and abs(gg[k][0] - gg[k][1]) > tol * max(abs(gg[k][1]), 1.0)  # noqa: E731
@@ -825,6 +830,9 @@ def merge(filed, other):
             notes.append(f"{y} looks restated later: {what} as first filed Rs {_inr(g[k][0])} cr, Rs {_inr(g[k][1])} cr "
                          f"on the export’s restated basis. Growth and margins from {y} into FY{int(y[2:]) + 1} aren’t like "
                          f"for like, and the defaults from history carry that break.")
+            # both rows kept, so the year can be switched in one click (use_restated) and back
+            restated.append({"year": y, "line": what, "filed": g[k][0], "restated": g[k][1], "used": False,
+                             "filed_row": pair[y][0], "row": pair[y][1]})
     dates = sorted(rows)
     sm, fm = other.get("market") or {}, filed.get("market") or {}
     at = {d.date(): i for i, d in enumerate(other["dates"])}
@@ -834,8 +842,28 @@ def merge(filed, other):
               "face_value": fm.get("face_value") or sm.get("face_value"),
               "price_hist": hist_of("price_hist"), "shares_hist": hist_of("shares_hist")}
     co = {"name": filed["name"], "dates": dates, "hist": _derive([rows[d] for d in dates]), "market": market,
-          "quarters": filed.get("quarters") or other.get("quarters")}
+          "quarters": filed.get("quarters") or other.get("quarters"), "restated": restated}
     return co, sorted(filled), mism, notes
+
+
+RESTATED_USE = "Excel export (restated)"  # Company.source years: a filed year you switched to its restated numbers
+
+
+def use_restated(co, year, use=True):
+    """The company with `year` switched to the restated numbers merge() kept (use=True) or back to the filed ones: the
+    whole year's row from that side, the history derived again (the next year's capex and returns read it), and the
+    source saying so. ValueError when no restated numbers were kept for that year."""
+    src = co.get("source") or {}
+    e = next((x for x in src.get("restated") or [] if x.get("year") == year), None)
+    lab = labels(co["dates"])
+    if e is None or year not in lab:
+        raise ValueError(f"No restated numbers are kept for {year}. Add years from an Excel export on the Overview to "
+                         "compare them again.")
+    rows = [dict(h) for h in co["hist"]]
+    rows[lab.index(year)] = dict(e["row"] if use else e["filed_row"])
+    return {**co, "hist": _derive(rows),
+            "source": {**src, "years": {**(src.get("years") or {}), year: RESTATED_USE if use else "NSE filing"},
+                       "restated": [dict(x, used=use) if x is e else x for x in src["restated"]]}}
 
 
 # For checking a proposed mapping of a leftover tag (mapping_checks): the lines a tag may map to, with a one-line

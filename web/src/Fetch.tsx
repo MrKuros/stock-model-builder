@@ -296,7 +296,7 @@ function spans(ys: string[]) {
 
 /** On the Overview of a company added by ticker: where each year came from, what's missing, where filings and
  * the export disagree, and the documents. An Excel export can fill the missing years, right here. */
-export function SourceNote({ company, onCompany }: { company: Company; onCompany: (p: Parsed, c: Company) => void }) {
+export function SourceNote({ company, doc, onCompany }: { company: Company; doc: ModelDoc; onCompany: (p: Parsed, c: Company) => void }) {
   useMinute()
   const href = useHref()
   const file = useRef<HTMLInputElement>(null)
@@ -309,7 +309,20 @@ export function SourceNote({ company, onCompany }: { company: Company; onCompany
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
   if (!s?.symbol) return null
   const yrs = Object.entries(s.years)
-  const nse = yrs.filter(([, w]) => w === 'NSE filing').map(([y]) => y), other = yrs.filter(([, w]) => w !== 'NSE filing').map(([y]) => y)
+  const nse = yrs.filter(([, w]) => w === 'NSE filing').map(([y]) => y)
+  const chosen = yrs.filter(([, w]) => w === 'Excel export (restated)').map(([y]) => y)
+  const other = yrs.filter(([, w]) => w !== 'NSE filing' && w !== 'Excel export (restated)').map(([y]) => y)
+  const restated = s.restated ?? []
+  // a year with both rows kept gets its own line with the switch; an older model only has the sentence
+  const notes = s.notes.filter(n => !restated.some(r => n.startsWith(`${r.year} looks restated later`)))
+  const useRestated = async (year: string, use: boolean) => {
+    setError(null)
+    setBusy(use ? `Switching ${year} to the restated numbers…` : `Switching ${year} back…`)
+    try {
+      const p = await api<Parsed>('/api/restated', postJson({ company, year, use, filings: doc.filings, notes: doc.notes, excluded_years: doc.excluded_years }))
+      onCompany(p, p.company)
+    } catch (e) { setError((e as Error).message) } finally { setBusy(null) }
+  }
   const upload = async (f: File | undefined) => {
     if (!f) return
     setError(null)
@@ -342,6 +355,7 @@ export function SourceNote({ company, onCompany }: { company: Company; onCompany
       <ul>
         {nse.length > 0 && <li><b>{spans(nse)}</b>: NSE’s annual results filings ({s.basis}), read by rules.</li>}
         {other.length > 0 && <li><b>{spans(other)}</b>: {s.from ?? 'an Excel export'}, for years NSE has no filing with a balance sheet.</li>}
+        {chosen.length > 0 && <li><b>{spans(chosen)}</b>: the restated numbers, chosen by you (below).</li>}
         {s.missing.map(m => <li key={m} className="miss">Not available: {m}.</li>)}
         <li>Price and share count: NSE, checked {ago(s.price_at)} (Refresh at the top).</li>
       </ul>
@@ -354,7 +368,17 @@ export function SourceNote({ company, onCompany }: { company: Company; onCompany
         </table></div>
         <p className="small-note">Net profit is compared before the minority’s share on both sides. Where the export’s borrowings are higher, the difference is lease liabilities a filing keeps in other liabilities; they’re moved into borrowings and listed in the notes below.</p>
       </details>}
-      {s.notes.length > 0 && <ul className="fetch-notes">{s.notes.map((n, i) => <li key={i}>{n}</li>)}</ul>}
+      {restated.length > 0 && <ul className="fetch-notes restated-l">{restated.map(r => (
+        <li key={r.year}>
+          <b>{r.year} {r.line}</b>: first filed <span className="num">Rs {Math.round(r.filed).toLocaleString('en-IN')} cr</span>, restated by a later
+          filing to <span className="num">Rs {Math.round(r.restated).toLocaleString('en-IN')} cr</span>.{' '}
+          {r.used ? <>The model uses the restated year, so growth into the next year is like for like.{' '}
+            <button type="button" className="link" disabled={!!busy} onClick={() => useRestated(r.year, false)}>Use the first-filed numbers</button></>
+          : <>The model uses the first-filed numbers, so growth and margins into the next year aren’t like for like.{' '}
+            <button type="button" className="btn" disabled={!!busy} onClick={() => useRestated(r.year, true)}>Use the restated {r.year}</button></>}
+        </li>))}</ul>}
+      {notes.length > 0 && <ul className="fetch-notes">{notes.map((n, i) => <li key={i}>{n}{/ looks restated later/.test(n)
+        ? ' To switch to the restated year in one click, add years from an Excel export below; the two are compared again.' : ''}</li>)}</ul>}
       {s.documents.length > 0 && <details className="fold">
         <summary>{s.documents.length} documents on NSE (annual reports, call transcripts, presentations)</summary>
         <ul className="doc-links">{s.documents.map((d, i) => <li key={i}>

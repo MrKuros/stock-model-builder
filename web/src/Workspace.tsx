@@ -204,7 +204,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     case 'valuation': page = <ValuationPage {...common} />; break
     case 'checks': page = <Evidence {...common} upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals}
       toggleYear={toggleYear} pendingYear={pendingYear} defaultsNote={defaultsNote} />; break
-    default: page = <Note {...common} changed={<Changed doc={doc} setDoc={setDoc} projection={proj} />} provenance={<SourceNote company={company} onCompany={onCompany} />} />
+    default: page = <Note {...common} changed={<Changed doc={doc} setDoc={setDoc} projection={proj} />} provenance={<SourceNote company={company} doc={doc} onCompany={onCompany} />} />
   }
 
   return (

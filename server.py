@@ -1358,6 +1358,22 @@ def defaults(req: DefaultsRequest):
     return req.payload()["defaults"]
 
 
+class RestatedRequest(DefaultsRequest):
+    year: str = Field(pattern=r"^FY\d{4}$")
+    use: bool = True
+
+
+@app.post("/api/restated")
+def restated(req: RestatedRequest):
+    """One click: a year a later filing restated, switched to the restated numbers (or back), by rules from the two
+    rows the merge kept (model.use_restated). The dashboard payload for the new company; the client saves it."""
+    try:
+        co = model.use_restated(req.company.model_dump(), req.year, req.use)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return _company_payload(co, req.excluded_years, [f.model_dump() for f in req.filings], req.notes)
+
+
 @app.post("/api/company")
 def refresh(req: DefaultsRequest):
     """Everything the dashboard derives from the company, again: after a filing is attached or removed."""
@@ -1576,12 +1592,15 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
         mism = [m for m in prev.get("mismatches") or [] if (m["year"], m["line"]) not in new] + mism
     source = {"symbol": sym, "exchange": "NSE", "basis": basis, "industry": q.get("industry"),
               "fetched_at": today.isoformat(timespec="seconds"), "price_at": _ago(q["age"]),
-              "years": {y: (prev.get("years") or {}).get(y, model.EXPORT) if y in filled or not filed else "NSE filing"
-                        for y in labels},
+              "years": {y: (prev.get("years") or {}).get(y, model.EXPORT) if y in filled or not filed
+                        or (prev.get("years") or {}).get(y) == model.RESTATED_USE else "NSE filing" for y in labels},
               "missing": _spans(gaps), "from": (prev.get("from") if old and prev else whose)
               if filled or (not filed and other) else None,
               "mismatches": [{**m, "filing": round(m["filing"], 2), "export": round(m["export"], 2)} for m in mism],
-              "notes": notes, "documents": []}
+              "notes": notes, "documents": [],
+              # restated years with both rows (model.use_restated); an earlier fetch's stay until compared again
+              "restated": (new_r := co.pop("restated", None) or []) + [
+                  r for r in prev.get("restated") or [] if r.get("year") not in {x["year"] for x in new_r}]}
     co["source"] = source
     payload = _company_payload(co, (), read)
     restated = restatements(co, MODELS)

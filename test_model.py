@@ -546,6 +546,33 @@ def filings_check(co):
     assert [n.split(" ")[0] for n in nn if "restated" in n] == ["FY2023"] and m3["hist"][7]["revenue"] == filed["hist"][1]["revenue"], nn
     last = dict(co, hist=[dict(h, revenue=h["revenue"] * 1.15) if i == 9 else h for i, h in enumerate(co["hist"])])
     assert not any("restated" in n for n in model.merge(filed, last)[3])
+    # one click: the restated year in (both rows were kept), the next year's capex and returns read it, and back again
+    r3 = m3["restated"]
+    assert [(r["year"], r["line"], r["used"]) for r in r3] == [("FY2023", "revenue", False)], r3
+    assert r3[0]["restated"] == re_["hist"][7]["revenue"] and r3[0]["filed"] == filed["hist"][1]["revenue"], r3
+    c3 = dict(m3, source={"years": dict.fromkeys(model.labels(m3["dates"]), "NSE filing"), "restated": r3})
+    on = model.use_restated(c3, "FY2023")
+    assert on["hist"][7]["revenue"] == re_["hist"][7]["revenue"] and on["source"]["years"]["FY2023"] == model.RESTATED_USE
+    assert on["source"]["restated"][0]["used"] is True and c3["hist"][7]["revenue"] == filed["hist"][1]["revenue"], "a copy"
+    assert on["hist"][8]["capex"] == on["hist"][8]["net_block"] - on["hist"][7]["net_block"] + on["hist"][8]["cwip"] \
+        - on["hist"][7]["cwip"] + on["hist"][8]["dep"]
+    off = model.use_restated(on, "FY2023", False)
+    assert off["hist"] == model._derive(m3["hist"]) and off["source"]["years"]["FY2023"] == "NSE filing", "back exactly"
+    try:
+        model.use_restated(c3, "FY2022")
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "No restated numbers" in str(e)
+    # a refresh (the model itself as the other side) keeps your choice
+    again = model.merge(filed, on)[0]
+    assert again["hist"][7]["revenue"] == re_["hist"][7]["revenue"] and again["restated"] == [], again["restated"]
+    import server  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+    body = {"company": server.Company.model_validate(c3).model_dump(mode="json"), "year": "FY2023"}
+    got = TestClient(server.app).post("/api/restated", json=body)
+    assert got.status_code == 200 and got.json()["company"]["hist"][7]["revenue"] == re_["hist"][7]["revenue"], got.text
+    assert got.json()["company"]["source"]["years"]["FY2023"] == model.RESTATED_USE
+    assert TestClient(server.app).post("/api/restated", json=dict(body, year="FY2019")).status_code == 422
     # the model's defaults never read 1,000% interest off a company with almost no borrowings
     tiny = [dict(h, borrowings=0.5) for h in co["hist"]]
     assert model.default_assumptions(tiny)["int_rate"] == model.INT_CAP
