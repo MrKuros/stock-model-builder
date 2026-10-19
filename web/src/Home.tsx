@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Confirm, Menu, Scale, ScaleHead, Verdict, latestOf, slugOf } from './Shell'
+import { Confirm, Menu, Scale, ScaleHead, ScaleKey, Verdict, latestOf, slugOf } from './Shell'
 import { pathOf, placed } from './route'
-import { api, clock, fmt, rs, gap, verdict, type ModelSummary, type VerdictKind, type WatchList } from './lib'
+import { api, clock, fmt, properName, rs, gap, verdict, type ModelSummary, type VerdictKind, type WatchList } from './lib'
 import { ago, streamFetch } from './Fetch'
 import { month } from './Statements'
 import { Prices, Spark, WatchSection } from './Watch'
@@ -120,6 +120,7 @@ export default function Home({ models, error, build, onAdd, onWatch, watch, setW
           <label className="sort">Sort <select className="sel" value={sort} onChange={e => setSort(e.target.value as Sort)}>
             {Object.entries(SORTS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         </div>
+        <ScaleKey />
         <div className="cov-head" aria-hidden="true"><span>Company</span><ScaleHead /><span>Verdict</span><span>To look at</span></div>
         {shown.length === 0
           ? <p className="pad-s">No company matches. <button type="button" className="link" onClick={() => setChip('all')}>Show all {latest.length}</button></p>
@@ -146,12 +147,12 @@ function Row({ m, hist, versions, onDelete }: { m: ModelSummary; hist?: Paramete
   const slug = slugOf(m.id)
   const v = m.values
   const g = gap(m.price, v?.base)
-  const state = `${m.symbol ?? 'from an Excel export'} · ${m.reviewed_at ? 'reviewed' : 'draft'}`
+  const state = `${m.symbol ?? 'from an Excel export'} · ${m.reviewed_at ? 'reviewed' : 'not reviewed'}`
   const signs = m.flags ?? 0
   return (
     <li className="cov-row">
       <div className="c-name">
-        <a className="c-open" href={pathOf(slug, 'summary')}>{m.company}</a>
+        <a className="c-open" href={pathOf(slug, 'summary')}>{properName(m.company)}</a>
         <span className="c-meta">{state}{m.new_results?.length ? <b> · new results</b> : null}</span>
         {v?.base != null && <p className="c-say">{assumes(m)}</p>}
       </div>
@@ -159,8 +160,8 @@ function Row({ m, hist, versions, onDelete }: { m: ModelSummary; hist?: Paramete
         ? <div className="c-fix"><p className="c-say">No value yet: {m.why === 'final-year free cash flow is negative'
             ? 'in the last forecast year the business spends more cash than it makes, so there’s nothing to value.'
             : `${(m.why ?? 'open it to see why').replace(/\.$/, '')}.`}</p>
-            {m.why === 'final-year free cash flow is negative'
-              ? <a className="btn" href={pathOf(slug, 'forecast', '', null, 'capex_pct')}>Fix the forecast: capex</a>
+            {m.why === 'final-year free cash flow is negative' || m.why?.startsWith('the shares come out worth nothing')
+              ? <a className="btn" href={pathOf(slug, 'forecast', '', null, 'capex_pct')}>Fix the forecast</a>
               : <a className="btn" href={pathOf(slug, 'value', '', null, 'inputs')}>See why</a>}</div>
         : <div className="c-scale"><Scale price={m.price} bear={v.bear} base={v.base} bull={v.bull} /><Spark pts={hist} /></div>}
       <div className="c-vd">
@@ -170,7 +171,7 @@ function Row({ m, hist, versions, onDelete }: { m: ModelSummary; hist?: Paramete
       </div>
       <div className="c-look">
         <a href={pathOf(slug, 'risks')} className={signs ? 'warn' : undefined}>{m.flags == null ? 'Warning signs' : signs ? `${signs} warning sign${signs > 1 ? 's' : ''}` : 'No warning signs'}</a>
-        {m.results_to && <span>Results to {month(m.results_to)}{m.new_results?.length ? <b> · new results</b> : null}</span>}
+        {m.results_to && <span>Latest results up to {month(m.results_to)}{m.new_results?.length ? <b> · new results</b> : null}</span>}
       </div>
       <Menu label={`More for ${m.company}`} items={[
         { label: 'Open', href: pathOf(slug, 'summary') },
@@ -242,7 +243,7 @@ function CheckAll({ n, models, onSaved }: { n: number; models: ModelSummary[]; o
           ? `; couldn’t reach NSE for ${failed.map(r => r.company).join(', ')}${kept ? `, the list shows results as of ${clock(kept)}` : ''}` : ''}.{failed.length ? <> <button type="button" className="link" onClick={run}>Try again</button></> : null}</>
         : state === 'stopped' ? `Stopped after ${done} of ${n}${found.length ? `; ${found.length} saved with new results` : ''}. The rest weren’t checked.`
         : state === 'failed' ? <>Couldn’t reach NSE at {at}: {error} The list shows results as of {lastSaved ? clock(lastSaved) : 'the last save'}. <button type="button" className="link" onClick={run}>Try again</button></>
-        : `Asks NSE about the ${n === 1 ? 'company' : `${n} companies`} added by ticker; your inputs never change.`}</span>
+        : `Asks NSE about the ${n === 1 ? 'company' : `${n} companies`} added by ticker and adds any new results; your own edits are kept.`}</span>
     </div>
   )
 }

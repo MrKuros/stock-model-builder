@@ -301,9 +301,9 @@ export default function App() {
       setWatchMsg(<>Watching {w.name}. It’s under <a href="/#watching">Watching</a> on Your companies.</>)
     } catch (e) { setWatchMsg(<span className="bad">Couldn’t watch {symbol}: {(e as Error).message}</span>) }
   }
-  // Restore: the open older version is saved as today's; today's own file is kept first (keep=1)
-  // (Saved versions names the version instead: it is read first, after today's last edit is saved)
-  const restore = async (id?: string) => {
+  // Restore: the version is re-read from disk and saved as today's; today's own file is kept first (keep=1). The
+  // banner's Restore means the open version, so edits made while reading it (never saved) are dropped, as it said
+  const restore = async (id: string | undefined = openRef.current ?? undefined) => {
     if (!doc || !parsed) return
     try {
       let [p, d] = [parsed, doc]

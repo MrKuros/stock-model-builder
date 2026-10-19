@@ -81,7 +81,10 @@ export interface ScenarioValue {
   fcff: number[]; pv: number[] | null; pv_sum: number | null; tv: number | null; pv_tv: number | null
   ev: number | null; minority: number | null; equity: number | null; per_share: number | null; upside: number | null
   tv_share: number | null
-  error: string | null // this scenario only, e.g. a negative final-year FCFF (no terminal value); the WACC error is global
+  error: string | null // this scenario only: a negative final-year FCFF, or shares worth nothing; the WACC error is global
+  /** Set when the last forecast year burns cash: the last-year capex (at most) or operating margin (at least) that
+   * stops the burn, null where none would. */
+  fix?: { capex_pct: number | null; ebitda_margin: number | null } | null
   grid: (number | null)[][] // value per share: WACC + steps.wacc (rows) x g + steps.g (columns)
   grid_gm: (number | null)[][] // revenue growth + steps.growth (rows) x EBITDA margin + steps.margin, every year
   implied_growth?: number | null // reverse DCF: flat revenue growth at which value per share = price; null = none in range
@@ -281,6 +284,7 @@ export interface Parsed {
   defaults: Record<string, number>
   default_ends?: Record<string, number> // a fast grower's fades (growth, capex end values); {} otherwise
   checks: string[]
+  share_gap?: { gap: number; now: number; then: number; text: string } | null // shares up since the last balance sheet
   oneoffs: OneOff[]
   ttm?: Ttm | null // null: no quarters, or the last four aren't consecutive
   ttm_prev?: Ttm | null // the four quarters a year earlier, for TTM growth
@@ -392,7 +396,7 @@ export function groupKeys<T>(e: KeyboardEvent<HTMLElement>, ids: T[], cur: T, se
 
 /** Price against value in words, one way everywhere: value / price - 1, "79% upside" or "22% downside". */
 export function gap(price: number | null | undefined, value: number | null | undefined): string | null {
-  if (price == null || value == null || !(price > 0)) return null
+  if (price == null || value == null || !(price > 0) || !(value > 0)) return null // zero or below is no value
   const g = value / price - 1
   return `${noNegZero((Math.abs(g) * 100).toFixed(0))}% ${g >= 0 ? 'upside' : 'downside'}`
 }
@@ -401,10 +405,13 @@ export type VerdictKind = 'cheap' | 'range' | 'dear' | 'fix' | 'none'
 /** Where the price sits against our cautious and hopeful values. ponytail: thresholds are cautious/hopeful only; add a
  * margin-of-safety setting if asked. */
 export function verdict(price: number | null | undefined, v: Partial<Record<Scenario, number | null>> | null | undefined): { kind: VerdictKind; word: string } {
-  if (v?.base == null) return { kind: 'fix', word: 'Needs a fix' }
+  if (v?.base == null || v.base <= 0) return { kind: 'fix', word: 'Needs a fix' } // zero or below is no value
   if (price == null) return { kind: 'none', word: 'No price yet' }
-  if (v.bear != null && price < v.bear) return { kind: 'cheap', word: 'Looks cheap' }
-  if (v.bull != null && price > v.bull) return { kind: 'dear', word: 'Looks expensive' }
+  const bear = v.bear != null && v.bear > 0 ? v.bear : null, bull = v.bull != null && v.bull > 0 ? v.bull : null
+  if (bear != null && price < bear) return { kind: 'cheap', word: 'Looks cheap' }
+  if (bull != null && price > bull) return { kind: 'dear', word: 'Looks expensive' }
+  // a range needs both ends: a cautious or hopeful case without a value is a case to fix, never "inside"
+  if (bear == null || bull == null) return { kind: 'fix', word: 'Needs a fix' }
   return { kind: 'range', word: 'Inside our range' }
 }
 
@@ -416,6 +423,13 @@ export function sevCounts(fs: Forensic[] | null | undefined) {
   for (const f of fs ?? []) c[f.severity]++
   return { ...c, signs: c.high + c.medium + c.low }
 }
+
+const SMALL = new Set(['AND', 'OF', 'THE', 'FOR', 'IN'])
+/** A name filed in capitals in title case ("TATA CONSUMER PRODUCTS LIMITED" -> "Tata Consumer Products Limited");
+ * words of up to three letters stay as they are (JSW, TCS, ITC). Mixed-case names are left alone.
+ * ponytail: on screen only, the saved name is unchanged; a four-letter acronym (NTPC) reads "Ntpc" until a list is needed */
+export const properName = (n: string) => (/[a-z]/.test(n) ? n : n.replace(/[A-Z][A-Z&.'-]*/g, (w, i) =>
+  SMALL.has(w) && i > 0 ? w.toLowerCase() : w === 'LTD' || w === 'LTD.' ? w[0] + w.slice(1).toLowerCase() : w.length <= 3 ? w : w[0] + w.slice(1).toLowerCase()))
 
 /** Where a year's numbers came from, in the words the UI may show: anything not on this list reads "an Excel export", so
  * no data vendor's name can reach the screen. */

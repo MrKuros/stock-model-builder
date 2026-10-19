@@ -5,7 +5,7 @@ import { Confirm, More, Next, PageHead } from './Shell'
 import { ago, streamFetch, useMinute } from './Fetch'
 import { useHref } from './route'
 import {
-  DOC_KINDS, api, fmt, isAnnual, money, postJson, rs, sourceLabel, when, type Company, type ModelDoc, type ModelSummary, type OneOffNote,
+  DOC_KINDS, api, fmt, isAnnual, money, postJson, properName, rs, sourceLabel, when, type Company, type ModelDoc, type ModelSummary, type OneOffNote,
   type Parsed, type Projection, type Proposal,
 } from './lib'
 
@@ -20,11 +20,16 @@ export function spans(ys: string[]) {
   }
   return out.map(([a, b]) => (a === b ? a : `${a}–${b.slice(-2)}`)).join(', ')
 }
+const LOCAL = 'your local data source'
 /** Where each reported year came from, in the allowed words only: [["NSE filings", "FY2023–26"], ["an Excel export", "FY2015–22"]]. */
 export function yearSources(company: Company, years: string[]): [string, string][] {
   const by = new Map<string, string[]>()
+  // added by ticker with no upload: the older years came from the local data source, not from a file you gave it
+  // (source.from names the source at run time; it never reaches the screen)
+  const local = !!company.source?.symbol && !/excel/i.test(company.source?.from ?? '')
   for (const y of years) {
-    const w = company.source?.years[y], l = w === 'Excel export (restated)' ? 'an Excel export (restated)' : sourceLabel(w)
+    const w = company.source?.years[y], l0 = w === 'Excel export (restated)' ? 'an Excel export (restated)' : sourceLabel(w)
+    const l = local && l0.startsWith('an Excel') ? LOCAL : l0
     by.set(l, [...(by.get(l) ?? []), y])
   }
   return [...by].map(([l, ys]) => [l, spans(ys)])
@@ -44,7 +49,7 @@ export default function Documents({ parsed, doc, setDoc, projection, versions, u
   const ai = useAi()
   const { company, years } = parsed
   const s = company.source
-  const short = company.name.replace(/\s+(ltd\.?|limited)$/i, '').trim()
+  const short = properName(company.name).replace(/\s+(ltd\.?|limited)$/i, '').trim()
   const annual = doc.reports.filter(isAnnual), talk = doc.reports.filter(r => !isAnnual(r))
   const onReports = (f: (rs: ModelDoc['reports']) => ModelDoc['reports']) => setDoc(d => ({ ...d, reports: f(d.reports) }))
   const arRead = (y: string) => Object.keys(doc.notes).filter(k => k.startsWith('ar:') && k.endsWith(`:${y}`)).length
@@ -69,7 +74,8 @@ export default function Documents({ parsed, doc, setDoc, projection, versions, u
       <section className="blk first" id="add" tabIndex={-1} aria-labelledby="docs-h">
         <h2 id="docs-h">Documents</h2>
         <ul className="doc-rows">
-          {from.filter(([l]) => l.startsWith('an Excel')).map(([l, y]) => row(<>Excel export, {y}</>, 'Read by rules'))}
+          {from.filter(([l]) => l.startsWith('an Excel')).map(([, y]) => row(<>Excel export, {y}</>, 'Read by rules'))}
+          {from.filter(([l]) => l === LOCAL).map(([, y]) => row(<>Older years, {y}</>, 'Added automatically from your local data source · read by rules'))}
           {s?.symbol && row(<>NSE annual results filings, {from.find(f => f[0] === 'NSE filings')?.[1] ?? 'none'}</>, 'Read by rules')}
           {doc.filings.length > 0 && row(<>Results filings kept with the model ({doc.filings.length})</>, 'Read by rules',
             <a href="#filings" onClick={() => { const d = document.getElementById('filings') as HTMLDetailsElement | null; if (d) d.open = true }}>Review</a>)}
@@ -217,7 +223,8 @@ function WhereFrom({ parsed, doc, onCompany }: { parsed: Parsed; doc: ModelDoc; 
         <p className="small-note">Net profit is compared before the minority’s share on both sides. Where the export’s borrowings are higher, the
           difference is lease liabilities a filing keeps in other liabilities; they’re moved into borrowings.</p>
       </More>}
-      {(restated.length > 0 || fresh) && <More title="Years restated later" n={restated.length + (fresh?.changes.length ?? 0)}>
+      {/* open while the model uses numbers that aren't like for like: a choice that changes the numbers isn't folded away */}
+      {(restated.length > 0 || fresh) && <More id="restated" open={restated.some(r => !r.used) || !!fresh} title="Years restated later" n={restated.length + (fresh?.changes.length ?? 0)}>
         <ul className="fetch-notes restated-l">{restated.map(r => (
           <li key={r.year}><b>{r.year} {r.line}</b>: first filed <span className="num">Rs {money(r.filed)} cr</span>, restated by a later filing to{' '}
             <span className="num">Rs {money(r.restated)} cr</span>.{' '}
@@ -234,7 +241,7 @@ function WhereFrom({ parsed, doc, onCompany }: { parsed: Parsed; doc: ModelDoc; 
       </More>}
       {notes.length > 0 && <More title="Notes on leases and borrowings" n={notes.length}>
         <ul className="fetch-notes">{notes.map((n, i) => <li key={i}>{n}</li>)}</ul></More>}
-      {parsed.checks.length > 0 && <div id="data"><More title="Data notes on the reported years" n={parsed.checks.length}>
+      {parsed.checks.length > 0 && <div id="data"><More open={!!parsed.share_gap} title="Data notes on the reported years" n={parsed.checks.length}>
         <ul className="check-list" id="a-data" tabIndex={-1}>{parsed.checks.map(c => <li key={c}>{c}</li>)}</ul></More></div>}
     </>
   )
@@ -258,13 +265,13 @@ function Audit({ parsed, doc, projection }: { parsed: Parsed; doc: ModelDoc; pro
   return (
     <div className="ledger">
       <div className="lg head" aria-hidden="true"><div>Claim</div><div>Source and calculation</div><div>Check</div></div>
-      {sv?.per_share != null && v && <Claim id="verdict" kind="rule"
+      {sv && sv.per_share != null && sv.per_share > 0 && v && <Claim id="verdict" kind="rule"
         claim={<>Our values: cautious <span className="num">Rs {rs(v.scenarios.bear.per_share ?? NaN)}</span>, central <span className="num ours">Rs {rs(sv.per_share)}</span>,
           hopeful <span className="num">Rs {rs(v.scenarios.bull.per_share ?? NaN)}</span></>}
         src={<>Cash flows to the whole business over {projection!.years.length} years, discounted at <span className="num">{pc(v.wacc)}</span> (cost of
           equity {pc(v.ke)}, borrowing {pc(v.kd_after_tax)} after tax, {pc(v.we)} equity weight), long-run growth <span className="num">{pc(v.g)}</span> after;
           share value = company value − debt + cash + investments, over {v.shares != null ? `${money(v.shares)} cr` : 'no'} shares.</>} st="Rules ✓" />}
-      {sv?.per_share == null && <Claim id="verdict" kind="rule" claim="No value yet" cls="wait"
+      {!((sv?.per_share ?? 0) > 0) && <Claim id="verdict" kind="rule" claim="No value yet" cls="wait"
         src={v?.error ?? sv?.error ?? 'No share count, or the model is still calculating.'} st="See Is it cheap?" />}
       {sv?.implied_growth != null && <Claim kind="rule" claim={<>The price assumes <span className="num mkt">{pc(sv.implied_growth)}</span> sales growth a year</>}
         src={<>Steady sales growth in every forecast year, other inputs as set; searched from −30% to +80% in 5-point steps, then narrowed until our

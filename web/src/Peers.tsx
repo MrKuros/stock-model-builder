@@ -127,7 +127,7 @@ export function PeersSection({ parsed, doc, setDoc, projection, short }: {
         </span>}
       </div>
       {choosing
-        ? <Pick {...{ p, own, short, ai, typed, setTyped, find, pick, picking, ticked, toggle, approve, addHand, editing, run: !!run && !run.stopped }}
+        ? <Pick {...{ p, own, ai, typed, setTyped, find, pick, picking, ticked, toggle, approve, addHand, editing, run: !!run && !run.stopped }}
             cancel={() => { setEditing(false); setTicked(p.chosen) }} />
         : <>
           <p className="why">{short} against {p.chosen.length} listed {p.chosen.length === 1 ? 'company' : 'companies'} in its line of business, each on its last
@@ -143,8 +143,8 @@ export function PeersSection({ parsed, doc, setDoc, projection, short }: {
 }
 
 /** Choosing the peers: the rule candidates (and the AI's picks with their checks) as a ticked list, plus add-by-name. */
-function Pick({ p, own, short, ai, typed, setTyped, find, pick, picking, ticked, toggle, approve, addHand, editing, run, cancel }: {
-  p: PeersDoc; own: string | null; short: string; ai: ReturnType<typeof useAi>; typed: string; setTyped: (s: string) => void
+function Pick({ p, own, ai, typed, setTyped, find, pick, picking, ticked, toggle, approve, addHand, editing, run, cancel }: {
+  p: PeersDoc; own: string | null; ai: ReturnType<typeof useAi>; typed: string; setTyped: (s: string) => void
   find: (s: string) => void; pick: () => void; picking: boolean; ticked: string[]; toggle: (s: string) => void; approve: () => void
   addHand: (c: PeerCandidate) => void; editing: boolean; run: boolean; cancel: () => void
 }) {
@@ -155,10 +155,11 @@ function Pick({ p, own, short, ai, typed, setTyped, find, pick, picking, ticked,
   const aiOff = ai?.available === false
   const cands = p.candidates
   return <>
-    <p className="why">Compare {short} with listed companies in the same line of business: size, growth, margins, returns, debt and
-      P/E, EV/EBITDA, P/B at today’s prices. Rules find candidates on NSE (same sector, closest in size){aiOff ? '; you tick the ones that fit' : '; the AI picks the closest by business mix, rules check each pick, and you approve the set'}.</p>
+    {/* the page answer above already says how peers are picked: here only what is compared, once candidates exist */}
+    {cands.length > 0 && <p className="why">Compared on size, growth, margins, returns, debt and P/E, EV/EBITDA, P/B at today’s prices. Candidates
+      come from the same NSE sector, closest in size.</p>}
     {!cands.length && (own
-      ? <div className="empty-state"><p>No peers picked yet. Rules find listed companies in the same line of business{aiOff ? '' : '; AI can pick the closest'}; you approve the set.</p>
+      ? <div className="empty-state"><p className="small muted">Start by listing same-sector companies on NSE.</p>
           <p className="next-act"><button type="button" className="primary" disabled={run} onClick={() => find(own)}>Find peers on NSE</button>
             {aiOff && <button type="button" className="btn" disabled>Let AI pick (AI off)</button>}</p></div>
       : <form className="peer-sym" onSubmit={e => { e.preventDefault(); if (SYMBOL.test(sym)) find(sym) }}>

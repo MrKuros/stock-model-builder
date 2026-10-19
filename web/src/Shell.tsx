@@ -67,7 +67,7 @@ export function Scale({ price, bear, base, bull, size = 'row', ghost }: {
   const label = `Our central value Rs ${rs(base)}${bear != null && bull != null ? ` (cautious Rs ${rs(bear)} to hopeful Rs ${rs(bull)})` : ''}`
     + ` against today’s price Rs ${rs(price)}: ${gap(price, base)}`
   return (
-    <span className={`scale ${size}`} role="img" aria-label={label}>
+    <span className={`scale ${size}`} role="img" aria-label={label} title={label}>
       <i className="ax" />
       {bear != null && bull != null && <i className="bd" style={{ left: `${at(bear)}%`, width: `${Math.max(at(bull) - at(bear), 0.8)}%` }} />}
       {ghost != null && ghost > 0 && <i className="gh" style={{ left: `${at(ghost)}%` }} />}
@@ -83,6 +83,11 @@ export const ScaleHead = () => (
     <span className="sh-ticks"><span style={{ left: '0%' }}>¼×</span><span style={{ left: '25%' }}>½×</span>
       <span className="p" style={{ left: '50%' }}>Today’s price</span><span style={{ left: '75%' }}>2×</span><span style={{ left: '100%' }}>4×</span></span>
   </span>
+)
+/** What the marks on a scale mean, in one line above the list (the head itself hides on narrow screens). */
+export const ScaleKey = () => (
+  <p className="sh-key"><span><i className="k-bd" /> our cautious-to-hopeful range</span><span><i className="k-bs" /> our central value</span>
+    <span><i className="k-px" /> today’s price</span><span>Further right: our value is further above the price</span></p>
 )
 
 /** "Looks expensive · 22% downside": the verdict word and the gap in words, the same everywhere. */
@@ -147,8 +152,8 @@ export const Next = ({ lead, children }: { lead: ReactNode; children: ReactNode 
   <aside className="next-box" aria-label="What to do next"><p>{lead}</p><div className="next-act">{children}</div></aside>
 )
 /** One labelled click for the rest: the summary says what is inside and how many. */
-export const More = ({ title, n, id, children }: { title: ReactNode; n?: number; id?: string; children: ReactNode }) => (
-  <details className="fold" id={id}><summary>{title}{n != null ? ` (${n})` : ''}</summary>{children}</details>
+export const More = ({ title, n, id, open, children }: { title: ReactNode; n?: number; id?: string; open?: boolean; children: ReactNode }) => (
+  <details className="fold" id={id} open={open}><summary>{title}{n != null ? ` (${n})` : ''}</summary>{children}</details>
 )
 
 /** A native modal <dialog> that follows `open`; Esc and the backdrop close it. */

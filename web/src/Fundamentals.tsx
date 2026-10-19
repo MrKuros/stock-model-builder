@@ -3,7 +3,7 @@ import { useWidth } from './Ruler'
 import { More, Next, PageHead, Sev } from './Shell'
 import { useHref } from './route'
 import { forecastOf } from './Tracking'
-import { fmt, money, shortYear, type ArNote, type Forensic, type Parsed, type Row, type Tracking } from './lib'
+import { fmt, money, properName, shortYear, type ArNote, type Forensic, type Parsed, type Row, type Tracking } from './lib'
 
 /** Fundamentals: what the company reported, before any forecast. Everything here derives from the parsed history
  * (parsed.hist, parsed.ratios) and the forensic radar's lit flags; nothing is computed on the server for it. */
@@ -92,11 +92,11 @@ function Plot({ years, lines, kind, show, refLine, label, neg, marks }: {
   )
 }
 
-export default function Fundamentals({ parsed, tracking, notes }: { parsed: Parsed; tracking?: Tracking | null; notes: Record<string, unknown> }) {
+export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { parsed: Parsed; tracking?: Tracking | null; notes: Record<string, unknown>; hasAnnual: boolean }) {
   const href = useHref()
   const f = series(parsed)
   const { hist, years, n, col, revenue, pat, cfo, margin, long } = f
-  const short = parsed.company.name.replace(/\s+(ltd\.?|limited)$/i, '').trim()
+  const short = properName(parsed.company.name).replace(/\s+(ltd\.?|limited)$/i, '').trim()
   const last = years[n - 1]
   const ratios = parsed.ratios
   const dso = ratios.map(r => r.dso ?? null)
@@ -231,7 +231,7 @@ export default function Fundamentals({ parsed, tracking, notes }: { parsed: Pars
         </div>
       </section>
 
-      <OperatingNumbers notes={notes} />
+      <OperatingNumbers notes={notes} hasAnnual={hasAnnual} />
 
       <Next lead="Every line and every year behind these charts."><a className="primary" href={href('statements')}>Open the statements</a></Next>
     </>
@@ -240,7 +240,7 @@ export default function Fundamentals({ parsed, tracking, notes }: { parsed: Pars
 
 /** Operating numbers from the latest approved annual-report note (order book, headcount, attrition, volumes...), each in
  * the unit printed, with its quote. Read by AI, checked by rules, approved by you; they never feed a number. */
-function OperatingNumbers({ notes }: { notes: Record<string, unknown> }) {
+function OperatingNumbers({ notes, hasAnnual }: { notes: Record<string, unknown>; hasAnnual: boolean }) {
   const href = useHref()
   const n = Object.entries(notes).filter(([k]) => k.startsWith('ar:kpis:')).map(([, x]) => x as ArNote)
     .sort((a, b) => b.year.localeCompare(a.year))[0]
@@ -252,8 +252,9 @@ function OperatingNumbers({ notes }: { notes: Record<string, unknown> }) {
         <ul className="kpi-list">{n.rows.map((r, i) => (
           <li key={i}><span>{r.label}</span> <b className="num">{r.amount == null ? '–' : r.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}{r.unit === '%' ? '%' : ` ${r.unit ?? ''}`}</b>
             <span className="small dim"> p.{r.page}<span className="sr">: “{r.quote}”</span></span></li>))}</ul>
-      </> : <p className="why">Order book, headcount, attrition or volumes, as the annual report prints them. None read yet: attach the
-        report on <a href={href('documents', 'add')}>Documents and sources</a> and have AI read “Operating numbers”.</p>}
+      </> : <p className="why">Order book, headcount, attrition or volumes, as the annual report prints them. None read yet: {hasAnnual
+        ? <>the report is attached; <a href={href('documents', 'reading')}>have AI read “Operating numbers”</a> from it.</>
+        : <>attach the report on <a href={href('documents', 'add')}>Documents and sources</a> and have AI read “Operating numbers”.</>}</p>}
     </section>
   )
 }

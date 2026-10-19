@@ -5,7 +5,7 @@ import { More, Next, PageHead, Sev } from './Shell'
 import { useHref } from './route'
 import { subjectOf } from './Note'
 import {
-  SEV_WORD, fmt, isAnnual, sevCounts, shortYear, type Forensic, type ModelDoc, type OneOff, type OneOffNote, type Parsed, type Proposal,
+  SEV_WORD, fmt, isAnnual, properName, sevCounts, shortYear, type Forensic, type ModelDoc, type OneOff, type OneOffNote, type Parsed, type Proposal,
   type Row, type Severity,
 } from './lib'
 
@@ -23,12 +23,14 @@ export function riskWords(fs: Forensic[] | null | undefined): string {
   const c = sevCounts(fs)
   if (!fs?.length) return 'The checks haven’t run on this model yet.'
   const first = c.high ? `${cap(w(c.high))} serious warning sign${c.high > 1 ? 's' : ''}.` : 'Nothing serious.'
-  const needAr = (fs ?? []).some(f => f.severity === 'not_checked' && f.needs)
+  // the annual report unlocks only the checks that need it; the rest wait for more years
+  const ar = fs.filter(f => f.severity === 'not_checked' && f.needs).length, short = c.not_checked - ar
   const rest = [
     c.medium ? `${w(c.medium)} ${c.medium > 1 ? 'things are' : 'thing is'} worth a look` : '',
     c.low ? `${w(c.low)} minor ${c.low > 1 ? 'signs' : 'sign'}` : '',
     c.ok ? `${w(c.ok)} check${c.ok > 1 ? 's' : ''} passed` : '',
-    c.not_checked ? `${w(c.not_checked)} can’t run ${needAr ? 'until the annual report is read' : 'on the years this file has'}` : '',
+    ar ? `${w(ar)} can’t run until the annual report is read` : '',
+    short ? `${w(short)} can’t run on the years this file has` : '',
   ].filter(Boolean)
   const list = rest.length > 1 ? `${rest.slice(0, -1).join(', ')} and ${rest[rest.length - 1]}` : rest[0] ?? ''
   return list ? `${first} ${cap(list)}.` : first
@@ -108,7 +110,7 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
   const ai = useAi()
   const { company, years } = parsed
   const hist = parsed.hist ?? company.hist
-  const short = company.name.replace(/\s+(ltd\.?|limited)$/i, '').trim()
+  const short = properName(company.name).replace(/\s+(ltd\.?|limited)$/i, '').trim()
   const flags = bySeverity(parsed.forensic ?? [])
   const c = sevCounts(parsed.forensic)
   const signs = flags.filter(lit), passed = flags.filter(f => f.severity === 'ok'), waiting = flags.filter(f => f.severity === 'not_checked')
@@ -204,10 +206,11 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
             <li key={year}>
               <h3>{items.map(o => o.note).join('. ')}</h3>
               <p className="small">In the rules’ figures: <b>{out ? 'no, you left it out' : inRules ? 'yes' : 'no, older than the three years the rules use'}</b>.</p>
-              <div className="rk-act">
+              {/* an older year changes no rule figure, so it gets no button; one you left out can still go back */}
+              {(inRules || out) && <div className="rk-act">
                 <button type="button" className="btn" aria-pressed={out} aria-busy={pendingYear === year} aria-disabled={pendingYear != null || undefined}
                   onClick={() => toggleYear(year)}>{pendingYear === year ? 'Working…' : out ? `Put ${year} back in` : `Leave ${year} out`}</button>
-              </div>
+              </div>}
               <Explain year={year} company={company} filings={doc.filings} notes={doc.notes} ai={ai} proposals={doc.proposals}
                 report={annual.find(r => r.year === year)} note={doc.notes[`oneoff:${year}`] as OneOffNote | undefined}
                 onProposals={onProposals} onReports={onReports} />

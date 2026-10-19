@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useAi, withFlagNotes, withNotes } from './Sources'
 import NotePage, { shortName, subjectOf } from './Note'
 import ModelView, { UPGRADED, inputName, type Upgrade } from './Model'
@@ -17,7 +17,7 @@ import { month } from './Statements'
 import { HrefCtx, PAGES, REPORTED, STATEMENTS, pathOf, placed, type Href, type Page, type Route } from './route'
 import type { SaveState } from './App'
 import {
-  NAMES, api, clock, defaultPaths, flat, fmt, gap, groupKeys, postJson, rs, seed, sevCounts, verdict, when, SCENARIOS,
+  NAMES, api, clock, defaultPaths, flat, fmt, gap, groupKeys, isAnnual, postJson, rs, seed, sevCounts, verdict, when, SCENARIOS,
   type Company, type Kind, type Filing, type ModelDoc, type ModelSummary, type Parsed, type Projection, type Proposal, type Scenario,
 } from './lib'
 
@@ -251,7 +251,8 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const v = proj?.valuation ?? null
   const m = company.market
   const price = v?.price ?? valuation.price ?? m?.price ?? null
-  const values = { bear: v?.scenarios.bear.per_share ?? null, base: v?.scenarios.base.per_share ?? null, bull: v?.scenarios.bull.per_share ?? null }
+  const pos = (x: number | null | undefined) => (x != null && x > 0 ? x : null) // zero or below is no value: the bar says so
+  const values = { bear: pos(v?.scenarios.bear.per_share), base: pos(v?.scenarios.base.per_share), bull: pos(v?.scenarios.bull.per_share) }
   const mine = values[doc.active]
   const short = sym ?? shortName(company.name)
   const hasQuarters = !!company.quarters?.dates.length
@@ -322,7 +323,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
         {CHECK}<span>Check for new results</span></button>
   let page: ReactNode
   switch (route.page) {
-    case 'business': page = <Fundamentals parsed={parsed} tracking={tracking} notes={doc.notes} />; break
+    case 'business': page = <Fundamentals parsed={parsed} tracking={tracking} notes={doc.notes} hasAnnual={doc.reports.some(isAnnual)} />; break
     case 'statements': page = <StatementsPage parsed={parsed} doc={doc} projection={proj} sub={route.sub} excel={excelButton('primary', 'Download Excel')} />; break
     case 'forecast': page = <ModelView {...common} anchor={route.anchor} upgrades={upgrades} onApply={applyUpgrades} onKeep={() => setUpgrades([])} />; break
     case 'value': page = <ValuationPage {...common} />; break
@@ -439,6 +440,9 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
 
 /** Case, years, Check for new results and Excel: the same four, in the same order, on every page. On pages that show
  * reported years only, case and years are dimmed (still focusable) and say so. */
+// the same words as Our forecast's "Copy or reset the cases"
+const CASE_HINT = 'Central is our forecast. Cautious and hopeful start at central’s sales growth −/+3 points and margin −/+1.5 points.'
+
 function Controls({ where, doc, setDoc, inert, check, excel }: {
   where: 'bar' | 'sheet'; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; inert: boolean; check: ReactNode; excel: ReactNode
 }) {
@@ -447,8 +451,8 @@ function Controls({ where, doc, setDoc, inert, check, excel }: {
   return (
     <div className={`ctl ${where}${inert ? ' inert' : ''}`}>
       <div className="ctl-g">
-        <span className="ctl-l" id={`${id}-c`}>Case</span>
-        <div className="seg" role="group" aria-labelledby={`${id}-c`}>
+        <span className="ctl-l" id={`${id}-c`} title={CASE_HINT}>Case</span>
+        <div className="seg" role="group" aria-labelledby={`${id}-c`} aria-describedby={`${id}-ch`}>
           {ORDER.map(s => (
             <button key={s} type="button" aria-pressed={doc.active === s} aria-disabled={inert || undefined}
               onClick={() => pick(s)} onKeyDown={e => groupKeys(e, ORDER, doc.active, pick)}>{NAMES[s]}</button>
@@ -456,12 +460,13 @@ function Controls({ where, doc, setDoc, inert, check, excel }: {
         </div>
       </div>
       <div className="ctl-g">
-        <label className="ctl-l" htmlFor={`${id}-y`}>Years</label>
+        <label className="ctl-l" htmlFor={`${id}-y`} title="How many years to forecast">Years forecast</label>
         <select id={`${id}-y`} className="sel" value={doc.n} aria-disabled={inert || undefined}
           onChange={e => { if (!inert) setDoc(d => ({ ...d, n: +e.target.value })) }}>
           {HORIZONS.map(h => <option key={h} value={h}>{h}</option>)}
         </select>
       </div>
+      <p id={`${id}-ch`} className={where === 'sheet' ? 'small muted ctl-hint' : 'sr'}>{CASE_HINT}</p>
       {inert && <span className="ctl-note">Reported years only</span>}
       {check}
       {excel}
@@ -474,22 +479,11 @@ function Controls({ where, doc, setDoc, inert, check, excel }: {
 function EffectBar({ e, now, price, active, save, changes, onUndo, onReset }: {
   e: Effect; now: number | null; price: number | null; active: Scenario; save: SaveState; changes: string[]; onUndo: () => void; onReset: () => void
 }) {
-  const ref = useRef<HTMLDivElement>(null)
   const ch = e.from != null && now != null && e.from > 0 ? now / e.from - 1 : null
   const side = (x: number | null) => (x == null || price == null ? null : x >= price ? 'above' : 'below')
   const saved = save.error ? <span className="bad">Couldn’t save</span> : save.at && Date.parse(save.at) >= e.at - 1000 ? <>✓ Saved</> : <>Saving…</>
-  useLayoutEffect(() => { // the bar sits under the sticky company bar (desktop) or the phone's top bar
-    const set = () => {
-      const top = document.querySelector<HTMLElement>(matchMedia('(max-width: 760px)').matches ? '.mtop' : '.bar')
-      ref.current?.style.setProperty('--eff-top', `${top?.offsetHeight ?? 0}px`)
-    }
-    set()
-    addEventListener('resize', set)
-    return () => removeEventListener('resize', set)
-  }, [])
   return (
-    // ponytail: a zero-height sticky holder, so the bar floats over the page instead of pushing the row you're editing down
-    <div className="eff-wrap" ref={ref}><div className="effect" role="status" aria-live="polite">
+    <div className="eff-wrap"><div className="effect" role="status" aria-live="polite">
       <p className="eff-1">
         <span>Our {NAMES[active].toLowerCase()} value</span>{' '}
         {e.from != null && <s className="num">Rs {rs(e.from)}</s>} → <b className="num ours">{now != null ? `Rs ${rs(now)}` : 'no value'}</b>

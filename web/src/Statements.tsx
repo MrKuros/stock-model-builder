@@ -1,7 +1,7 @@
 import { useRef, type ReactNode } from 'react'
 import { Next, PageHead } from './Shell'
 import { STATEMENTS, navigate, useHref } from './route'
-import { fmt, type LayoutLine, type LineKind, type ModelDoc, type Parsed, type Projection, type Quarters, type Row, type Ttm } from './lib'
+import { fmt, money, properName, type LayoutLine, type LineKind, type ModelDoc, type Parsed, type Projection, type Quarters, type Row, type Ttm } from './lib'
 
 const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf', 'fcf', 'fcff'])
 
@@ -28,13 +28,16 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
   const tabs = STATEMENTS.filter(t => t[0] !== 'quarters' || quarterly || sub === 'quarters')
   const cur = STATEMENTS.find(t => t[0] === sub) ?? STATEMENTS[0]
   const tab = cur[2] as string
+  const moved = parsed.sources?.moved_out
   const hide = parsed.sources?.basis === 'cogs' ? undefined : new Set(['cogs'])
   return (
     <>
       <PageHead label="Evidence · Statements" title={cur[1]}
         purpose={tab === 'QUARTERS'
-          ? <>The last ten quarters as {parsed.company.name.replace(/\s+(ltd\.?|limited)$/i, '')} reported them, then the last full year. TTM = the last four
+          ? <>The last ten quarters as {properName(parsed.company.name).replace(/\s+(ltd\.?|limited)$/i, '')} reported them, then the last full year. TTM = the last four
             quarters added up, so the run rate sits next to the annual figure.</>
+          : tab === 'RATIOS' ? <>Percentages, days and multiples worked out from the statements, every year. Reported years in black; forecast years
+            in blue, marked E.</>
           : <>Every line, every year. Reported years in black; forecast years in blue, marked E. Rs crore.</>}
         answer={tab === 'QUARTERS' ? (quarterly ? <>Quarters to {month(quarterly.quarters.dates[quarterly.quarters.dates.length - 1])}.</> : <>No quarterly figures in this file.</>)
           : <>Reported {histYears[0]}–{histYears[nHist - 1].slice(-2)}{proj ? <>, then our {NAMES[active].toLowerCase()} case’s forecast to {projection!.years[n - 1]}</> : null}.</>} />
@@ -51,6 +54,10 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
             : <p className="val-empty">This Excel export has no quarterly figures. Exports that include the Quarters block
                 show the last ten quarters and the trailing twelve months here.</p>
           : <StatementTable layout={layout} section={tab} years={years} rows={rows} nHist={nHist} hide={hide} />}
+        {tab === 'PROFIT & LOSS' && proj && moved?.year === histYears[nHist - 1] && <p className="guard small">
+          The forecast grows from Rs {money((hist[nHist - 1].revenue ?? 0) - moved.revenue_out)} cr, not the reported Rs {money(hist[nHist - 1].revenue ?? 0)} cr:
+          Rs {money(moved.revenue_out)} cr of {histYears[nHist - 1]} sales ({moved.reason || 'a business that left the group'}) left the group, so the step down
+          into {projection!.years[0]} is deliberate. <a href={href('forecast', 'growth')}>Change it in Our forecast</a></p>}
         {tab === 'RATIOS' && (
           <p className="muted small">
             ROE = net profit / average equity. ROCE = EBIT / average (equity + borrowings + lease liabilities), EBIT = profit before tax +

@@ -92,6 +92,10 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
   const P = price != null ? <span className="num mkt">Rs {rs(price)}</span> : null
   const V = shown != null ? <span className="num ours">Rs {rs(shown)}</span> : null
   const answer: ReactNode = !v ? 'Working out the value…'
+    // the case you're on, not the central one: its own reason and the way to fix it
+    : (shown == null || shown <= 0) && active !== 'base' && !v.error && v.shares != null
+      ? <>Our {NAMES[active].toLowerCase()} case has no value yet: {(sa?.error ?? 'its inputs gave an error.').replace(/^./, c => c.toLowerCase())}{' '}
+        <a className="primary" href={href('forecast', 'capex_pct')}>Fix the forecast</a></>
     : shown == null || shown <= 0 ? <NoValue parsed={parsed} projection={projection} />
     : price == null ? <>{our.replace(/^./, c => c.toUpperCase())} is {V} a share. There’s no share price to compare it with: type one under How we value it.</>
     : k === 'dear' ? <><b>No.</b> At {P} the price is above all three of our values: {gap(price, shown)} to {our} of {V}.</>
@@ -109,6 +113,9 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
         purpose={<>Today’s price against what our forecast says one share is worth, and how sure that is. To see what the price itself
           assumes, open <a href={href('priced-in')}>What does the price assume?</a></>}
         answer={answer} />
+      {parsed.share_gap && shown != null && shown > 0 && <p className="guard">Shares are up {fmt(parsed.share_gap.gap, 'pct')} since the last balance
+        sheet (an IPO or QIP?). The cash that raised isn’t in net debt yet, so this value per share reads low.{' '}
+        <a href={href('documents', 'data')}>See the data note</a></p>}
 
       {v && !v.error && shown != null && v.shares != null && <>
         <section className="pane v-line" aria-labelledby="line-h">
@@ -120,16 +127,19 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
 
         <section className="blk" id="sure" aria-labelledby="sure-h">
           <h2 id="sure-h">How sure are we?</h2>
+          {proj && <p className="why">{DEFINE(proj.years[n - 1])}</p>}
           {grids && price != null
             ? <p className="answer s">We tried {cells.length} combinations of the four numbers we’re least sure of around {our};{' '}
-                <b>{cells.filter(x => x < price).length} of {cells.length} came out below the price.</b></p>
+                <b>{cells.filter(x => x >= price).length} of {cells.length} are at or above today’s price.</b></p>
             : <p className="why">No share price, so nothing to compare the combinations with.</p>}
           {grids && <div className="sens-grids">
-            <Grid id="sens-wacc" title="Discount rate × long-run growth" rowsName="Discount rate (rows)" colsName="long-run growth after the forecast (columns)"
+            <Grid id="sens-wacc" title="Discount rate × long-run growth" rowsName="Discount rate" colsName="long-run growth"
               grid={sa!.grid} rows={v.steps!.wacc.map(d => fmt(v.wacc + d, 'pct'))} cols={v.steps!.g.map(d => fmt(v.g + d, 'pct'))} price={price} />
-            <Grid id="sens-gm" title="Sales growth × operating margin" rowsName="Sales growth, points from ours (rows)" colsName="operating margin, points from ours (columns)"
+            <Grid id="sens-gm" title="Sales growth × operating margin" rowsName="Sales growth, points from ours" colsName="operating margin, points from ours"
               grid={sa!.grid_gm} rows={v.steps!.growth.map(pp)} cols={v.steps!.margin.map(pp)} price={price} />
           </div>}
+          {grids && price != null && <p className="small muted grid-key"><span className="gk hit">▲ Rs</span> at or above today’s price ·{' '}
+            <span className="gk">Rs</span> below it · the deeper the shade, the further from the price · the boxed cell is ours</p>}
         </section>
 
         {m && <section className="blk" id="yardsticks" aria-labelledby="yard-h">
@@ -215,6 +225,9 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
   )
 }
 
+/** The two settings every grid and table here leans on, in one plain line. */
+const DEFINE = (last: string, n?: number) => `Discount rate = the yearly return you’d want for the risk of owning this business; long-run growth = how fast its cash grows each year after ${n ? `the ${n} forecast years` : last.replace(/E$/, '')}, forever.`
+
 const pp = (d: number) => (d === 0 ? 'ours' : `${d > 0 ? '+' : '−'}${Math.abs(d * 100)}`)
 
 /** A 5 × 5 grid: cells at or above the price get ▲ and an outline; the cell we use is boxed and labelled "ours". */
@@ -226,11 +239,11 @@ function Grid({ id, title, rowsName, colsName, grid, rows, cols, price }: {
   const up = price == null ? 0 : all.filter(x => x >= price).length
   return (
     <figure className="grid-f">
-      <figcaption id={id}><b>{title}</b>{price != null && <span className="small"> {up} of {all.length} combinations reach the price.</span>}
-        <span className="small muted"> Value a share, Rs. {rowsName} × {colsName}.</span></figcaption>
+      <figcaption id={id}><b>{title}</b>{price != null && <span className="small"> {up} of {all.length} at or above today’s price.</span>}
+        <span className="small muted"> Value a share, Rs.</span></figcaption>
       <div className="table-wrap sens-wrap" tabIndex={0} role="region" aria-labelledby={id}>
         <table className="sens-table">
-          <thead><tr><td />{cols.map(c => <th scope="col" key={c}>{c}</th>)}</tr></thead>
+          <thead><tr><th scope="col" className="g-corner">{rowsName} ↓<br />{colsName} →</th>{cols.map(c => <th scope="col" key={c}>{c}</th>)}</tr></thead>
           <tbody>{grid.map((row, k) => (
             <tr key={rows[k]}><th scope="row">{rows[k]}</th>
               {row.map((val, i) => {
@@ -241,7 +254,7 @@ function Grid({ id, title, rowsName, colsName, grid, rows, cols, price }: {
                 return <td key={i} className={`${cur ? 'is-current' : ''}${hit ? ' hit' : ''}`} style={style}>
                   {hit && <span aria-hidden="true">▲ </span>}{val == null ? '–' : rs(val)}
                   {cur && <span className="ours-tag" aria-hidden="true">ours</span>}{cur && <span className="sr"> (ours)</span>}
-                  {hit && <span className="sr"> (reaches the price)</span>}
+                  {hit && <span className="sr"> (at or above the price)</span>}
                 </td>
               })}
             </tr>
@@ -288,7 +301,7 @@ export function PricedIn({ parsed, doc, projection }: Props) {
 const MOVES: Record<string, [string, string]> = {
   growth: ['Sales growth', 'a year'], ebitda_margin: ['Operating margin', 'of sales'], wacc: ['Discount rate', 'a year'], g: ['Long-run growth', 'after the forecast'],
 }
-const stepWords = (k: string, s: number) => `${+(s * 100).toFixed(1)} point${s === 0.01 ? '' : 's'}`
+const stepWords = (s: number) => `${+(s * 100).toFixed(1)} point${s === 0.01 ? '' : 's'}`
 
 /** What moves the value: each input one step lower and higher (one shared scale, centred on our value), and the level
  * at which the price would be fair, tagged against the company's own record. */
@@ -320,7 +333,7 @@ function Moves({ parsed, doc, v, value, price }: { parsed: Parsed; doc: ModelDoc
       <h2 id="moves-h">What moves the value</h2>
       <p className="why">Each input moved one step lower and higher, the rest of our central case left alone. The bar is centred on our value of{' '}
         <span className="num ours">Rs {rs(value)}</span>; blue raises the value, grey lowers it. The last column is where that input would have to be for{' '}
-        <span className="num mkt">Rs {rs(price)}</span> to be fair.</p>
+        <span className="num mkt">Rs {rs(price)}</span> to be fair. {DEFINE('', doc.n)}</p>
       <div className="table-wrap moves-wrap">
         <table className="moves">
           <thead><tr><th scope="col">Input · ours · step</th><th scope="col">Value if the input is one step lower</th><th scope="col"><span className="sr">Bar</span></th>
@@ -330,7 +343,7 @@ function Moves({ parsed, doc, v, value, price }: { parsed: Parsed; doc: ModelDoc
             const ends = [d.down, d.up].filter((y): y is number => y != null)
             const l = Math.min(...ends), r = Math.max(...ends)
             return <tr key={d.key}>
-              <th scope="row"><b>{MOVES[d.key][0]}</b><span className="small muted">{fmt(ours(d.key), 'pct')} {MOVES[d.key][1]} · step ±{stepWords(d.key, d.step)}</span></th>
+              <th scope="row"><b>{MOVES[d.key][0]}</b><span className="small muted">{fmt(ours(d.key), 'pct')} {MOVES[d.key][1]} · step ±{stepWords(d.step)}</span></th>
               <td data-label="One step lower" className="num">{d.down == null ? 'no value' : `Rs ${rs(d.down)}`}</td>
               <td className="mv-bar" aria-hidden="true"><span className="mv-track">
                 {l < value && <i className="lo" style={{ left: `${x(l)}%`, width: `${x(value) - x(l)}%` }} />}

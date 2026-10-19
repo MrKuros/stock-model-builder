@@ -423,6 +423,7 @@ def _company_payload(co, excluded=(), filings=(), notes=None):
         "defaults": (d := model.default_assumptions(up["hist"], exclude=set(excluded), labels=labels)),
         "default_ends": model.default_ends(up["hist"], d),  # a fast grower's defaults fade (end values), else {}
         "checks": model.data_checks(co),
+        "share_gap": model.share_gap(co),  # shares issued since the last balance sheet: Is it cheap? warns beside the value
         "oneoffs": (oneoffs := model.detect_oneoffs(up["hist"], labels)),
         # the note (4.1): rule checks, key numbers against their 3-year median, rolling revenue CAGRs; the forensic
         # radar (4.3) behind most of the rule checks
@@ -1077,6 +1078,7 @@ def _rs(x):
 
 _pc = "{:.1%}".format
 SEVERITY_WORD = {"high": "Red", "medium": "Amber", "low": "Amber (low)"}
+CASE = {"base": "central", "bear": "cautious", "bull": "hopeful"}  # the cases in the words every page uses
 IN_FACTS = ("growth", "ebitda_margin", "tax_rate", "capex_pct", "oi_pct")  # always stated, with where each came from
 MAX_CITES = 24  # ponytail: quotes only, never whole pages; the approved quotes already say what the pages hold
 
@@ -1090,59 +1092,60 @@ def _thesis_facts(doc: "ModelDoc"):
     years, last = [model.fy(d, True) for d in model.projected_dates(co, n)], labels[-1]
     ex, sv = model.expand(sc["base"], n), v["scenarios"]
     avg = lambda k: sum(ex[k]) / n  # noqa: E731
-    price, value, bear, bull = v["price"], sv["base"]["per_share"], sv["bear"]["per_share"], sv["bull"]["per_share"]
+    pos = lambda x: x if x is not None and x > 0 else None  # noqa: E731  (zero or below is no value)
+    price, value, bear, bull = v["price"], *(pos(sv[s]["per_share"]) for s in ("base", "bear", "bull"))
     f = {}
     if price:
         f["price"] = f"Share price: {_rs(price)}"
     for s in ("base", "bear", "bull"):
-        if sv[s]["per_share"] is not None:
-            f[f"value_{s}"] = f"Our {s} value: {_rs(sv[s]['per_share'])} a share"
+        if pos(sv[s]["per_share"]) is not None:
+            f[f"value_{s}"] = f"Our {CASE[s]} value: {_rs(sv[s]['per_share'])} a share"
         elif sv[s]["error"] or v["error"]:
-            f[f"value_{s}"] = f"Our {s} case has no value: {sv[s]['error'] or v['error']}"
+            f[f"value_{s}"] = f"Our {CASE[s]} case has no value: {sv[s]['error'] or v['error']}"
     if value is not None and price:
-        f["upside"] = f"{'Upside' if value > price else 'Downside'} to our base value: {_pc(abs(value / price - 1))}"
-        f["gap"] = f"Price {'above' if price > value else 'below'} our base value by {_rs(abs(price - value))} a share"
+        f["upside"] = f"{'Upside' if value > price else 'Downside'} to our central value: {_pc(abs(value / price - 1))}"
+        f["gap"] = f"Price {'above' if price > value else 'below'} our central value by {_rs(abs(price - value))} a share"
         if bull is not None and price > bull:
-            f["over_bull"] = f"Price above our bull value by {_rs(price - bull)} ({_pc(price / bull - 1)})"
+            f["over_bull"] = f"Price above our hopeful value by {_rs(price - bull)} ({_pc(price / bull - 1)})"
         if bear is not None and price < bear:
-            f["under_bear"] = f"Price below our bear value by {_rs(bear - price)} ({_pc(1 - price / bear)})"
-    f["growth"] = f"Our base revenue growth, average {years[0]}–{years[-1]}: {_pc(avg('growth'))} a year"
-    f["margin"] = f"Our base EBITDA margin, average {years[0]}–{years[-1]}: {_pc(avg('ebitda_margin'))}"
+            f["under_bear"] = f"Price below our cautious value by {_rs(bear - price)} ({_pc(1 - price / bear)})"
+    f["growth"] = f"Our central sales growth, average {years[0]}–{years[-1]}: {_pc(avg('growth'))} a year"
+    f["margin"] = f"Our central operating margin (EBITDA margin), average {years[0]}–{years[-1]}: {_pc(avg('ebitda_margin'))}"
     if sv["base"].get("implied_growth") is not None:
-        f["implied_growth"] = (f"Flat revenue growth the price needs for {n} years, other inputs at base (reverse DCF): "
+        f["implied_growth"] = (f"Flat sales growth the price needs for {n} years, other inputs as in our central case: "
                                f"{_pc(sv['base']['implied_growth'])} a year")
     elif price and value is not None:
-        f["implied_growth"] = "No flat revenue growth between -30% and +80% a year gets our base value to the price"
+        f["implied_growth"] = "No flat sales growth between -30% and +80% a year gets our central value to the price"
     if not v["error"]:
         val, dv = doc.valuation, model.VALUATION
-        f["wacc"] = f"Discount rate (WACC): {_pc(v['wacc'])}; terminal growth {_pc(v['g'])}"
+        f["wacc"] = f"Discount rate (the yearly return wanted for the risk): {_pc(v['wacc'])}; long-run growth after the forecast {_pc(v['g'])}"
         if val.wacc_override is not None:
-            f["wacc"] += " (WACC typed by you)"
+            f["wacc"] += " (discount rate typed by you)"
         else:  # the cost of equity's parts, and which of them nobody chose for this company
-            names = {"rf": "the risk-free rate", "erp": "the premium", "beta": "beta"}
+            names = {"rf": "the risk-free rate", "erp": "the premium", "beta": "beta (how much the share swings with the market)"}
             dflt = [names[k] for k in names if getattr(val, k) == dv[k]]
-            f["wacc"] += (f"; cost of equity {_pc(v['ke'])} = {_pc(val.rf)} risk-free + beta {val.beta:g} x {_pc(val.erp)} "
+            f["wacc"] += (f"; return shareholders want {_pc(v['ke'])} = {_pc(val.rf)} risk-free + beta {val.beta:g} x {_pc(val.erp)} "
                           "premium" + (f" ({', '.join(dflt)}: the app default, not estimated for this company)" if dflt else
                                        " (set by you)"))
     if sv["base"]["tv_share"] is not None:
-        f["tv_share"] = f"Share of our base enterprise value that is terminal value: {_pc(sv['base']['tv_share'])}"
+        f["tv_share"] = f"Share of our central value that comes from the years after the forecast: {_pc(sv['base']['tv_share'])}"
     # growth history at the price's own horizon (n years), else the longest run the data has; plus the recent pace
     hz = min(n, len(hist) - 1)
     cs = model.cagrs(hist, labels, hz)
     if cs:
         b = max(cs, key=lambda c: c["value"])
-        f[f"best{hz}"] = (f"Fastest {hz}-year revenue growth since {labels[0]}"
+        f[f"best{hz}"] = (f"Fastest {hz}-year sales growth since {labels[0]}"
                           + (f" (the longest run in the data, shorter than the {n} years the price needs)" if hz < n else "")
                           + f": {_pc(b['value'])} a year ({b['from']}–{b['to']})")
     for y in sorted({3, hz}):
         cs = model.cagrs(hist, labels, y)
         if cs:
-            f[f"last{y}"] = f"Revenue growth over the last {y} years ({cs[-1]['from']}–{cs[-1]['to']}): {_pc(cs[-1]['value'])} a year"
+            f[f"last{y}"] = f"Sales growth over the last {y} years ({cs[-1]['from']}–{cs[-1]['to']}): {_pc(cs[-1]['value'])} a year"
     p0 = out["base"][0]
-    for k, name in (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "Net profit")):
+    for k, name in (("revenue", "Revenue"), ("ebitda", "Operating profit (EBITDA)"), ("pat", "Net profit")):
         if hist[-1].get(k) is not None:
             f[f"{k}_last"] = f"{name} {last}: {model._cr(hist[-1][k])}"
-        f[f"{k}_next"] = f"{name} {years[0]}, our base: {model._cr(p0[k])}"
+        f[f"{k}_next"] = f"{name} {years[0]}, our central forecast: {model._cr(p0[k])}"
     show = {"pct": _pc, "x": "{:.2f}x".format, "days": "{:.0f} days".format}
     for k in model.key_numbers(hist, labels):
         if k["last"] is not None:
@@ -1152,7 +1155,7 @@ def _thesis_facts(doc: "ModelDoc"):
     ms = [(y, x["ebitda_margin"]) for y, x in zip(labels, model.ratios(hist)) if x["ebitda_margin"] is not None]
     if len(ms) >= 4:
         lo, hi = min(ms, key=lambda t: t[1]), max(ms, key=lambda t: t[1])
-        f["range_margin"] = (f"EBITDA margin {labels[0]}–{last}: low {_pc(lo[1])} ({lo[0]}), median "
+        f["range_margin"] = (f"Operating margin (EBITDA margin) {labels[0]}–{last}: low {_pc(lo[1])} ({lo[0]}), median "
                              f"{_pc(statistics.median(m for _, m in ms))}, high {_pc(hi[1])} ({hi[0]})")
     if (c := hist[-1]["cash"]) > 2 * max(hist[-2]["cash"], 0.0) and c - hist[-2]["cash"] > 0.05 * hist[-1]["revenue"]:
         f["cash_jump"] = f"Cash {last}: {model._cr(c)}, up from {model._cr(hist[-2]['cash'])} in {labels[-2]}"
@@ -1160,27 +1163,27 @@ def _thesis_facts(doc: "ModelDoc"):
         f["shares"] = f"Share count: {g['text']}"
     if mo := co["sources"].get("moved_out"):
         f["moved_out"] = (f"Our {last} base leaves out {model._cr(mo['revenue_out'])} of revenue and {model._cr(mo['ebitda_out'])} "
-                          f"of EBITDA of a business that left the group ({mo['reason']}); growth applies to the rest")
+                          f"of operating profit (EBITDA) of a business that left the group ({mo['reason']}); growth applies to the rest")
     nb = v.get("note") or {}
     unit = lambda key, x: f"{x:.0f} days" if key in ("dso", "dio", "dpo") else _pc(x)  # noqa: E731
     ours = lambda key: v["wacc"] if key == "wacc" else v["g"] if key == "g" else avg(key)  # noqa: E731
     for d in nb.get("impact", [])[:5]:
         ends = " and ".join(_rs(x) for x in (d["down"], d["up"]) if x is not None)
-        step = f"{d['step']:.0f} days" if d["key"] in ("dso", "dio", "dpo") else f"{d['step'] * 100:g} pp"
+        step = f"{d['step']:.0f} days" if d["key"] in ("dso", "dio", "dpo") else f"{d['step'] * 100:g} percentage point{'' if d['step'] == 0.01 else 's'}"
         f[f"impact_{d['key']}"] = (f"{d['label']} {step} down and up from our {unit(d['key'], ours(d['key']))}: "
-                                   f"our base value {ends} a share")
+                                   f"our central value {ends} a share")
     for k, b in (nb.get("breakevens") or {}).items():
-        name = {"growth": "Flat revenue growth", "ebitda_margin": "EBITDA margin", "wacc": "WACC", "g": "Terminal growth"}[k]
+        name = {"growth": "Flat sales growth", "ebitda_margin": "Operating margin", "wacc": "Discount rate", "g": "Long-run growth"}[k]
         if b["value"] is None:
-            f[f"be_{k}"] = f"No {name.lower()} in the range searched gets our base value to the price"
+            f[f"be_{k}"] = f"No {name.lower()} in the range searched gets our central value to the price"
             continue
-        f[f"be_{k}"] = (f"{name} at which our base value equals the price: {_pc(b['value'])}"
-                        + (" (our base case has no value, so this is far outside it)" if value is None
-                           else f" (more than twice our {_pc(ours(k))}: far outside our base case)"
+        f[f"be_{k}"] = (f"{name} at which our central value equals the price: {_pc(b['value'])}"
+                        + (" (our central case has no value, so this is far outside it)" if value is None
+                           else f" (more than twice our {_pc(ours(k))}: far outside our central case)"
                            if ours(k) > 0 and b["value"] > 2 * ours(k) else ""))
         if k == "ebitda_margin" and len(ms) >= 4 and b["value"] > avg("ebitda_margin"):
             seen = [(y, m) for y, m in ms if m >= b["value"]]
-            f["be_margin_seen"] = (f"Years since {labels[0]} with an EBITDA margin at or above the {_pc(b['value'])} the "
+            f["be_margin_seen"] = (f"Years since {labels[0]} with an operating margin at or above the {_pc(b['value'])} the "
                                    "price needs: " + (", ".join(f"{y} ({_pc(m)})" for y, m in seen) or "none"))
     radar = model.forensic(hist, labels, doc.notes)
     for x in sorted(radar, key=lambda x: model.SEVERITY.index(x["severity"])):  # red first, as the risks rank
@@ -1607,7 +1610,9 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
               "restated": (new_r := co.pop("restated", None) or []) + [
                   r for r in prev.get("restated") or [] if r.get("year") not in {x["year"] for x in new_r}]}
     co["source"] = source
-    if separate and twin:
+    # "keep both, separately": a second company, whether the one saved came from an upload or was itself added by
+    # ticker (same name would save over it). ponytail: a third copy would meet "<name> (NSE)"; number it if that happens
+    if separate and (twin or any(_norm(m["company"]) == _norm(co["name"]) for m in latest_models(MODELS))):
         co["name"] = f"{co['name']} (NSE)"
     payload = _company_payload(co, (), read)
     restated = restatements(co, MODELS)
@@ -2176,11 +2181,14 @@ def _coverage(projs, co, ex, val):
     v = model.valuation(projs, co["hist"], val, ex["base"], co["market"], inputs={"base": ex["base"]})
     sv = v["scenarios"]
     g = ex["base"]["growth"]
-    return {"price": v["price"], "values": {s: sv[s]["per_share"] for s in model.SCENARIOS},
+    # a value of zero or below is no value: the list, the watch history and every badge read None, with the reason
+    pos = {s: sv[s]["per_share"] if (sv[s]["per_share"] or 0) > 0 else None for s in model.SCENARIOS}
+    return {"price": v["price"], "values": pos,
             "implied": sv["base"].get("implied_growth"), "growth": sum(g) / len(g),
-            "why": None if sv["base"]["per_share"] is not None else
+            "why": None if pos["base"] is not None else
             "no share count" if not v["shares"] else "the WACC doesn't clear terminal growth" if v["error"] else
-            "final-year free cash flow is negative" if sv["base"]["error"] else "no value per share"}
+            "final-year free cash flow is negative" if sv["base"].get("fix") is not None else
+            "the shares come out worth nothing on these inputs" if sv["base"]["error"] else "no value per share"}
 
 
 RESTATED = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "Net profit"), ("total_assets", "Total assets"),

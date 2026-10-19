@@ -6,13 +6,13 @@ import { cagrOf } from './Fundamentals'
 import { Next, PageHead, Sev } from './Shell'
 import { useHref } from './route'
 import {
-  api, clock, fmt, money, postJson, rs, verdict, when, type Cagr, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
-  type Path, type Projection, type RuleCheck, type Row, type ThesisNote, type Valuation,
+  api, clock, fmt, money, postJson, properName, rs, verdict, when, type Cagr, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
+  type Path, type Projection, type RuleCheck, type Row, type ScenarioValue, type ThesisNote, type Valuation,
 } from './lib'
 
 /** Average of a straight-line path over the projection: what "ours" means for a faded driver. */
 export const avg = (p: Path | undefined) => (p ? (p.start + (p.end ?? p.start)) / 2 : 0)
-export const shortName = (n: string) => n.replace(/\s+(ltd\.?|limited)$/i, '').trim()
+export const shortName = (n: string) => properName(n).replace(/\s+(ltd\.?|limited)$/i, '').trim()
 const pc = (v: number) => fmt(v, 'pct')
 
 /** A cited number: a button with a dotted underline; it opens its source beside the claim (under the paragraph on a
@@ -81,6 +81,10 @@ export const grew = (x: number) => (x < 0 ? `shrank ${pc(-x)}` : `grew ${pc(x)}`
 /** Revenue growth a year over the last three reported years (null when either end isn't positive). */
 export const last3Of = (parsed: Parsed) => cagrOf((parsed.hist ?? parsed.company.hist).map(h => h.revenue ?? null), 3)
 
+/** The last-year capex or operating margin that stops a cash burn, in words ("capex of at most 10.0% of sales"). */
+export const burnFix = (f: NonNullable<ScenarioValue['fix']>) => [f.capex_pct != null ? `capex of at most ${pc(f.capex_pct)} of sales` : '',
+  f.ebitda_margin != null ? `an operating margin of at least ${pc(f.ebitda_margin)}` : ''].filter(Boolean).join(', or ')
+
 export interface Fix { page: 'forecast' | 'value'; anchor: string; label: string }
 /** The central case's answer in one or two sentences, by rules: where the price sits against our three values and
  * what sales growth the price assumes against the last three years. Summary and the research note both open with it. */
@@ -91,25 +95,24 @@ export function verdictWords(parsed: Parsed, projection: Projection | null): { a
   const sv = v.scenarios.base, value = sv.per_share, price = v.price
   const bear = v.scenarios.bear.per_share, bull = v.scenarios.bull.per_share
   const yrs = projection!.years, end = yrs[yrs.length - 1].replace(/E$/, '')
-  if (value == null) {
-    if (sv.error?.startsWith('Final-year free cash flow')) return {
-      answer: <>We can’t put a value on {name} yet: in {end} it still spends more cash than it makes, so there’s nothing to value.</>,
-      fix: { page: 'forecast', anchor: 'capex_pct', label: 'Fix the forecast: capex' } }
+  if (sv.fix) return {
+    answer: <>We can’t put a value on {name} yet: in {end} it still spends more cash than it brings in, so there’s nothing to
+      value.{burnFix(sv.fix) ? <> In {end}, {burnFix(sv.fix)} would stop the burn, the first step to a value.</> : null}</>,
+    fix: { page: 'forecast', anchor: 'capex_pct', label: 'Fix the forecast' } }
+  if (value == null || value <= 0) {
     if (!v.error && v.shares == null) return { answer: <>We can’t put a value on {name} yet: there’s no share count.</>,
       fix: { page: 'value', anchor: 'v-shares', label: 'Type the share count' } }
     return { answer: <>We can’t put a value on {name} yet: {(v.error ?? sv.error ?? 'the inputs gave an error.').replace(/^./, c => c.toLowerCase())}</>,
-      fix: { page: 'value', anchor: '', label: 'Open How we value it' } }
+      fix: v.error ? { page: 'value', anchor: '', label: 'Open How we value it' } : { page: 'forecast', anchor: 'capex_pct', label: 'Fix the forecast' } }
   }
-  if (value <= 0) return {
-    answer: <>At these inputs our central value leaves nothing for shareholders (<span className="num ours">Rs {rs(value)}</span> a share):
-      the business is worth less than its net debt.</>,
-    fix: { page: 'forecast', anchor: 'capex_pct', label: 'Fix the forecast: capex' } }
   if (price == null) return { answer: <>Our central value is <span className="num ours">Rs {rs(value)}</span> a share. There’s no share
     price in this file to compare it with.</>, fix: { page: 'value', anchor: 'v-price', label: 'Type a price' } }
   const P = <span className="num mkt">Rs {rs(price)}</span>
-  const k = verdict(price, v.scenarios.bear.per_share != null ? { bear, base: value, bull } : { base: value }).kind
+  const k = verdict(price, { bear, base: value, bull }).kind
   const first = k === 'dear' ? <>At {P} the market pays more than even our hopeful value.</>
     : k === 'cheap' ? <>At {P} the price is below even our cautious value.</>
+    : k === 'fix' ? <>At {P} the price is {value > price ? 'below' : 'above'} our central value of <span className="num ours">Rs {rs(value)}</span>; our
+      {bear == null || bear <= 0 ? ' cautious' : ' hopeful'} case has no value yet, so there’s no full range to compare with.</>
     : <>At {P} the price sits inside our range{bear != null && bull != null ? <>, between our cautious <span className="num ours">Rs {rs(bear)}</span> and
       hopeful <span className="num ours">Rs {rs(bull)}</span></> : null}.</>
   const implied = sv.implied_growth ?? null, l3 = last3Of(parsed)
@@ -137,7 +140,7 @@ export function RulerSection({ parsed, doc, projection }: { parsed: Parsed; doc:
       <p className="small-note">Top: value per share. Bottom: the yearly sales growth each value needs. Hatching: faster than any five
         years on record.</p>
       <Ruler price={v.price} bear={v.scenarios.bear.per_share} base={value} bull={v.scenarios.bull.per_share} scale={v.note?.growth_scale ?? null}
-        ours={avg(base.growth)} implied={sv!.implied_growth ?? null} best3={best(parsed.cagrs?.['3'])} best5={best(parsed.cagrs?.['5'])} since={parsed.years[0]} />
+        ours={avg(base.growth)} implied={sv!.implied_growth ?? null} best5={best(parsed.cagrs?.['5'])} since={parsed.years[0]} />
       <details className="fold"><summary>How this is computed</summary>
         <p className="small">The lower scale is our central value at a steady sales growth from −10% to +40% a year, other inputs as set
           (operating margin {pc(avg(base.ebitda_margin))}, discount rate {pc(v.wacc)}, long-run growth {pc(v.g)}). The price’s growth is
@@ -172,8 +175,15 @@ export default function NotePage({ parsed, doc, setDoc, projection }: Props) {
   const ai = useAi()
   const tn = doc.note
   const stale = !!tn && projection?.inputs_hash != null && projection.inputs_hash !== tn.inputs_hash
+  // each fact opens the page that shows its number: forecast lines on the statements, history on How the business is
+  // doing, what the price needs on its own page; value, upside and the discount rate on Is it cheap?
   const factTo = (k: string) => (k.startsWith('flag_') ? href('risks', k.slice(5)) : k.startsWith('in_') ? href('forecast', k.slice(3))
-    : k.startsWith('oneoff_') ? href('risks', 'unusual') : /implied|break|price|need/.test(k) ? href('priced-in') : href('value'))
+    : k.startsWith('oneoff_') ? href('risks', 'unusual')
+    : /^(implied|be_|price|gap|over_|under_)/.test(k) ? href('priced-in')
+    : /_next$/.test(k) ? href('statements', k.replace(/_next$/, ''))
+    : k === 'growth' || k === 'margin' ? href('forecast', k === 'margin' ? 'ebitda_margin' : 'growth')
+    : /_last$|^kn_|^range_|^cash_jump|^best|^last\d|^shares|^moved_out|^lev_/.test(k) ? href('business')
+    : href('value'))
   const notes: { kind: string; text: ReactNode; quote?: string; to?: string }[] = []
   const refN = new Map<string, number>(), refTo = new Map<string, string>()
   if (tn) for (const r of refsOf(tn)) {
@@ -322,7 +332,7 @@ function KeyNumbers({ parsed, proj, next, checks, v }: {
             {p && <td className="num ours">{pe.price_next.pe != null ? `${pe.price_next.pe.toFixed(1)}×` : '–'}</td>}</tr>}
         </tbody>
       </table>
-      <p className="small-note">Black: reported. Grey: the median of the three years before ({pe ? 'P/E: all years' : 'by rules'}). Blue: our central forecast. A circled figure means a rule check lit on it.</p>
+      <p className="small-note">Black: reported. Grey: the median of the three years before{v?.multiples?.median.pe != null ? ' (P/E: all years)' : ''}. Blue: our central forecast. A circled figure means a rule check lit on it.</p>
     </section>
   )
 }

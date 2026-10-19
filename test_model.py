@@ -1079,16 +1079,23 @@ def valuation_check(co, projs, ex):
     b = model.valuation(burn, co["hist"], None, ex["base"], co["market"], dict(ex, bear=dict(ex["bear"], capex_pct=0.4)))
     assert burn["bear"][-1]["fcff"] < 0 and b["error"] is None and b["scenarios"]["base"]["error"] is None, b["error"]
     bb = b["scenarios"]["bear"]
-    assert "negative" in bb["error"] and bb["per_share"] is None and bb["grid"] == [[None] * 5] * 5, bb["error"]
+    assert "spends more cash than it brings in" in bb["error"] and bb["per_share"] is None and bb["grid"] == [[None] * 5] * 5, bb["error"]
     assert bb["implied_growth"] is None and b["scenarios"]["base"]["per_share"] == v["scenarios"]["base"]["per_share"]
     # ... and says why in plain words, with fixes that do give a value when typed as the last year's input
-    assert "capex takes 40.0% of revenue" in bb["error"] and "Any one of these gives it a value" in bb["error"], bb["error"]
-    for key, pat in (("capex_pct", r"capex of at most ([\d.]+)%"), ("ebitda_margin", r"EBITDA margin of at least ([\d.]+)%")):
+    assert "takes 40.0% of sales" in bb["error"] and "Any one of these stops the cash burn" in bb["error"], bb["error"]
+    assert "(" not in bb["error"].split("free cash flow of")[1][:12] and "Rs −" in bb["error"], bb["error"]  # −235, not (235)
+    for key, pat in (("capex_pct", r"capex of at most ([\d.]+)%"), ("ebitda_margin", r"operating margin of at least ([\d.]+)%")):
         x = float(re.search(pat, bb["error"]).group(1)) / 100
+        assert abs(bb["fix"][key] - x) < 5e-4, (key, bb["fix"], x)  # the same figure, as a number for one-click use
         fixed = dict(ex["bear"], capex_pct=0.4)
         fixed[key] = [*fixed[key][:-1], x] if isinstance(fixed[key], list) else [fixed[key]] * 4 + [x]
         pf = model.project(co["hist"], fixed, 5)
         assert pf[-1]["fcff"] > 0, (key, x, pf[-1]["fcff"])
+    # stopping the burn can still leave the shares worth nothing: the number stays (Excel shows it), with an error
+    deep = dict(ex["bear"], capex_pct=[0.9] * 4 + [0.0])
+    nv = model.valuation(dict(projs, bear=model.project(co["hist"], deep, 5)), co["hist"], None, ex["base"],
+                         co["market"])["scenarios"]["bear"]
+    assert nv["fcff"][-1] > 0 and nv["per_share"] < 0 and "no value" in nv["error"] and nv["fix"] is None, nv["error"]
     # the default kd is clamped between rf and ke; a typed one isn't
     for rate, want in ((0.30, 0.135), (0.01, 0.065)):
         hi = dict(ex["base"], int_rate=[rate] * 5)
@@ -2805,6 +2812,16 @@ def fetch_api_check(server, root, co, data):
         sep = next(e["company"] for e in fetch(documents=False, separate=True) if "company" in e)["company"]
         assert sep["source"]["from"] is None and sep["name"].endswith(" (NSE)") and len(sep["dates"]) == 4, sep["name"]
         assert server.slug(sep["name"]) != server.slug(tw["name"])
+        # ... and over a model that was itself added by ticker (no upload to match): still a second company, never a
+        # save over the one you have
+        hold = Path(tempfile.mkdtemp()) / "held"
+        shutil.move(root / server.slug(tw["name"]), hold)
+        own = sep["name"].removesuffix(" (NSE)")
+        mid, _ = server.save_model(server.ModelDoc.model_validate(dict(data, company=dict(sep, name=own))), root)
+        sep2 = next(e["company"] for e in fetch(documents=False, separate=True) if "company" in e)["company"]
+        assert sep2["name"] == f"{own} (NSE)" and server.slug(sep2["name"]) != mid.split("/")[0], (sep2["name"], mid)
+        shutil.rmtree(root / mid.split("/")[0])
+        shutil.move(hold, root / server.slug(tw["name"]))
         lines = [json.loads(x) for x in client.post("/api/track/check").text.splitlines()]
         res = {e["result"]["company"]: e["result"] for e in lines if "result" in e}
         assert lines[-1] == {"done": True} and res["Tracked Co"]["status"] == "new", lines
@@ -2884,7 +2901,10 @@ def net_check(server, co):
                {"toDate": f"{d:%d-%b-%Y}", "period": "Annual", "consolidated": "Consolidated", "xbrl": f"{arch}x/BAD.xml"}],
            api + "corporates-financial-results?index=equities&symbol=BADX&period=Quarterly": [],
            api + "integrated-filing-results?index=equities&symbol=BADX": {"data": []},
-           f"{arch}x/BAD.xml": b"<html>Access Denied</html>"}
+           f"{arch}x/BAD.xml": b"<html>Access Denied</html>",
+           api + "NextApi/globalSearch/equity?symbol=nestle": {"data": [
+               {"symbol": "NESTLE", "companyName": "Nestle India Limited", "series": "BE"},
+               {"symbol": "NESTLEIND", "companyName": "Nestle India Limited", "series": "EQ"}]}}
     calls, online = [], [True]
     client, models, llm, adapter = TestClient(server.app), server.MODELS, ai.llm, server.local_source
     server.MODELS, ai.llm, server.local_source = root, None, None
@@ -2900,6 +2920,8 @@ def net_check(server, co):
             assert str(e) == "NSE has no company with the symbol ZZQQX. Check the spelling, or type its name.", e
         assert sum("ZZQQX" in u for u in calls) == len(sources.SERIES), calls
         assert sources.quote(c, "NEWBE")["series"] == "BE", "a 404 on EQ moves on to the next series"
+        # one row per company name in the search: the main-board symbol wins over an old one
+        assert sources.search(c, "Nestle") == [{"symbol": "NESTLEIND", "name": "Nestle India Limited"}], sources.search(c, "Nestle")
         lines = lambda sym: [json.loads(x) for x in client.post("/api/nse/fetch", json={"symbol": sym}).text.splitlines()]  # noqa: E731
         e = lines("ZZQQX")[-1]
         assert e["final"] and not e["lender"] and "no company with the symbol" in e["error"], e

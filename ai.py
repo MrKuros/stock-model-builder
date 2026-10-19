@@ -969,7 +969,12 @@ def thesis_prompt(name, facts, cites):
             "- If a fact says the export folds exceptional items into other income, judge profit growth on EBITDA, EBIT or a "
             "cited figure before exceptional items, not on reported net profit.\n"
             "- If the discount-rate fact says beta or the premium is the app default, say our value depends on that "
-            "choice, and don't call a WACC break-even within 3 points of ours far-fetched: WACC is a judgement, not a result.\n"
+            "choice, and don't call a discount-rate break-even within 3 points of ours far-fetched: the discount rate is "
+            "a judgement, not a result.\n"
+            "- Use the app's plain names, as the facts do: discount rate, long-run growth, sales growth, operating margin, "
+            "the cautious, central and hopeful cases, percentage points written out; beta only with its meaning (how much "
+            "the share swings with the market). Never write WACC, terminal value, enterprise value, pp, or bear, base "
+            "and bull.\n"
             "- If the margin or growth the price needs lies inside the company's own history (the range and seen-before "
             "facts), call it a bet on the cycle or a return to past results, not something the business has never done.\n"
             "- If a citation's description or quote mentions a sale, slump sale, demerger, transfer to a joint venture or "
@@ -987,7 +992,7 @@ def thesis_prompt(name, facts, cites):
             '{"headline": "one sentence under 160 characters: what the price assumes against what the business does",\n'
             ' "thesis": [exactly 3 of {"head": "a short claim under 90 characters", "text": "2 or 3 sentences under 650 '
             'characters", "refs": ["fact key or citation id"]}],\n'
-            ' "priced_in": "under 450 characters: what the price needs, against our base case",\n'
+            ' "priced_in": "under 450 characters: what the price needs, against our central case",\n'
             ' "risks": [1 to 4 of {"text": "under 350 characters", "refs": [...]}],\n'
             ' "bull_trigger": "under 300 characters: what would lift our value toward or past the price",\n'
             ' "bear_trigger": "under 300 characters: what would lower it",\n'

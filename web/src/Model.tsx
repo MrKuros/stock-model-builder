@@ -134,6 +134,14 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
   const be = v?.note?.breakevens ?? {}
   const needOf = (k: string) => (k === 'growth' ? v?.scenarios[active].implied_growth ?? null
     : k === 'ebitda_margin' && active === 'base' ? be.ebitda_margin?.value ?? null : null)
+  // back to the rule's figure and no longer yours: a new sources object, so Workspace doesn't tag it "manual"
+  const resetOne = (k: string) => setDoc(d => {
+    const { [k]: _, ...src } = d.assumption_sources[d.active] ?? {}
+    return { ...d, scenarios: { ...d.scenarios, [d.active]: { ...d.scenarios[d.active], [k]: seeded[d.active][k] } },
+      assumption_sources: { ...d.assumption_sources, [d.active]: src } }
+  })
+  const fixOf = v?.scenarios[active].fix
+  const burnOf = (k: string) => (k === 'capex_pct' ? fixOf?.capex_pct ?? null : k === 'ebitda_margin' ? fixOf?.ebitda_margin ?? null : null)
   const resetActive = () => setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [active]: seeded[active] },
     assumption_sources: { ...d.assumption_sources, [active]: {} } }))
   const dioUsed = (ratios[nHist - 1]?.dio ?? 0) >= 1
@@ -145,9 +153,9 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
     <DriverRow key={k} k={k} big={big} kind={kindOf(k)} open={open === k} onToggle={() => setOpen(o => (o === k ? null : k))}
       value={valueOf(k)} rule={seeded[active][k]} you={!!propOf(srcOf(k)) || srcOf(k) === 'manual' || (srcOf(k) !== 'history' && isYou(k))}
       src={srcWords(k)} history={ratios.map(r => r[k])} years={histYears} effect={perStep(k, impact, kindOf(k))} need={needOf(k)} name={name}
-      onChange={p => setA(prev => ({ ...prev, [k]: p }))}>
+      burn={burnOf(k)} onChange={p => setA(prev => ({ ...prev, [k]: p }))} onReset={() => resetOne(k)}>
       <RuleFold k={k} kind={kindOf(k)} rule={seeded[active][k]} active={active} parsed={parsed} doc={doc} />
-      {k === 'growth' && <MovedOutCard doc={doc} setDoc={setDoc} year={histYears[nHist - 1]} revenue={hist[nHist - 1].revenue ?? 0} used={sources?.moved_out ?? null} />}
+      {(k === 'growth' || k === 'ebitda_margin') && <MovedOutCard doc={doc} setDoc={setDoc} year={histYears[nHist - 1]} revenue={hist[nHist - 1].revenue ?? 0} used={sources?.moved_out ?? null} />}
       <Linked k={k} parsed={parsed} />
       <Pending k={k} doc={doc} kind={kindOf(k)} active={active} busy={!!draft.busy} docOf={docOf} current={valueOf(k)}
         onUse={p => draft.accept([p])} onKeep={p => draft.reject(p)} />
@@ -159,7 +167,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
       <PageHead label="Work on it · Our forecast" title="Our forecast"
         purpose={<>The assumptions behind our value. Rules set each one from {name}’s own last three years; change any of them and the
           value updates as you type. Recalculating never calls AI.</>}
-        answer={v && v.scenarios[active].per_share != null
+        answer={v && (v.scenarios[active].per_share ?? 0) > 0
           ? <>With these inputs one share is worth <span className="num ours">Rs {rs(v.scenarios[active].per_share!)}</span> in the {NAMES[active].toLowerCase()} case.
             {ownCount ? <> {ownCount === 1 ? 'One number is' : `${ownCount} numbers are`} yours; the rest come from the rules.</> : <> Every number comes from the rules.</>}</>
           : <>These inputs don’t give a value yet{v?.scenarios[active].error ? `: ${v.scenarios[active].error.replace(/^./, c => c.toLowerCase())}` : '.'}</>} />
@@ -219,9 +227,10 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
 }
 
 /** One input: closed, a row (name, history, value and its source, effect on the value); open, the editor in place. */
-function DriverRow({ k, big, kind, open, onToggle, value, rule, you, src, history, years, effect, need, name, onChange, children }: {
+function DriverRow({ k, big, kind, open, onToggle, value, rule, you, src, history, years, effect, need, burn, name, onChange, onReset, children }: {
   k: string; big: boolean; kind: Kind; open: boolean; onToggle: () => void; value: Path; rule: Path; you: boolean; src: ReactNode
-  history: (number | null)[]; years: string[]; effect: string | null; need: number | null; name: string; onChange: (p: Path) => void; children: ReactNode
+  history: (number | null)[]; years: string[]; effect: string | null; need: number | null; burn: number | null; name: string
+  onChange: (p: Path) => void; onReset: () => void; children: ReactNode
 }) {
   const [label, sub] = PLAIN[k] ?? [k, '']
   const gradual = value.end != null
@@ -254,11 +263,14 @@ function DriverRow({ k, big, kind, open, onToggle, value, rule, you, src, histor
               </span>
             : <Stepper id={id} label={label} kind={kind} value={value.start} you={you} onChange={x => onChange({ start: x, end: null })} />}
           <span className="small">{changed
-            ? <><Src kind="you">You set this</Src> Rule said {path(rule, kind)} · <button type="button" className="link" onClick={() => onChange(rule)}>Reset to {path(rule, kind)}</button></>
+            ? <><Src kind="you">You set this</Src> Rule said {path(rule, kind)} · <button type="button" className="link" onClick={onReset}>Reset to {path(rule, kind)}</button></>
             : <>This is the rule’s figure.</>}</span>
         </div>
         <Track label={label} kind={kind} value={value.start} rule={rule.start} known={known} need={need} onChange={x => onChange({ start: x, end: value.end })} />
         {guard && <p className="guard">{guard}</p>}
+        {burn != null && <p className="guard"><b>This case has no value yet:</b> in the last forecast year the business spends more cash
+          than it brings in. {label.replace(/ \(.*\)$/, '')} of at {k === 'capex_pct' ? 'most' : 'least'} {fmt(burn, kind)} that year stops the burn.{' '}
+          <button type="button" className="btn" onClick={() => onChange({ start: value.start, end: burn })}>Set the last forecast year to {fmt(burn, kind)}</button></p>}
         <label className="small grad-q"><input type="checkbox" checked={gradual}
           onChange={e => onChange(e.target.checked ? { start: rule.start, end: value.start } : { start: value.end ?? value.start, end: null })} />
           {' '}Change it gradually: move from the rule’s {fmt(rule.start, kind)} in the first forecast year to {fmt(value.end ?? value.start, kind)} by the last, instead of all at once</label>
@@ -414,7 +426,7 @@ function Produces({ parsed, projection, active, n, borrowed }: { parsed: Parsed;
     <section className="f-tier" aria-labelledby="proj-h" id="projection">
       <h2 id="proj-h">What the forecast produces</h2>
       <p className="why">{histYears[0]}–{histYears[nHist - 1]} reported in ink; {projYears.length ? `${projYears[0]}–${projYears[n - 1]}` : 'the forecast'} in blue ({NAMES[active].toLowerCase()} case).</p>
-      {proj && <Readout hist={hist} proj={proj} histYear={histYears[nHist - 1]} projYear={projYears[n - 1]} n={n}
+      {proj && <Readout hist={hist} proj={proj} histYear={histYears[nHist - 1]} projYear={projYears[n - 1]} n={n} moved={parsed.sources?.moved_out ?? null}
         ttm={parsed.ttm && Date.parse(parsed.ttm.end) > Date.parse(company.dates[nHist - 1]) ? parsed.ttm : null} />}
       {proj && <Compare all={projection!.scenarios} active={active} projYear={projYears[n - 1]} />}
       {borrowed >= 0.5 && <p className="guard">Cash would run out, so the model borrows <b>Rs {money(borrowed)} cr</b> over {n} years
@@ -435,20 +447,22 @@ function Produces({ parsed, projection, active, n, borrowed }: { parsed: Parsed;
   )
 }
 
-function Readout({ hist, proj, histYear, projYear, n, ttm }: {
-  hist: Row[]; proj: Row[]; histYear: string; projYear: string; n: number; ttm: Ttm | null
+function Readout({ hist, proj, histYear, projYear, n, ttm, moved }: {
+  hist: Row[]; proj: Row[]; histYear: string; projYear: string; n: number; ttm: Ttm | null; moved: Sources['moved_out'] | null
 }) {
   const last = hist[hist.length - 1], end = proj[proj.length - 1]
-  const r0 = last.revenue ?? 0, r1 = end.revenue ?? 0
+  // the forecast grows from the base the engine uses: reported sales less a business that left the group
+  const out = moved?.year === histYear ? moved.revenue_out : 0
+  const r0 = (last.revenue ?? 0) - out, r1 = end.revenue ?? 0
   const cagr = r0 > 0 && r1 > 0 ? (r1 / r0) ** (1 / n) - 1 : null
   const margin = (r: Row) => (r.revenue ? (r.pat ?? 0) / r.revenue : null)
   const fcf = proj.reduce((s, r) => s + (r.fcf ?? 0), 0)
   const netCash = (end.cash ?? 0) + (end.investments ?? 0) - (end.borrowings ?? 0) - (end.lease ?? 0)
   const P = ({ children }: { children: ReactNode }) => <span className="num ours">{children}</span>
-  const ttmGrowth = growth(ttm?.values.sales, r0)
+  const ttmGrowth = growth(ttm?.values.sales, last.revenue ?? 0) // against what was reported
   return (
     <p className="readout">
-      Sales go from <span className="num">Rs {money(r0)} cr</span> in {histYear} to <P>Rs {money(r1)} cr</P> in {projYear}
+      Sales go from <span className="num">Rs {money(r0)} cr</span> in {histYear}{out > 0 && <> (after Rs {money(out)} cr that left the group: {moved!.reason || 'a business that left'})</>} to <P>Rs {money(r1)} cr</P> in {projYear}
       {cagr != null && <>, <P>{fmt(cagr, 'pct')}</P> a year</>}. Net margin moves from <span className="num">{fmt(margin(last), 'pct')}</span> to{' '}
       <P>{fmt(margin(end), 'pct')}</P>. Over {n} years the business {fcf >= 0 ? 'generates' : 'burns'}{' '}
       <P>Rs {money(Math.abs(fcf))} cr</P> of free cash and ends with <P>Rs {money(Math.abs(netCash))} cr</P> net {netCash >= 0 ? 'cash' : 'debt'}.

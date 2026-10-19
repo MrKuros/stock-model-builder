@@ -33,23 +33,23 @@ interface Props {
   scale: [number, number | null][] | null // flat revenue growth -> value per share, other inputs at base
   ours: number // base revenue growth (average over the projection)
   implied: number | null
-  best3: Cagr | null; best5: Cagr | null
+  best5: Cagr | null // the best five-year run: the one window "on record" means everywhere
   since: string // first reported year
 }
 
 const P = 26 // side padding: end labels never clip
 
 /** The signature instrument: one rupee scale (our range, base, price) and under it the revenue growth each value needs. */
-export default function Ruler({ price, bear, base, bull, scale, ours, implied, best3, best5, since }: Props) {
+export default function Ruler({ price, bear, base, bull, scale, ours, implied, best5, since }: Props) {
   const [box, w] = useWidth<HTMLDivElement>()
   const narrow = w < 560
   // the growth scale only where value rises with growth (capex-heavy cases can turn it over)
   const pts = (scale ?? []).filter((p): p is [number, number] => p[1] != null)
   const rising = pts.length > 2 && pts.every((p, i) => i === 0 || p[1] > pts[i - 1][1])
   const at = (g: number | null) => (g == null || !rising ? null : valueAt(scale!, g))
-  const v3 = at(best3?.value ?? null), v5 = at(best5?.value ?? null)
+  const v5 = at(best5?.value ?? null)
 
-  const marks = [base, bear, bull, price, v3].filter((x): x is number => x != null)
+  const marks = [base, bear, bull, price, v5].filter((x): x is number => x != null)
   let lo = Math.min(...marks), hi = Math.max(...marks)
   const pad = (hi - lo || Math.abs(hi) || 1) * 0.08
   lo -= pad; hi += pad
@@ -64,20 +64,25 @@ export default function Ruler({ price, bear, base, bull, scale, ours, implied, b
   if (rising) for (const [g, v] of pts) {
     if (v < lo || v > hi || Math.round(g * 100) % (narrow ? 4 : 2)) continue
     if (gt.length && x(v) - x(gt[gt.length - 1][1]) < (narrow ? 34 : 30)) continue
+    if (price != null && Math.abs(x(v) - x(price)) < 14) continue // the needle would strike through it
     gt.push([g, v])
   }
   const hasGrowth = gt.length >= 2
-  const AX = 96, GX = 152, H = hasGrowth ? 200 : 128
+  const AX = 110, GX = 166, H = hasGrowth ? 214 : 142
   const above = price != null && bull != null && price > bull, belowBear = price != null && bear != null && price < bear
   const pc = (v: number) => fmt(v, 'pct')
   const clampLabel = (cx: number, chars: number) => Math.max(P - 8 + chars * 3.3, Math.min(w - P + 8 - chars * 3.3, cx))
+  // cautious and hopeful close together: their words would print over each other, so each sits outside its end
+  const tight = bear != null && bull != null && x(bull) - x(bear) < 110
+  const pinX = tight ? { bear: Math.max(P - 8 + 8 * 6.6, x(bear!) - 4), bull: Math.min(w - P + 8 - 8 * 6.6, x(bull!) + 4) }
+    : { bear: bear == null ? 0 : clampLabel(x(bear), 6), bull: bull == null ? 0 : clampLabel(x(bull), 6) }
 
   const desc = [
     `Rupee scale from ${money(lo)} to ${money(hi)} a share.`,
     bear != null && bull != null ? `Our range runs from ${rs(bear)} (cautious) through ${rs(base)} (central) to ${rs(bull)} (hopeful).` : `Our central value is ${rs(base)}.`,
     price != null ? `The price, ${rs(price)}, sits ${above ? `${rs(price - bull!)} above the hopeful case` : belowBear ? `${rs(bear! - price)} below the cautious case` : 'inside the range'}.` : 'No share price.',
     hasGrowth ? `On the growth scale below, our ${pc(ours)} sits under the base value` +
-      (best3 && v3 != null ? `, the best three-year run of ${pc(best3.value)} sits at about ${rs(v3)}` : '') +
+      (best5 && v5 != null ? `, the best five-year run of ${pc(best5.value)} sits at about ${rs(v5)}` : '') +
       (implied != null ? `, and the price needs ${pc(implied)}.` : '.') : '',
   ].join(' ')
 
@@ -110,11 +115,11 @@ export default function Ruler({ price, bear, base, bull, scale, ours, implied, b
             {b - a > 90 && <text x={(a + b) / 2} y={AX - 23} textAnchor="middle">Rs {rs(gap)} {above ? 'above hopeful' : 'below cautious'}</text>}
           </g>
         })()}
-        {bear != null && <g className="r-pin"><text x={clampLabel(x(bear), 6)} y={AX - 50} textAnchor="middle"><tspan className="r-pk">CAUTIOUS</tspan><tspan x={clampLabel(x(bear), 6)} dy="13">{rs(bear)}</tspan></text></g>}
-        {bull != null && <g className="r-pin"><text x={clampLabel(x(bull), 6)} y={AX - 50} textAnchor="middle"><tspan className="r-pk">HOPEFUL</tspan><tspan x={clampLabel(x(bull), 6)} dy="13">{rs(bull)}</tspan></text></g>}
+        {bear != null && <g className="r-pin"><text x={pinX.bear} y={AX - 50} textAnchor={tight ? 'end' : 'middle'}><tspan className="r-pk">CAUTIOUS</tspan><tspan x={pinX.bear} dy="13">{rs(bear)}</tspan></text></g>}
+        {bull != null && <g className="r-pin"><text x={pinX.bull} y={AX - 50} textAnchor={tight ? 'start' : 'middle'}><tspan className="r-pk">HOPEFUL</tspan><tspan x={pinX.bull} dy="13">{rs(bull)}</tspan></text></g>}
         <g className="r-base">
           <line x1={x(base)} x2={x(base)} y1={AX - 46} y2={hasGrowth ? GX : AX} />
-          <text x={clampLabel(x(base), 6)} y={AX - 66} textAnchor="middle"><tspan className="r-pk">CENTRAL</tspan><tspan x={clampLabel(x(base), 6)} dy="15">{rs(base)}</tspan></text>
+          <text x={clampLabel(x(base), 6)} y={AX - 80} textAnchor="middle"><tspan className="r-pk">CENTRAL</tspan><tspan x={clampLabel(x(base), 6)} dy="15">{rs(base)}</tspan></text>
         </g>
 
         {hasGrowth && <>
@@ -133,10 +138,10 @@ export default function Ruler({ price, bear, base, bull, scale, ours, implied, b
           </g>)}
           <path className="r-ours" d={`M${x(base)} ${GX - 6}l6 6-6 6-6-6z`} />
           <text className="r-ours-t" x={clampLabel(x(base), 9)} y={GX + 38} textAnchor="middle">Ours {pc(ours)}</text>
-          {best3 && v3 != null && <>
-            <path className="r-best" d={`M${x(v3)} ${GX - 5}l5 5-5 5-5-5z`} />
-            {Math.abs(x(v3) - x(base)) > 90 && (price == null || Math.abs(x(v3) - x(price)) > 100) &&
-              <text className="r-best-t" x={clampLabel(x(v3), 16)} y={GX + 38} textAnchor="middle">Best 3 yrs {pc(best3.value)}</text>}
+          {best5 && v5 != null && <>
+            <path className="r-best" d={`M${x(v5)} ${GX - 5}l5 5-5 5-5-5z`} />
+            {Math.abs(x(v5) - x(base)) > 90 && (price == null || Math.abs(x(v5) - x(price)) > 100) &&
+              <text className="r-best-t" x={clampLabel(x(v5), 16)} y={GX + 38} textAnchor="middle">Best 5 yrs {pc(best5.value)}</text>}
           </>}
         </>}
 

@@ -1217,7 +1217,7 @@ def default_ends(hist, d, g=None):
 # (ratios() key, words for the sentence, unit, floor). The floor is the smallest gap from typical worth a flag,
 # so a very steady metric (TCS tax 22-26%) can't flag a 2 pp wobble just because its spread is tiny.
 ONEOFF = (("oi_pct", "other income", " of revenue", 0.02), ("tax_rate", "tax rate", "", 0.10),
-          ("capex_pct", "capex", " of revenue", 0.05), ("ebitda_margin", "EBITDA margin", "", 0.05),
+          ("capex_pct", "capex", " of revenue", 0.05), ("ebitda_margin", "operating margin", "", 0.05),
           ("mi_pct", "minority share of profit", "", 0.05))
 
 
@@ -1281,13 +1281,13 @@ def key_numbers(hist, labels):
     flagged for one-off other income: a gain in profit that was never operating cash)."""
     r = ratios(hist)
     gain = {o["year"] for o in detect_oneoffs(hist, labels) if o["metric"] == "oi_pct"}
-    series = (("growth", "Revenue growth", "pct", [x["growth"] for x in r]),
-              ("ebitda_margin", "EBITDA margin", "pct", [x["ebitda_margin"] for x in r]),
+    series = (("growth", "Sales growth", "pct", [x["growth"] for x in r]),
+              ("ebitda_margin", "Operating margin (EBITDA)", "pct", [x["ebitda_margin"] for x in r]),
               ("pat_growth", "Net profit growth", "pct",
                [None, *(_div(h["pat"], p["pat"]) - 1 if p["pat"] > 0 and h["pat"] is not None else None
                         for p, h in zip(hist, hist[1:]))]),
-              ("roce", "ROCE", "pct", [h.get("roce") for h in hist]),
-              ("cash_conversion", "Cash conversion (CFO / profit)", "x",
+              ("roce", "Return on capital (ROCE)", "pct", [h.get("roce") for h in hist]),
+              ("cash_conversion", "Cash from operations ÷ profit", "x",
                [h["cfo"] / h["pat"] if h.get("cfo") is not None and h["pat"] > 0 and y not in gain else None
                 for y, h in zip(labels, hist)]),
               ("dso", "Receivable days", "days", [x["dso"] for x in r]))
@@ -1529,7 +1529,9 @@ def forensic(hist, labels, notes=None):
     else:
         add("nwc", "Working capital", _sev(wc[-1] - typ, NWC_DRIFT), wc[-1] - typ, NWC_DRIFT[2], labels[-4:],
             f"{_pct(wc[-1])} of revenue, median {_pct(typ)}",
-            f"Working capital was {_pct(wc[-1])} of revenue in {y} against a median of {_pct(typ)} in the three years before.",
+            f"Working capital was {_pct(wc[-1])} of revenue in {y} against a median of {_pct(typ)} in the three years before."
+            + (" Below zero means customers and suppliers fund the business day to day; that funding shrank against sales."
+               if wc[-1] < 0 else ""),
             rule)
 
     # Beneish M-score, approximated
@@ -1745,28 +1747,48 @@ def _dcf(fcff, period, w, g):
     return {"df": df, "pv": pv, "pv_sum": sum(pv), "tv": tv, "pv_tv": tv * df[-1], "ev": sum(pv) + tv * df[-1]}
 
 
+def _signed(v):
+    """_inr for prose: a minus sign, not brackets ("Rs −235 cr")."""
+    return ("−" + _inr(-v)) if round(v) < 0 else _inr(v)
+
+
 def _burn(rows, tax):
-    """Why a scenario has no value when its last projected year burns cash, and what would give it one, in plain words.
+    """Why a scenario has no value when its last projected year burns cash, and what would stop the burn, in plain
+    words; plus the two fixes as numbers ({"capex_pct", "ebitda_margin"}) so a page can offer them in one click.
     That year's FCFF moves one for one with its capex (x revenue) and with its EBITDA margin (x revenue x (1 - tax)),
-    so the two fixes are exact for the last year. Milky Mist: still growing 15% in year 5 with capex at 12.8% of
-    revenue against a 13% EBITDA margin."""
+    so the two fixes are exact for the last year. They only stop the burn: the shares can still come out worth
+    nothing (see _no_equity). Milky Mist: still growing 15% in year 5 with capex at 12.8% of revenue against a 13%
+    EBITDA margin."""
     r = rows[-1]
     rev, f = r["revenue"], r["fcff"]
-    head = (f"Final-year free cash flow is negative (Rs {_inr(f)} cr in the last projected year), and a perpetuity on a "
-            "cash burn means nothing.")
+    head = (f"In the last forecast year the business still spends more cash than it brings in (free cash flow of "
+            f"Rs {_signed(f)} cr), so there is nothing to value: a value needs cash coming in after the forecast ends.")
     if rev <= 0:
-        return head + " Raise revenue growth or the EBITDA margin, or lower capex, in the last years."
+        return head + " Raise sales growth or the operating margin, or lower capex, in the last years.", {}
     g = rev / rows[-2]["revenue"] - 1 if len(rows) > 1 and rows[-2]["revenue"] > 0 else None
-    # a tenth of a point past break-even, rounded away from it, so the figure shown does give a value
+    # a tenth of a point past break-even, rounded away from it, so the figure shown does stop the burn
     cap, mar = math.floor(((r["capex"] + f) / rev - 0.001) * 1000) / 1000, None
     if tax < 1:
         mar = math.ceil(((r["ebitda"] - f / (1 - tax)) / rev + 0.001) * 1000) / 1000
-    fixes = [f"capex of at most {_pct(cap)} of revenue by then"] if cap > 0 else []
-    fixes += [f"an EBITDA margin of at least {_pct(mar)} by then"] if mar is not None else []
-    fixes.append("more projection years, with growth fading lower and capex cut to match")
-    return (head + f" That year capex takes {_pct(r['capex'] / rev)} of revenue against an EBITDA margin of "
-            f"{_pct(r['ebitda'] / rev)}" + (f", with revenue still growing {_pct(g)}" if g is not None else "")
-            + ". Any one of these gives it a value: " + "; ".join(fixes) + ".")
+    fixes = [f"capex of at most {_pct(cap)} of sales that year"] if cap > 0 else []
+    fixes += [f"an operating margin of at least {_pct(mar)} that year"] if mar is not None else []
+    fixes.append("more forecast years, with growth fading lower and capex cut to match")
+    return (head + f" That year capex (spending on plant and equipment) takes {_pct(r['capex'] / rev)} of sales against an "
+            f"operating margin (EBITDA) of {_pct(r['ebitda'] / rev)}"
+            + (f", with sales still growing {_pct(g)}" if g is not None else "")
+            + ". Any one of these stops the cash burn: " + "; ".join(fixes) + "."), \
+        {"capex_pct": cap if cap > 0 else None, "ebitda_margin": mar}
+
+
+def _no_equity(ev, equity):
+    """Why a scenario whose last year makes cash still leaves the shares worth nothing (equity <= 0). The number stays
+    (the Excel sheet shows it too); every page reads this error instead of calling it a value."""
+    if ev <= 0:
+        return (f"The whole business comes out worth Rs {_signed(ev)} cr on these inputs: the cash the forecast years "
+                "burn outweighs what the years after the forecast bring back, so a share has no value. Lower capex or "
+                "raise the operating margin in the forecast years, not only the last one.")
+    return (f"The business is worth Rs {_inr(ev)} cr, less than its net debt and other claims (Rs {_inr(ev - equity)} "
+            "cr), so a share has no value on these inputs.")
 
 
 def valuation(projs, hist, val, base, market, inputs=None, note=False):
@@ -1818,8 +1840,10 @@ def valuation(projs, hist, val, base, market, inputs=None, note=False):
         fcff = [r["fcff"] for r in rows]
         x = _dcf(fcff, period, wacc, g) or dict.fromkeys(("df", "pv", "pv_sum", "tv", "pv_tv", "ev"))
         ps = per_share(x["ev"])
+        why, fix = (None, None) if error else _burn(rows, (inputs or {}).get(s, base)["tax_rate"][-1]) \
+            if fcff[-1] <= 0 else (_no_equity(x["ev"], equity_of(x["ev"])) if ps is not None and ps <= 0 else None, None)
         out[s] = {**x, "fcff": fcff, "minority": minority(x["ev"]), "equity": equity_of(x["ev"]), "per_share": ps,
-                  "error": None if error or fcff[-1] > 0 else _burn(rows, (inputs or {}).get(s, base)["tax_rate"][-1]),
+                  "error": why, "fix": fix,
                   "upside": ps / price - 1 if ps is not None and price else None,
                   "tv_share": x["pv_tv"] / x["ev"] if x["ev"] and x["ev"] > 0 else None,
                   "grid": [[per_share((_dcf(fcff, period, wacc + dw, g + dg) or {}).get("ev")) for dg in GRID_G]

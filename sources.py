@@ -220,10 +220,17 @@ def search(c, q):
     if not QUERY.fullmatch(q):
         return []
     d, _ = c.json(f"{NSE}/api/NextApi/globalSearch/equity?symbol={urllib.parse.quote(q.lower())}", 24 * 3600)
-    out = []
-    for x in (d.get("data") if isinstance(d, dict) else None) or []:
-        if isinstance(x, dict) and isinstance(x.get("symbol"), str) and SYMBOL.fullmatch(x["symbol"]):
-            out.append({"symbol": x["symbol"], "name": str(x.get("companyName") or x["symbol"])[:120]})
+    rows = [x for x in (d.get("data") if isinstance(d, dict) else None) or []
+            if isinstance(x, dict) and isinstance(x.get("symbol"), str) and SYMBOL.fullmatch(x["symbol"])]
+    # one row per company: NSE lists an old symbol next to the current one under the same name (Nestle: NESTLEIND
+    # and NESTLE, which has no quote), so the main-board row wins, then NSE's own order
+    rank = lambda x: SERIES.index(x.get("series")) if x.get("series") in SERIES else len(SERIES)  # noqa: E731
+    out, seen = [], set()
+    for x in sorted(rows, key=rank):
+        name = str(x.get("companyName") or x["symbol"])[:120]
+        if name.lower() not in seen:
+            seen.add(name.lower())
+            out.append({"symbol": x["symbol"], "name": name})
     return out[:12]
 
 

@@ -9,7 +9,7 @@ import { latestScored, unreviewed } from './Tracking'
 import { useAi } from './Sources'
 import { Next, PageHead, Scale, Stepper, Verdict } from './Shell'
 import { useHref } from './route'
-import { NAMES, SEV_WORD, fmt, rs, sevCounts, when, type Cagr, type ModelDoc, type Parsed, type Projection, type Severity } from './lib'
+import { NAMES, SEV_WORD, fmt, properName, rs, sevCounts, when, type Cagr, type ModelDoc, type Parsed, type Projection, type Severity } from './lib'
 
 const pc = (v: number) => fmt(v, 'pct')
 const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten']
@@ -27,6 +27,7 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
   const ai = useAi()
   const { company, years } = parsed
   const name = subjectOf(company)
+  const restatedOpen = [...new Set((company.source?.restated ?? []).filter(r => !r.used).map(r => r.year))]
   const v = projection?.valuation ?? null
   const sv = v?.scenarios.base
   const price = v?.price ?? null
@@ -53,12 +54,12 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
 
   return (
     <>
-      <PageHead label="Summary" title={company.name.replace(/\s+(ltd\.?|limited)$/i, '').trim()}
+      <PageHead label="Summary" title={properName(company.name).replace(/\s+(ltd\.?|limited)$/i, '').trim()}
         purpose="The five questions an analyst asks, answered from this model. Each card opens the page with the evidence."
         answer={answer} />
       {fixLink && <p className="fix-line">{fixLink}</p>}
       {doc.active !== 'base' && <p className="small-note">This page is about the central case. Your {NAMES[doc.active].toLowerCase()} case is
-        {v?.scenarios[doc.active].per_share != null ? <> <span className="num ours">Rs {rs(v.scenarios[doc.active].per_share!)}</span> a share</> : ' without a value'}:{' '}
+        {v && (v.scenarios[doc.active].per_share ?? 0) > 0 ? <> <span className="num ours">Rs {rs(v.scenarios[doc.active].per_share!)}</span> a share</> : ' without a value'}:{' '}
         <a href={href('value')}>see every case on Is it cheap?</a></p>}
       {fresh && <div className="banner new" role="status"><p><b>New results: {s!.year.year}.</b> {vs(rev?.err)}</p>
         <div className="banner-act"><a className="btn" href={href('changes')}>See what changed</a></div></div>}
@@ -131,7 +132,9 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
       </section>
 
       <p className="src-line-s small">From {yearSources(company, years).map(([l, y]) => `${l} ${y}`).join(' and ')}
-        {company.source?.symbol ? ` · price ${ago(company.source.price_at)}` : ''} · <a href={href('documents', 'sources')}>Details</a></p>
+        {company.source?.symbol ? ` · price ${ago(company.source.price_at)}` : ''} · <a href={href('documents', 'sources')}>Details</a>
+        {restatedOpen.length > 0 && <> · {restatedOpen.join(', ')} restated later, not like for like:{' '}
+          <a href={href('documents', 'restated')}>choose which numbers</a></>}</p>
 
       <Next lead={doc.reviewed_at ? <>Reviewed {when(doc.reviewed_at).replace(/ \d{4}$/, '')}.</>
         : <>Before you rely on this: read What could go wrong? and the note, then mark it as reviewed.</>}>
@@ -169,14 +172,19 @@ function TryIt({ doc, setDoc, projection }: { doc: ModelDoc; setDoc: Props['setD
   const a = doc.scenarios[doc.active], src = doc.assumption_sources[doc.active] ?? {}
   const value = projection?.scenarios[doc.active].length === doc.n ? projection.valuation.scenarios[doc.active].per_share : null
   const set = (k: string) => (x: number) => setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [d.active]: { ...d.scenarios[d.active], [k]: { start: x, end: null } } } }))
-  const box = (k: 'growth' | 'ebitda_margin', label: string) => a[k]?.end != null
-    ? <span className="small">changes year by year · <a href={href('forecast', k)}>edit in the forecast</a></span>
-    : <Stepper id={`try-${k}`} label={label} kind="pct" value={a[k]?.start ?? 0} onChange={set(k)} you={!!src[k] && src[k] !== 'history'} />
+  const box = (k: 'growth' | 'ebitda_margin', label: string) =>
+    <Stepper id={`try-${k}`} label={label} kind="pct" value={a[k]?.start ?? 0} onChange={set(k)} you={!!src[k] && src[k] !== 'history'} />
+  const worth = <b className="num ours">{value != null && value > 0 ? `Rs ${rs(value)}` : 'nothing yet'}</b>
+  // a year-by-year input can't sit in one sentence: say what it does and send it to the forecast
+  const moving = (['growth', 'ebitda_margin'] as const).filter(k => a[k]?.end != null)
   return (
     <section className="try" aria-labelledby="try-h">
       <h2 id="try-h">Try it <span className="cnt">{NAMES[doc.active].toLowerCase()} case</span></h2>
-      <p className="answer s">If sales grow {box('growth', 'Sales growth a year')} a year and the operating margin stays at {box('ebitda_margin', 'Operating margin')},
-        one share is worth <b className="num ours">{value != null ? `Rs ${rs(value)}` : 'nothing yet'}</b>.</p>
+      {moving.length
+        ? <p className="answer s">{moving.map(k => `${k === 'growth' ? 'Sales growth' : 'The operating margin'} changes year by year (${pc(a[k].start)} → ${pc(a[k].end!)})`).join(' and ')};
+            edit {moving.length > 1 ? 'them' : 'it'} in <a href={href('forecast', moving[0])}>Our forecast</a>. With these inputs one share is worth {worth}.</p>
+        : <p className="answer s">If sales grow {box('growth', 'Sales growth a year')} a year and the operating margin stays at {box('ebitda_margin', 'Operating margin')},
+            one share is worth {worth}.</p>}
       <p className="small muted">These are the same inputs as in <a href={href('forecast')}>Our forecast</a>; changing them here changes them there.</p>
     </section>
   )
