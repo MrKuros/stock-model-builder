@@ -207,7 +207,7 @@ export default function Sources({
           (p.field === 'moved_out' ? (p.period === years[years.length - 1]
             ? ` The forecast now grows from ${p.period} revenue without it; the Forecast page offers the new margin default.`
             : ` Kept for the record: only a ${years[years.length - 1]} note changes the forecast.`)
-            : p.field === 'kpis' ? ' They show on the Overview and never change a number.'
+            : p.field === 'kpis' ? ' They show on the Summary and never change a number.'
             : p.field !== 'capex' ? '' : sources?.used.capex.includes(p.period ?? '')
             ? ' The XBRL cash flow already gives that year’s capex, and the two agree.'
             : ' It is now that year’s capex in the model’s history.'))
@@ -517,7 +517,7 @@ function ArNoteView({ n, sources }: { n: ArNote; sources?: Used }) {
         </table></div>
       )}
       {n.topic === 'kpis' ? <>
-        <p className="small ar-sum">Shown on the Overview with these quotes. They never change a number in the model.</p>
+        <p className="small ar-sum">Shown on the Summary with these quotes. They never change a number in the model.</p>
         <KpiRows v={n} caption={`${title}, ${n.year}`} />
       </> : n.topic === 'moved_out' ? <>
         <p className="small ar-sum">Revenue Rs {money(n.total)} cr{n.against && <> ({pct(n.total, n.against.value)} of {n.year} revenue)</>}.{' '}

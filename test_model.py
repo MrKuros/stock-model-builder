@@ -102,6 +102,8 @@ def main():
     src = tmp / "export.xlsx"
     fake_export(src)
 
+    css_tokens_check()
+    contrast_check()
     co = model.parse_export(src)
     assert co["name"] == "Test Industries Ltd"
     assert len(co["hist"]) == 10
@@ -1496,6 +1498,18 @@ def library_check(root, co, scenarios):
     assert server.load_model(mid, root).company.name == "Test Industries Ltd"
     assert server.load_model(oid, root).company.name == "TEST INDUSTRIES LTD!"
     assert server.save_model(doc, root, now=datetime(2026, 10, 15, 14, 0))[0] == mid
+    # keep (Replace, Restore): today's file is first kept as <date>-<HHMM of its saved_at>; both open, same numbers
+    newest = "test-industries-ltd/2026-10-16"
+    assert server.save_model(doc, root, now=datetime(2026, 10, 16, 15, 30), keep=True)[0] == newest
+    kept = "test-industries-ltd/2026-10-16-0900"
+    assert server.load_model(kept, root).saved_at == "2026-10-16T09:00:00"
+    assert server.load_model(kept, root).projection()[3] == server.load_model(newest, root).projection()[3] == doc.projection()[3]
+    assert server.restatements(co, root)["id"] == newest, "a day's own file is newer than the copies kept that day"
+    server.save_model(doc, root, now=datetime(2026, 10, 16, 16, 0))  # without keep: overwrites, as before
+    assert sorted(p.stem for p in (root / "test-industries-ltd").glob("*.json")) == [
+        "2026-10-14", "2026-10-15", "2026-10-16", "2026-10-16-0900"]
+    assert any(m["id"] == kept for m in server.list_models(root))
+    server.delete_model(kept, root)
     server.delete_model(oid, root)
     assert not list(root.glob("*/*.tmp")), "no temp files left behind"
     # delete removes the file, then the empty company folder; a second delete is a 404
@@ -2460,6 +2474,37 @@ def xbrl_api_check(server, root, co, data):
     server.delete_model(mid, root)
 
 
+def css_tokens_check():
+    """Every colour or size token the front end uses (var(--x)) is defined in styles.css."""
+    web = Path(__file__).parent / "web" / "src"
+    defined = set(re.findall(r"(--[\w-]+)\s*:", (web / "styles.css").read_text()))
+    used = {u for f in web.iterdir() if f.suffix in (".css", ".ts", ".tsx") for u in re.findall(r"var\((--[\w-]+)|'(--[a-z][\w-]*)'", f.read_text()) for u in u if u}
+    assert used <= defined, f"undefined CSS tokens: {sorted(used - defined)}"
+
+
+def contrast_check():
+    """Every text colour token reads at 4.5:1 or more (WCAG AA) on the page grounds, light and dark, and on its own tint."""
+    css = (Path(__file__).parent / "web" / "src" / "styles.css").read_text()
+    def block(start):
+        i = css.index(start)
+        return dict(re.findall(r"(--[\w-]+):\s*(#[0-9a-f]{6})", css[i:css.index("}", i)]))
+    light = block(":root {")
+    def lum(h):
+        c = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    def ratio(a, b):
+        a, b = sorted((lum(a), lum(b)))
+        return (b + 0.05) / (a + 0.05)
+    for t in (light, {**light, **block(':root[data-theme="dark"] {')}):
+        pairs = [(f, g) for f in ("--ink", "--ink-2", "--ink-3", "--ours", "--market", "--flag", "--clear", "--watch", "--ai")
+                 for g in ("--panel", "--ground", "--raise", "--inset")]
+        pairs += [("--you-ink", "--you"), ("--watch", "--watch-soft"), ("--market", "--market-soft"), ("--clear", "--clear-soft"),
+                  ("--flag", "--flag-soft"), ("--ours", "--ours-soft"), ("--ai", "--ai-soft"), ("--panel", "--ink")]
+        low = [(f, g, round(ratio(t[f], t[g]), 2)) for f, g in pairs if ratio(t[f], t[g]) < 4.5]
+        assert not low, low
+
+
 def pages_check(server, root):
     """The app's page addresses (/c/<slug>/<page>) get index.html, so a page opened cold from its URL loads; /api
     paths and missing assets never fall back, and real files are served as they are."""
@@ -2479,7 +2524,10 @@ def pages_check(server, root):
 
     app.mount("/", server.AppPages(directory=dist, html=True))
     c = TestClient(app)
-    for path in ("/", "/c/tcs/overview", "/c/tcs/statements/profit-and-loss?v=2026-10-17", "/c/jsw-steel-ltd/checks"):
+    pages = ("summary", "value", "priced-in", "risks", "changes", "peers", "forecast", "note", "business",
+             "statements/quarters", "documents", "versions", "overview", "valuation")  # old addresses redirect in the app
+    for path in ("/", "/add", "/c/tcs/overview", "/c/tcs/statements/profit-and-loss?v=2026-10-17",
+                 "/c/tcs/value?v=2026-10-17-1451", "/c/jsw-steel-ltd/checks", *(f"/c/tcs/{p}" for p in pages)):
         r = c.get(path)
         assert r.status_code == 200 and "<title>app</title>" in r.text, (path, r.status_code)
     assert c.get("/assets/app.js").text == "console.log(1)"

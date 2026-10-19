@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import Landing from './Landing'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import Home from './Home'
+import AddPage, { useBuild, watchSymbol, type AddOpts } from './Add'
 import Workspace from './Workspace'
-import { MobileTop, Side, keysOn, slugOf } from './Shell'
-import { PAGES, navigate, onLinkClick, pathOf, placed, readRoute, type Page, type Route } from './route'
-import { api, defaultPaths, postJson, seed, type ModelDoc, type ModelSummary, type Opened, type Parsed, type Report } from './lib'
+import { BottomBar, Finder, HomeRail, KeysDialog, PhoneTop, keysOn, slugOf } from './Shell'
+import { ANSWERS, navigate, onLinkClick, pathOf, placed, readRoute, type Route } from './route'
+import { api, defaultPaths, postJson, seed, type ModelDoc, type ModelSummary, type Opened, type Parsed, type Report, type WatchList } from './lib'
+import { shortName } from './Note'
 
 const LAST = 'financial-model:last' // id of the last open model: only the old #note/#model/#evidence links need it now
 const SAVE_DELAY = 1500
@@ -25,9 +27,9 @@ function oldLink(hash: string, id: string): string | null {
   const m = /^#(note|model|evidence)(?::(.*))?$/.exec(hash)
   if (!m) return null
   const [, v, a = ''] = m, slug = slugOf(id)
-  if (v === 'note') return pathOf(slug, 'overview')
+  if (v === 'note') return pathOf(slug, 'summary')
   if (v === 'evidence') return pathOf(slug, 'checks', '', null, a === 'oneoffs' ? 'unusual' : a)
-  if (a === 'valuation' || a === 'bridge') return pathOf(slug, 'valuation', '', null, a === 'bridge' ? 'bridge' : '')
+  if (a === 'valuation' || a === 'bridge') return pathOf(slug, 'value', '', null, a === 'bridge' ? 'bridge' : '')
   if (a === 'statements') return pathOf(slug, 'statements')
   return pathOf(slug, 'forecast', '', null, a)
 }
@@ -80,7 +82,8 @@ export default function App() {
     // (a link, Back, or the hash typed in the address bar)
     const on = () => {
       const r = readRoute(), old = !r.slug && lastId() ? oldLink(location.hash, lastId()!) : null
-      if (old) navigate(old, true)
+      if (old) navigate(old, true) // replaceState: Back never lands on an old address
+      else if (r.redirect) navigate(r.redirect, true)
       else setRoute(r)
     }
     window.addEventListener('popstate', on)
@@ -151,7 +154,7 @@ export default function App() {
   const flushRef = useRef(flush)
   flushRef.current = flush
   useEffect(() => {
-    if (!doc || doc === clean.current) return
+    if (!doc || doc === clean.current || openedVer.current) return // an older version is read only: Restore saves it
     pending.current = doc
     timer.current = window.setTimeout(() => flushRef.current(), SAVE_DELAY)
     return () => window.clearTimeout(timer.current)
@@ -242,52 +245,93 @@ export default function App() {
     return () => channel.removeEventListener('message', on)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ---- keys: 1-6 for the pages; N, M and E as before (Overview, Forecast, Checks); never while typing ----
+  // ---- keys: / go to, ? the keys, 1-6 the answer pages; never while typing, and not at all when turned off ----
+  const [find, setFind] = useState<'goto' | 'switch' | null>(null)
+  const [keys, setKeys] = useState(false)
   useEffect(() => {
+    const onFind = (e: Event) => setFind((e as CustomEvent).detail)
+    const onKeysList = () => setKeys(true)
     const on = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.defaultPrevented || !keysOn()) return
+      if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented || !keysOn()) return
       const t = e.target as HTMLElement
-      if (t.closest('input, textarea, select, [contenteditable="true"], [role="slider"]')) return
+      // typing in a box, or inside an open dialog (a box left focused in a closed one doesn't count)
+      if (t.closest('dialog[open]') || (t.closest('input, textarea, select, [contenteditable="true"], [role="slider"]') && !t.closest('dialog'))) return
       const r = routeRef.current
-      if (!r.slug) return
-      const k = e.key.toUpperCase(), i = '123456'.indexOf(k)
-      const page = (i >= 0 && k ? PAGES[i][0] : ({ N: 'overview', M: 'forecast', E: 'checks' } as Record<string, Page>)[k])
-      if (!page) return
+      if (e.key === '/') { e.preventDefault(); setFind('goto'); return }
+      if (e.key === '?') { e.preventDefault(); setKeys(true); return }
+      const i = '123456'.indexOf(e.key)
+      if (i < 0 || !e.key || !r.slug || e.shiftKey) return
       e.preventDefault()
-      if (page !== r.page) navigate(pathOf(r.slug, page, page === 'statements' ? r.sub : '', r.version))
+      if (ANSWERS[i] !== r.page) navigate(pathOf(r.slug, ANSWERS[i], '', r.version))
     }
     window.addEventListener('keydown', on)
-    return () => window.removeEventListener('keydown', on)
+    window.addEventListener('app:find', onFind)
+    window.addEventListener('app:keys', onKeysList)
+    return () => { window.removeEventListener('keydown', on); window.removeEventListener('app:find', onFind); window.removeEventListener('app:keys', onKeysList) }
   }, [])
 
-  const add = async (p: Parsed, reports: Report[] = []) => { // a fresh upload, a ticker or the sample is saved straight away, then its Overview opens
+  // a fresh upload, a ticker or the sample is saved straight away, then its Summary opens; when a ticker finishes
+  // while you're elsewhere, a notice says it's ready instead. Replace (opts.keep) keeps today's version first.
+  const [ready, setReady] = useState<{ name: string; href: string } | null>(null)
+  const add = async (p: Parsed, reports: Report[] = [], opts: AddOpts = {}) => {
     // the company you just left may still have an edit on its way (or one the server refused): never drop it
     if ((await flushRef.current()) === false)
       throw new Error('Your last change to the open company isn’t saved yet. Open it and press Try again.')
-    const d = newDoc(p, reports)
-    const r = await api<{ id: string; saved_at: string }>('/api/models', postJson(d))
+    const q = opts.name ? { ...p, company: { ...p.company, name: opts.name } } : p
+    const d = newDoc(q, reports)
+    const r = await api<{ id: string; saved_at: string }>(`/api/models${opts.keep ? '?keep=1' : ''}`, postJson(d))
     channel?.postMessage({ type: 'saved', id: r.id, saved_at: r.saved_at } satisfies Msg)
-    openDoc(p, { ...d, saved_at: r.saved_at }, r.id, null)
+    openDoc(q, { ...d, saved_at: r.saved_at }, r.id, null)
     loadList()
-    navigate(pathOf(slugOf(r.id), 'overview'))
+    const to = pathOf(slugOf(r.id), 'summary')
+    if (routeRef.current.top === 'add' || routeRef.current.top === 'home') navigate(to)
+    else setReady({ name: shortName(q.company.name), href: to })
+  }
+  const build = useBuild(add)
+  // the watch list: Home shows it, Add a company adds to it
+  const [watch, setWatch] = useState<WatchList | null>(null)
+  const [watchMsg, setWatchMsg] = useState<ReactNode>(null)
+  const loadWatch = () => api<WatchList>('/api/watch').then(setWatch).catch(() => setWatch({ watch: [], history: {} }))
+  useEffect(() => { loadWatch() }, [])
+  const watchIt = async (symbol: string) => {
+    setWatchMsg(`Looking up ${symbol} on NSE…`)
+    try {
+      const w = await watchSymbol(symbol)
+      setWatch(w.list)
+      setWatchMsg(<>Watching {w.name}. It’s under <a href="/#watching">Watching</a> on Your companies.</>)
+    } catch (e) { setWatchMsg(<span className="bad">Couldn’t watch {symbol}: {(e as Error).message}</span>) }
+  }
+  // Restore: the open older version is saved as today's; today's own file is kept first (keep=1)
+  const restore = async () => {
+    if (!doc || !parsed) return
+    try {
+      const r = await api<{ id: string; saved_at: string }>('/api/models?keep=1', postJson(doc))
+      channel?.postMessage({ type: 'saved', id: r.id, saved_at: r.saved_at } satisfies Msg)
+      openDoc(parsed, { ...doc, saved_at: r.saved_at }, r.id, null)
+      loadList()
+      navigate(location.pathname + location.hash, true)
+    } catch (e) { setSave(s => ({ ...s, error: (e as Error).message })) }
   }
   const checked = (saved: { id: string; saved_at: string }[]) => { // other tabs on those companies reload them
     for (const r of saved) channel?.postMessage({ type: 'saved', id: r.id, saved_at: r.saved_at } satisfies Msg)
     loadList()
   }
-  const deleted = (id: string) => {
-    channel?.postMessage({ type: 'deleted', id } satisfies Msg)
-    if (lastId() === id) remember(null)
-    if (openRef.current === id) { gen.current++; pending.current = null; openRef.current = null; setOpenId(null); setParsed(null); setDoc(null) }
-    setModels(ms => ms && ms.filter(x => x.id !== id))
+  const deleted = (ids: string[]) => {
+    for (const id of ids) {
+      channel?.postMessage({ type: 'deleted', id } satisfies Msg)
+      if (lastId() === id) remember(null)
+      if (openRef.current === id) { gen.current++; pending.current = null; openRef.current = null; setOpenId(null); setParsed(null); setDoc(null) }
+    }
+    setModels(ms => ms && ms.filter(x => !ids.includes(x.id)))
   }
 
-  const ready = !!route.slug && !!parsed && !!doc && !!openId && slugOf(openId) === route.slug
+  const open = !!route.slug && !!parsed && !!doc && !!openId && slugOf(openId) === route.slug
     && (route.version ?? null) === openedVer.current
-  if (ready) lastUrl.current = location.pathname + location.search
+  if (open) lastUrl.current = location.pathname + location.search
   useEffect(() => {
     if (route.slug) return
-    document.title = TITLE
+    document.title = route.top === 'add' ? `Add a company · ${TITLE}` : route.top === 'none' ? `No page here · ${TITLE}` : `Your companies · ${TITLE}`
+    if (route.anchor) { window.setTimeout(() => document.getElementById(route.anchor)?.scrollIntoView({ block: 'start' }), 60); return }
     window.scrollTo({ top: route.y ?? 0, behavior: 'instant' })
     if (openRef.current) flushRef.current() // the list shows the values you just set
   }, [route])
@@ -301,27 +345,49 @@ export default function App() {
   const ep = epoch.current
   const mine = <T,>(f: (x: T) => T) => (x: T) => (epoch.current === ep ? f(x) : x)
 
-  if (ready) return (
+  const global = <>
+    <Finder mode={find} onClose={() => setFind(null)} models={models}
+      here={open && route.slug ? { slug: route.slug, short: doc!.company.source?.symbol ?? shortName(doc!.company.name), name: doc!.company.name, page: route.page, sub: route.sub } : null} />
+    <KeysDialog open={keys} onClose={() => setKeys(false)} />
+    {ready && <p className="toast" role="status">{ready.name} is ready · <a href={ready.href} onClick={() => setReady(null)}>Open</a>{' '}
+      <button type="button" className="link" onClick={() => setReady(null)}>Dismiss</button></p>}
+  </>
+
+  if (open) return (<>
     <Workspace key={route.slug} route={route} models={models} parsed={parsed!} doc={doc!} save={save} notice={notice}
-      setDoc={f => setDoc(d => d && mine(f)(d))} onRetry={flush}
+      setDoc={f => setDoc(d => d && mine(f)(d))} onRetry={flush} onRestore={restore} onNotice={() => setNotice(null)}
       setDefaults={defaults => setParsed(p => p && mine<Parsed>(x => ({ ...x, defaults }))(p))}
       setParsed={next => setParsed(p => p && mine<Parsed>(x => ({ ...next, restated: x.restated }))(p))} />
-  )
+    {global}
+  </>)
+  const top = route.top === 'add' ? 'add' : 'home'
+  const n = models ? new Set(models.map(m => slugOf(m.id))).size : null
+  const building = build.b.symbol && build.b.state !== 'done' && route.top !== 'add'
   return (
     <div className="app">
       <a className="skip" href="#main" onClick={e => { e.preventDefault(); document.getElementById('main')?.focus() }}>Skip to the page</a>
-      <Side here={null} />
+      <HomeRail here={top} count={n} foot={building ? <p><a href="/add">Adding {build.b.name ?? build.b.symbol}…</a></p> : undefined} />
       <div className="col">
-        <MobileTop here={null} />
+        <PhoneTop menu={[]} />
         {route.slug
           ? <main id="main" className="page" tabIndex={-1}>
               {missing
-                ? <div className="gone"><h1 id="page-h" tabIndex={-1}>Couldn’t open this company</h1>
-                    <p className="purpose">{missing}</p><p><a className="btn" href="/">See all your companies</a></p></div>
-                : <p className="muted pad" role="status">Opening {route.slug.replace(/-/g, ' ')}…</p>}
+                ? <div className="gone"><h1 id="page-h" tabIndex={-1} className="h1">Couldn’t open this company</h1>
+                    <p className="purpose">{missing} Your other companies are fine.</p><p><a className="primary" href="/">Back to your companies</a></p></div>
+                : <div aria-busy="true"><p className="label">Opening</p><h1 id="page-h" tabIndex={-1} className="h1">Opening {route.slug.replace(/-/g, ' ')}…</h1>
+                    <div className="skel-block" /></div>}
             </main>
-          : <Landing models={models} error={listError} onAdd={add} onDeleted={deleted} onChecked={checked} onReload={loadList} />}
+          : route.top === 'none'
+          ? <main id="main" className="page" tabIndex={-1}><div className="gone"><h1 id="page-h" tabIndex={-1} className="h1">There’s no page here</h1>
+              <p><a className="primary" href="/">Your companies</a></p></div></main>
+          : route.top === 'add'
+          ? <main id="main" className="page" tabIndex={-1}>
+              <AddPage models={models} build={build} onAdd={add} onWatch={watchIt} watchMsg={watchMsg} /></main>
+          : <Home models={models} error={listError} build={build} onAdd={add} onWatch={watchIt} watch={watch} setWatch={setWatch}
+              watchMsg={watchMsg} onDeleted={deleted} onChecked={checked} onReload={() => { loadList(); loadWatch() }} />}
       </div>
+      <BottomBar here={top} />
+      {global}
     </div>
   )
 }

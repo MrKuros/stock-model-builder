@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, clock, rs, type ModelSummary, type Watched, type WatchList } from './lib'
 import { ago, streamFetch } from './Fetch'
+import { Menu } from './Shell'
 
 const FRESH = 15 * 60_000 // a price this recent isn't asked for again (the server's cache says the same)
 
@@ -75,10 +76,8 @@ export function Spark({ pts }: { pts: [string, number, number | null, number, nu
   )
 }
 
-/** Tickers you follow without a model yet: today's price and Build model (the add-by-ticker run). */
-export function WatchSection({ list, models, onBuild, onChange }: {
-  list: WatchList | null; models: ModelSummary[]; onBuild: (symbol: string) => void; onChange: (w: WatchList) => void
-}) {
+/** Tickers you follow without a model yet: today's price, Build model (Add a company, by that symbol) and Stop watching. */
+export function WatchSection({ list, models, onChange }: { list: WatchList | null; models: ModelSummary[]; onChange: (w: WatchList) => void }) {
   const [error, setError] = useState<string | null>(null)
   const head = useRef<HTMLHeadingElement>(null)
   const modelled = new Set(models.map(m => m.symbol).filter(Boolean))
@@ -86,20 +85,18 @@ export function WatchSection({ list, models, onBuild, onChange }: {
   const remove = async (w: Watched) => {
     try { onChange(await api<WatchList>(`/api/watch/${encodeURIComponent(w.symbol)}`, { method: 'DELETE' })); head.current?.focus() } catch (e) { setError((e as Error).message) }
   }
+  if (!rows.length) return null
   return (
-    <section aria-labelledby="watch-head" className="watching">
-      <h2 id="watch-head" ref={head} tabIndex={-1} className="label sec-label"><span>Watching · <b>not modelled yet</b></span><span>{rows.length || ''}</span></h2>
-      {rows.length === 0
-        ? <p className="small muted pad-s">Nothing watched yet. To follow a company’s price before building its model, type it in the box at the top and choose <b>Watch</b>.</p>
-        : <ul className="cov watch-list">{rows.map(w => (
-          <li key={w.symbol} className="cov-row">
-            <span className="co"><strong>{w.name}</strong><span>NSE: {w.symbol}{w.industry ? ` · ${w.industry}` : ''}</span></span>
-            <span className="w-px">{w.price != null ? <><b className="num mkt">Rs {rs(w.price)}</b> <span className="small muted">checked {ago(w.at)}</span></> : <span className="small muted">No price kept yet</span>}</span>
-            <span className="w-act">
-              <button type="button" className="primary" onClick={() => onBuild(w.symbol)}>Build model</button>
-              <button type="button" className="link" onClick={() => remove(w)} aria-label={`Stop watching ${w.name}`}>Stop watching</button>
-            </span>
-          </li>))}</ul>}
+    <section aria-labelledby="watch-head" className="watching" id="watching" tabIndex={-1}>
+      <h2 id="watch-head" ref={head} tabIndex={-1}>Watching: price only, no model yet</h2>
+      <p className="purpose">Build a model when you want our value and the checks.</p>
+      <ul className="watch-list">{rows.map(w => (
+        <li key={w.symbol}>
+          <span className="c-name"><b>{w.name}</b><span className="c-meta">{w.symbol}{w.industry ? ` · ${w.industry}` : ''}</span></span>
+          <span className="w-px">{w.price != null ? <>Price <b className="num mkt">Rs {rs(w.price)}</b> · checked {ago(w.at)}</> : 'No price kept yet'}</span>
+          <a className="primary" href={`/add?symbol=${encodeURIComponent(w.symbol)}`}>Build model</a>
+          <Menu label={`More for ${w.name}`} items={[{ label: 'Stop watching', onClick: () => remove(w) }]} />
+        </li>))}</ul>
       {error && <p className="error" role="alert">{error}</p>}
     </section>
   )

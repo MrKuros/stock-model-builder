@@ -5,7 +5,7 @@ import DriverStrip from './DriverStrip'
 import { growth, month } from './Statements'
 import DraftPanel, { failing, latest, path, useDraft } from './Draft'
 import { Checks } from './Sources'
-import { PageHead, Toc } from './Shell'
+import { PageHead } from './Shell'
 import { useHref } from './route'
 import {
   DOC_KINDS, copyBase, defaultPaths, drifted, fmt, flat, groupKeys, isAnnual, money, seed, SCENARIOS, SHIFT, shortYear, type Proposal,
@@ -161,7 +161,6 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
         purpose={<>Pick an input in the table to see its history and the rule behind it, then drag the blue line or type a value.
           Edits change the <b>{active}</b> case (bear is cautious, base central, bull hopeful); every page recalculates. Recalculating never calls AI.</>}
         next={<a className="btn" href="#draft">Draft from documents</a>} />
-      <Toc page="forecast" extra={latestScored(tracking) ? [['tracking', 'How it did']] : []} />
       <p className="status-line" aria-live="polite">
         {balanced && <span className="ok">Balance sheet balances in every projected year</span>}
         {offIdx >= 0 && (roundingOnly
@@ -256,9 +255,9 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
             revenue={hist[nHist - 1].revenue ?? 0} used={sources?.moved_out ?? null} />}
           {(flags.length > 0 || lit) && <div className="card flag">
             <div className="card-h"><span>Warning sign</span><span className="tag flag">{lit?.status === 'red' || flags.some(f => f.year === histYears[nHist - 1]) ? 'High' : 'Watch'}</span></div>
-            {flags.map(f => <p key={f.year} className="small">{f.note}. The default may carry it; in Checks you can leave the year out or explain it.</p>)}
+            {flags.map(f => <p key={f.year} className="small">{f.note}. The default may carry it; under What could go wrong? you can leave the year out or explain it.</p>)}
             {lit && <p className="small">{lit.fact}. {lit.rule}.</p>}
-            <a className="go small" href={href('checks', flags.length ? 'unusual' : lit!.id)}>See it in Checks</a>
+            <a className="go small" href={href('checks', flags.length ? 'unusual' : lit!.id)}>See it in What could go wrong?</a>
           </div>}
           <div className="card doclist">
             <p className="small"><b>{nDocs} of 4 documents</b> attached: the Excel export{doc.filings.length ? ', XBRL filings' : ''}{doc.reports.length ? `, ${doc.reports.map(r => `${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}`).join(', ')}` : ''}.{' '}
@@ -286,7 +285,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
             <Chart title={m[1]} years={years} values={rows.map(m[2])} nHist={nHist} others={others} />
           </div>
         </div>
-        <p className="small">Every line year by year: <a href={href('statements')}>the full statements</a>. What it is worth: <a href={href('valuation')}>Valuation</a>.</p>
+        <p className="small">Every line year by year: <a href={href('statements')}>the full statements</a>. What it is worth: <a href={href('value')}>Is it cheap?</a>.</p>
       </section>
       {!fresh && accuracy}
     </>
@@ -419,7 +418,7 @@ function MovedOutCard({ doc, setDoc, year, revenue, used }: {
         <button type="button" onClick={save}>{mine ? 'Update' : 'Take it out of the base'}</button>
         {mine && <button type="button" onClick={remove}>Remove</button>}
       </div>
-      <p className="small dim" role="status">{msg || 'An AI reading of the annual report can propose this with a quote: Checks → Documents → read “Business moved out”.'}</p>
+      <p className="small dim" role="status">{msg || 'An AI reading of the annual report can propose this with a quote: Documents and sources → read “Business moved out”.'}</p>
     </details>
   )
 }

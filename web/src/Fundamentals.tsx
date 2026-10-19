@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { useWidth } from './Ruler'
-import { PageHead, Toc } from './Shell'
+import { PageHead } from './Shell'
 import { useHref } from './route'
 import { forecastOf } from './Tracking'
 import { fmt, money, shortYear, type Parsed, type Row, type Tracking } from './lib'
@@ -222,7 +222,6 @@ export default function Fundamentals({ parsed, tracking }: { parsed: Parsed; tra
         purpose={<>{cap(word(n))} years of what {short} reported, before any forecast. Each chart says what it shows
           in one line and opens the full table it comes from.</>}
         next={<a className="btn" href={href('statements')}>Open the full statements</a>} />
-      <Toc page="fundamentals" />
 
       <section className="blk first" id="growth" aria-labelledby="growth-h">
         <h2 id="growth-h">Growth, a year on average</h2>

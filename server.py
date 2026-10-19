@@ -43,7 +43,7 @@ FILING_ID = re.compile(r"[0-9a-f]{12}")
 REPORTS = "_reports"  # annual-report PDFs as page text, <id>.json (ai.pdf_pages); the PDF itself isn't kept
 MAX_PDF = 60 * 1024 * 1024  # annual reports run 5-30 MB
 MAX_ASK = 80  # unmapped tags sent to the LLM per proposal round; a results filing has ~10-50
-MODEL_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*/\d{4}-\d{2}-\d{2}")  # <company-slug>/<YYYY-MM-DD>
+MODEL_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*/\d{4}-\d{2}-\d{2}(?:-\d{4})?")  # <slug>/<YYYY-MM-DD>[-<HHMM> kept copy]
 app = FastAPI()
 
 
@@ -2064,8 +2064,9 @@ def model_file(model_id, root=None):
     return p
 
 
-def save_model(doc: ModelDoc, root=None, now=None):
-    """Write today's version for this company (replacing any earlier one from today). Returns (id, saved_at)."""
+def save_model(doc: ModelDoc, root=None, now=None, keep=False):
+    """Write today's version for this company (replacing any earlier one from today). Returns (id, saved_at).
+    keep: a replace or restore; today's file, if there is one, is first kept as <date>-<HHMM of its saved_at>."""
     root = root or MODELS
     doc.args()  # all three scenarios, every driver, a sane horizon
     now = now or datetime.now()
@@ -2078,7 +2079,15 @@ def save_model(doc: ModelDoc, root=None, now=None):
     if any(_saved_name(f) not in (None, name) for f in (root / folder).glob("*.json")):
         folder += "-" + hashlib.sha1(name.encode()).hexdigest()[:6]  # another company slugs the same ("Tata Motors"/"TATA MOTORS!")
     model_id = f"{folder}/{now.date().isoformat()}"
-    _write(model_file(model_id, root), text.encode())
+    p = model_file(model_id, root)
+    if keep and p.exists():
+        try:
+            at = datetime.fromisoformat(json.loads(p.read_bytes())["saved_at"])
+        except (ValueError, KeyError, TypeError):
+            at = datetime.fromtimestamp(p.stat().st_mtime)
+        old = model_file(f"{model_id}-{at:%H%M}", root)  # ponytail: a second keep in the same minute overwrites that copy
+        _write(old, p.read_bytes())
+    _write(p, text.encode())
     return model_id, data["saved_at"]
 
 
@@ -2125,8 +2134,9 @@ def list_models(root=None):
             projs = {s: model.project(co["hist"], ex[s], n) for s in model.SCENARIOS}
             last = projs[doc.active][-1]["revenue"]
             labels = model.labels(co["dates"])
-            checks = model.rule_checks(co["hist"], labels, model.detect_oneoffs(co["hist"], labels),
-                                       model.data_checks(doc.company.model_dump()), doc.notes)
+            # warning signs as the open model counts them: the radar on the upgraded history (args() upgrades it);
+            # unusual years and data notes are never counted
+            radar = model.forensic(co["hist"], labels, doc.notes)
             sym = (doc.company.source or {}).get("symbol")
             live = _live(root, sym)
             if live and doc.valuation.price is None:  # today's price, from the cache only (a typed price stays)
@@ -2139,7 +2149,7 @@ def list_models(root=None):
         out.append({"id": model_id, "company": doc.company.name, "active": doc.active, "n": n,
                     "saved_at": doc.saved_at, "year": model.fy(model.projected_dates(co, n)[-1], True),
                     "revenue": last if last is not None and math.isfinite(last) else None,
-                    "flags": sum(c["status"] in ("red", "amber") for c in checks), "reviewed_at": doc.reviewed_at,
+                    "flags": sum(f["severity"] in ("high", "medium", "low") for f in radar), "reviewed_at": doc.reviewed_at,
                     # results that came in since you last marked it reviewed (5.3)
                     "symbol": sym, "price_saved": doc.company.market.price,
                     "price_at": _ago(live["age"]) if live else (doc.company.source or {}).get("price_at"),
@@ -2183,7 +2193,7 @@ def restatements(co, root=None):
     same company: {id, saved_at, changes: [{year, line, old, new}], carry: {filings, proposals, notes, reports}}, or None when nothing of it is saved."""
     root = root or MODELS
     saved = [p for p in root.glob(f"{slug(co['name'])}*/*.json") if _saved_name(p) == co["name"]]
-    for p in sorted(saved, key=lambda p: p.stem, reverse=True):  # newest day first; a damaged file falls back
+    for p in sorted(saved, key=lambda p: (p.stem[:10], len(p.stem) == 10, p.stem), reverse=True):  # newest first (a day's file is newer than the copies kept that day); a damaged file falls back
         model_id = f"{p.parent.name}/{p.stem}"
         try:
             doc = load_model(model_id, root)
@@ -2242,7 +2252,7 @@ async def save(request: Request):
         doc = ModelDoc.model_validate_json(body)
     except ValidationError as e:
         raise RequestValidationError([{**x, "loc": ("body", *x["loc"])} for x in e.errors()])
-    model_id, saved_at = save_model(doc)
+    model_id, saved_at = save_model(doc, keep=request.query_params.get("keep") == "1")
     return {"id": model_id, "saved_at": saved_at}
 
 

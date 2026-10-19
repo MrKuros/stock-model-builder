@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { niceTicks } from './Chart'
 import { BreakEvens, Bridge, Change, Prose, Tornado, avg, shortName } from './Note'
 import { PeersSection } from './Peers'
-import { PageHead, Toc } from './Shell'
+import { PageHead } from './Shell'
 import { useHref } from './route'
 import {
   NAMES, copyBase, dec2, drifted, fmt, money, noNegZero, type ModelDoc, type Multiple, type Parsed, type Path, type Projection, type Scenario, type ValInputs, type Valuation,
@@ -102,7 +102,6 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
             ? <>{why} <a href={href('forecast', 'capex_pct')}>Change capex or growth in Forecast</a></>
             : <>{why} Fix it in the inputs below and the value appears.</>}
         next={<a className="btn" href="#inputs">Change the inputs</a>} />
-      <Toc page="valuation" />
 
       <section className="blk first card" id="inputs" aria-labelledby="val-head">
         <div className="strip-head">
@@ -389,7 +388,7 @@ function Grid({ id, title, corner, grid, rows, cols, price }: {
                 // ponytail: shade depth is linear in the gap to price, capped at ±50%
                 const gap = val != null && price ? val / price - 1 : null
                 const style = gap == null ? undefined : {
-                  background: `color-mix(in srgb, var(${gap >= 0 ? '--pencil' : '--amber'}) ${Math.round(8 + Math.min(1, Math.abs(gap) / 0.5) * 30)}%, transparent)`,
+                  background: `color-mix(in srgb, var(${gap >= 0 ? '--ours' : '--market'}) ${Math.round(8 + Math.min(1, Math.abs(gap) / 0.5) * 30)}%, transparent)`,
                 }
                 return (
                   <td key={i} className={cur ? 'is-current' : undefined} style={style}>

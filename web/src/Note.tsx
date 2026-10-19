@@ -192,11 +192,11 @@ export default function Note({ parsed, doc, setDoc, projection, provenance, chan
     <>
       <section className="verdict" aria-labelledby="page-h">
         <div>
-          <p className="label">Overview · <b>base case</b> · what the price assumes against what the business does</p>
+          <p className="label">Summary · <b>central case</b> · what the price assumes against what the business does</p>
           <h1 id="page-h" tabIndex={-1}>{h1}</h1>
           {doc.active !== 'base' && <p className="small-note">This summary is about the base case. Your {doc.active} case
             {v?.scenarios[doc.active].per_share != null ? <> is <span className="num ours">Rs {rs(v.scenarios[doc.active].per_share!)}</span> a share</> : ' has no value yet'}:{' '}
-            <a href={href('valuation', 'worth')}>see every case in Valuation</a>.</p>}
+            <a href={href('valuation', 'worth')}>see every case in Is it cheap?</a>.</p>}
           {stand && <p className="lede">{stand}</p>}
         </div>
         {(sv?.upside != null || cells.length > 0 || top) && <aside className="sure" aria-label="How sure">
@@ -319,7 +319,7 @@ function Strip({ checks }: { checks: RuleCheck[] }) {
     <section className="annun" aria-labelledby="flags-h">
       <div className="strip-head">
         <h2 id="flags-h" className="label">Warning signs · <b>{red} red · {amber} amber · {clear.length} clear{filing.length ? ` · ${filing.length} need the annual report` : ''}</b></h2>
-        <a className="go" href={href('checks')}>All warning signs, in Checks</a>
+        <a className="go" href={href('checks')}>All warning signs, in What could go wrong?</a>
       </div>
       <div className="cells">
         {lit.map((c, i) => (
@@ -362,7 +362,7 @@ function Risks({ parsed, doc, tn, P }: { parsed: Parsed; doc: ModelDoc; tn: Thes
               <p><span className={`sev ${f.severity}`}>{SEV[f.severity]}</span> {f.detail}</p>
               {n && <FlagNoteView note={n} />}
               <a className="small" href={href('checks', f.key)}
-                aria-label={`${f.title}: ${n ? 'see it in Checks' : 'explain it in Checks'}`}>{n ? 'See it in Checks' : 'Explain it in Checks'}</a>
+                aria-label={`${f.title}: ${n ? 'see it in What could go wrong?' : 'explain it in What could go wrong?'}`}>{n ? 'See it' : 'Explain it'}</a>
             </li>
           )
         })}
@@ -554,7 +554,7 @@ function OperatingNumbers({ notes }: { notes: Record<string, unknown> }) {
         <p className="small-note">As printed in {n.file ?? 'the annual report'}, read by AI and approved by you; they don’t change any
           number in the model. <a href={href('checks', 'documents')}>Quotes</a></p>
       </> : <p className="small-note">Order book, headcount, attrition or volumes, as the annual report prints them: attach the
-        report on <a href={href('checks', 'documents')}>Checks → Documents</a> and read “Operating numbers”.</p>}
+        report on <a href={href('documents')}>Documents and sources</a> and read “Operating numbers”.</p>}
     </section>
   )
 }

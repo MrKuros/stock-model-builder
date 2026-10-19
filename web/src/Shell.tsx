@@ -1,11 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { PAGES, SECTIONS, STATEMENTS, navigate, pathOf, type Page } from './route'
-import { AddBox } from './Fetch'
-import { rs, when, type ModelSummary } from './lib'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { PAGES, RAIL, STATEMENTS, navigate, pathOf, type Page } from './route'
+import { SEV_WORD, gap, rs, verdict, type ModelSummary, type Scenario, type Severity } from './lib'
 
 const THEME = 'financial-model:theme'
 const KEYS = 'financial-model:keys'
-/** The single-key page shortcuts can be turned off (they get in the way of speech input); on unless turned off here. */
+/** The single-key shortcuts can be turned off (they get in the way of speech input); on unless turned off here. */
 export function keysOn() {
   try { return localStorage.getItem(KEYS) !== 'off' } catch { return true }
 }
@@ -19,210 +18,369 @@ export function toggleTheme() {
   document.querySelectorAll('meta[name="theme-color"]').forEach(m => m.setAttribute('content', GROUND[t]))
   try { localStorage.setItem(THEME, t) } catch { /* private mode */ }
 }
+/** Open the go-to box ('goto', the / key) or the company switcher ('switch'), or the keys list, from anywhere. */
+export const openFinder = (mode: 'goto' | 'switch') => window.dispatchEvent(new CustomEvent('app:find', { detail: mode }))
+export const openKeys = () => window.dispatchEvent(new Event('app:keys'))
 
 const MARK = <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="14" width="6" height="14" fill="currentColor" />
   <rect x="13" y="8" width="6" height="20" fill="currentColor" />
   <rect x="22" y="3" width="6" height="25" fill="none" stroke="var(--ours)" strokeWidth="2.4" /></svg>
 export const Brand = ({ short }: { short?: boolean }) =>
-  <a className="brand" href="/" aria-label={short ? 'Stock Model Builder: all companies' : undefined}>{MARK}<span>Stock Model Builder</span></a>
+  <a className="brand" href="/" aria-label={short ? 'Stock Model Builder: your companies' : undefined}>{MARK}<span>Stock Model Builder</span></a>
 
 const THEME_ICON = <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
   <path d="M8 1.8a6.2 6.2 0 0 1 0 12.4z" fill="currentColor" /></svg>
-export const ThemeButton = ({ label = true }: { label?: boolean }) => (
-  <button className="tbtn" type="button" onClick={toggleTheme} aria-label="Switch light or dark theme">
-    {THEME_ICON}{label && <span className="t-l">Theme</span>}
-  </button>
+export const ThemeButton = () => (
+  <button className="tbtn" type="button" onClick={toggleTheme} aria-label="Switch light or dark theme">{THEME_ICON}<span>Theme</span></button>
 )
 export const DL = <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8m0 0L5 7m3 3 3-3M3 13h10" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg>
-
-const ICONS: Record<Page | 'companies', ReactNode> = {
-  companies: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M2 8h12M2 13h12" stroke="currentColor" strokeWidth="1.6" /></svg>,
-  overview: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M2 8h8M2 13h10" fill="none" stroke="currentColor" strokeWidth="1.6" /></svg>,
-  fundamentals: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 14V9M6.2 14V6M9.9 14V7.5M13.6 14V3" fill="none" stroke="currentColor" strokeWidth="2" /></svg>,
-  statements: <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1" fill="none" stroke="currentColor" strokeWidth="1.4" /><path d="M2 6.2h12M2 9.8h12M6 2.5v11" stroke="currentColor" strokeWidth="1.2" /></svg>,
+export const CHECK = <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 11.8 4M12 1.5V4.5H9" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg>
+const ICON: Record<string, ReactNode> = {
+  summary: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M2 8h8M2 13h10" fill="none" stroke="currentColor" strokeWidth="1.6" /></svg>,
+  value: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 11h13" stroke="currentColor" strokeWidth="1.3" /><rect x="4" y="7.5" width="6" height="3.5" fill="none" stroke="currentColor" strokeWidth="1.4" /><path d="M12.5 4v9" stroke="currentColor" strokeWidth="1.8" /></svg>,
+  risks: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2 14.5 13.5h-13z" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M8 6.5v3.5M8 11.5v1" stroke="currentColor" strokeWidth="1.6" /></svg>,
   forecast: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 12l4-4 3 2 5-6" fill="none" stroke="currentColor" strokeWidth="1.6" /><circle cx="14" cy="4" r="1.6" fill="currentColor" /></svg>,
-  valuation: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 11h13" stroke="currentColor" strokeWidth="1.3" /><rect x="4" y="7.5" width="6" height="3.5" fill="none" stroke="currentColor" strokeWidth="1.4" /><path d="M12.5 4v9" stroke="currentColor" strokeWidth="1.8" /></svg>,
-  checks: <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M10.4 10.4 14 14" stroke="currentColor" strokeWidth="1.8" /></svg>,
+  all: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3.5h2M2 8h2M2 12.5h2M6 3.5h8M6 8h8M6 12.5h8" stroke="currentColor" strokeWidth="1.6" /></svg>,
+  companies: <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="9" width="3" height="5" fill="currentColor" /><rect x="6.5" y="6" width="3" height="8" fill="currentColor" /><rect x="11" y="2.5" width="3" height="11.5" fill="none" stroke="currentColor" strokeWidth="1.3" /></svg>,
+  watching: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" fill="none" stroke="currentColor" strokeWidth="1.4" /><circle cx="8" cy="8" r="2" fill="currentColor" /></svg>,
+  add: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" stroke="currentColor" strokeWidth="1.8" /></svg>,
 }
 
-/** Price (ochre) against bear-bull (blue band) and base (blue tick) on one small scale. */
-export function MiniRange({ price, bear, base, bull }: { price: number | null; bear: number | null; base: number | null; bull: number | null }) {
-  const pts = [price, bear, base, bull].filter((x): x is number => x != null)
-  if (base == null || pts.length < 2) return <span className="mini" aria-hidden="true" />
-  const lo = Math.min(...pts), hi = Math.max(...pts), pad = (hi - lo || 1) * 0.08
-  const x = (n: number) => `${((n - lo + pad) / (hi - lo + 2 * pad)) * 100}%`
-  const label = `Bear Rs ${bear == null ? '–' : rs(bear)}, base Rs ${rs(base)}, bull Rs ${bull == null ? '–' : rs(bull)}` +
-    (price != null ? `, price Rs ${rs(price)}` : '')
-  return (
-    <span className="mini" role="img" aria-label={label}>
-      <i className="ax" />
-      {bear != null && bull != null && <i className="bd" style={{ left: x(bear), width: `calc(${x(bull)} - ${x(bear)})` }} />}
-      <i className="bs" style={{ left: x(base) }} />
-      {price != null && <i className={`px${price > (lo + hi) / 2 ? ' r' : ''}`} style={{ left: x(price) }}><span>{rs(price)}</span></i>}
-    </span>
-  )
-}
-/** Where the price sits against our range, in words. */
-export function rangeWords(price: number | null, bear: number | null, base: number | null, bull: number | null): ReactNode {
-  if (base == null) return 'No value yet'
-  if (price == null) return <>Base <span className="num ours">Rs {rs(base)}</span>, no price</>
-  const where = bull != null && price > bull ? 'above our range' : bear != null && price < bear ? 'below our range' : 'inside our range'
-  return <>Base value <b className="num ours">Rs {rs(base)}</b> · price <b className="num mkt">{rs(price)}</b> sits {where}{bear != null && bull != null && <> <span className="num ours">{rs(bear)}–{rs(bull)}</span></>}</>
-}
-
-/** The newest saved version of each company (the library lists every day). */
+/** The newest saved version of each company (the library lists every version, newest first). */
 export const latestOf = (models: ModelSummary[] | null) => {
   const seen = new Set<string>()
   return (models ?? []).filter(m => !seen.has(m.company) && !!seen.add(m.company))
 }
 export const slugOf = (id: string) => id.split('/')[0]
 
-export interface Here {
-  slug: string; version: string | null; page: Page; sub: string; name: string; short: string
-  range: { price: number | null; bear: number | null; base: number | null; bull: number | null }
-  hasQuarters: boolean; models: ModelSummary[] | null
-}
+// ---------- small pieces every page uses ----------
 
-/** The company switcher: a native <details>; every company is a real link to the same page of that company. */
-function Switcher({ here, compact }: { here: Here; compact?: boolean }) {
-  const others = latestOf(here.models)
-  const box = useRef<HTMLDetailsElement>(null)
-  useEffect(() => { // a menu closes on Escape, a click outside it, or a pick inside it
-    const close = (refocus: boolean) => {
-      const d = box.current
-      if (!d?.open) return
-      d.open = false
-      if (refocus) d.querySelector('summary')?.focus()
-    }
-    const key = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented && box.current?.open) { e.preventDefault(); close(true) } }
-    const down = (e: PointerEvent) => { if (!box.current?.contains(e.target as Node)) close(false) }
-    const pick = (e: MouseEvent) => { if ((e.target as Element).closest?.('.sw-list a')) close(false) }
-    const d = box.current
-    document.addEventListener('keydown', key)
-    document.addEventListener('pointerdown', down)
-    d?.addEventListener('click', pick)
-    return () => { document.removeEventListener('keydown', key); document.removeEventListener('pointerdown', down); d?.removeEventListener('click', pick) }
-  }, [])
-  const list = (
-    <nav className="sw-list" aria-label="Your companies">
-      {others.map(m => {
-        const s = slugOf(m.id)
-        return <a key={m.id} href={pathOf(s, here.page, here.sub)} aria-current={s === here.slug ? 'true' : undefined}>
-          <span>{m.company}</span><span>{m.saved_at ? when(m.saved_at) : ''}</span></a>
-      })}
-    </nav>
+const LO = -2, HI = 2 // log2(value / price): a quarter of the price to four times it
+/** Our value range against today's price on one log scale shared by every row: the price is always the middle line,
+ * a value to the right is above the price (looks cheap), to the left below it (looks expensive). */
+export function Scale({ price, bear, base, bull, size = 'row', ghost }: {
+  price: number | null | undefined; bear?: number | null; base: number | null | undefined; bull?: number | null; size?: 'row' | 'mini'; ghost?: number | null
+}) {
+  if (base == null || price == null || !(price > 0)) return <span className={`scale ${size} none`} aria-hidden="true" />
+  const at = (v: number) => Math.min(100, Math.max(0, ((Math.log2(Math.max(v, 1e-9) / price) - LO) / (HI - LO)) * 100))
+  const off = base <= 0 || at(base) <= 0 ? 'lo' : at(base) >= 100 ? 'hi' : ''
+  const label = `Our central value Rs ${rs(base)}${bear != null && bull != null ? ` (cautious Rs ${rs(bear)} to hopeful Rs ${rs(bull)})` : ''}`
+    + ` against today’s price Rs ${rs(price)}: ${gap(price, base)}`
+  return (
+    <span className={`scale ${size}`} role="img" aria-label={label}>
+      <i className="ax" />
+      {bear != null && bull != null && <i className="bd" style={{ left: `${at(bear)}%`, width: `${Math.max(at(bull) - at(bear), 0.8)}%` }} />}
+      {ghost != null && ghost > 0 && <i className="gh" style={{ left: `${at(ghost)}%` }} />}
+      <i className={`bs${off ? ` off ${off}` : ''}`} style={{ left: `${at(base)}%` }} />
+      <i className="px" />
+    </span>
   )
-  const menu = (
-    <div className="sw-menu">
-      {list}
-      <div className="sw-add">
-        <AddBox models={here.models} compact onAdd={sym => navigate(`/?add=${encodeURIComponent(sym)}`)}
-          upload={<a href="/?upload=1">Upload an Excel export instead</a>} />
+}
+/** The axis above a column of scales. */
+export const ScaleHead = () => (
+  <span className="scale-head" aria-hidden="true">
+    <span className="sh-words"><span>← Our value under the price: looks expensive</span><span>Our value over the price: looks cheap →</span></span>
+    <span className="sh-ticks"><span style={{ left: '0%' }}>¼×</span><span style={{ left: '25%' }}>½×</span>
+      <span className="p" style={{ left: '50%' }}>Today’s price</span><span style={{ left: '75%' }}>2×</span><span style={{ left: '100%' }}>4×</span></span>
+  </span>
+)
+
+/** "Looks expensive · 22% downside": the verdict word and the gap in words, the same everywhere. */
+export function Verdict({ price, values, words = true }: { price: number | null | undefined; values: Partial<Record<Scenario, number | null>> | null | undefined; words?: boolean }) {
+  const v = verdict(price, values), g = words ? gap(price, values?.base) : null
+  return <span className={`vd ${v.kind}`}>{v.word}{g && v.kind !== 'fix' ? ` · ${g}` : ''}</span>
+}
+/** A severity: always a word, the colour only repeats it. */
+export const Sev = ({ level }: { level: Severity }) => <span className={`sev ${level}`}>{SEV_WORD[level]}</span>
+/** Where a number comes from, in words: rules (blue), yours (yellow highlighter), AI (purple), the market (ochre). */
+export const Src = ({ kind, children }: { kind: 'rule' | 'you' | 'ai' | 'market'; children: ReactNode }) => <span className={`srcw ${kind}`}>{children}</span>
+
+/** Every page opens the same way: kicker, the title (a question or a plain name), what the page is for, the answer. */
+export function PageHead({ label, title, purpose, answer, next }: { label?: ReactNode; title: ReactNode; purpose: ReactNode; answer?: ReactNode; next?: ReactNode }) {
+  return (
+    <div className="p-head">
+      <div>
+        {label && <p className="label">{label}</p>}
+        <h1 id="page-h" tabIndex={-1}>{title}</h1>
+        <p className="purpose">{purpose}</p>
+        {answer && <p className="answer">{answer}</p>}
       </div>
+      {next && <div className="next">{next}</div>}
     </div>
   )
-  if (compact) return (
-    <details className="m-switch" ref={box}>
-      <summary aria-label={`Company: ${here.name}. Switch or add a company`}><b>{here.short}</b><span>Switch ▾</span></summary>
-      {menu}
-    </details>
-  )
+}
+/** The single action box that ends a page. */
+export const Next = ({ lead, children }: { lead: ReactNode; children: ReactNode }) => (
+  <aside className="next-box" aria-label="What to do next"><p>{lead}</p><div className="next-act">{children}</div></aside>
+)
+/** One labelled click for the rest: the summary says what is inside and how many. */
+export const More = ({ title, n, id, children }: { title: ReactNode; n?: number; id?: string; children: ReactNode }) => (
+  <details className="fold" id={id}><summary>{title}{n != null ? ` (${n})` : ''}</summary>{children}</details>
+)
+
+/** A native modal <dialog> that follows `open`; Esc and the backdrop close it. */
+function useModal(open: boolean, onClose: () => void) {
+  const ref = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    const d = ref.current
+    if (!d) return
+    if (open && !d.open) d.showModal()
+    if (!open && d.open) d.close()
+  }, [open])
+  const props = {
+    ref, onClose, onCancel: () => onClose(),
+    onClick: (e: React.MouseEvent<HTMLDialogElement>) => { if (e.target === e.currentTarget) onClose() }, // the backdrop
+  }
+  return props
+}
+/** Ask before something that can't be undone. The safe answer has the focus. */
+export function Confirm({ open, title, body, yes, no = 'Keep it', onYes, onClose }: {
+  open: boolean; title: string; body: ReactNode; yes: string; no?: string; onYes: () => void; onClose: () => void
+}) {
+  const p = useModal(open, onClose)
+  const id = useId()
   return (
-    <details className="switch" ref={box}>
-      <summary aria-label={`Company: ${here.name}. Switch or add a company`}>
-        <span className="sw-top"><span className="sw-name">{here.short}</span><span className="sw-chev">Switch ▾</span></span>
-        {!here.name.startsWith(here.short) && <span className="sw-full">{here.name}</span>}
-        <MiniRange {...here.range} />
-        <span className="sw-cap">{rangeWords(here.range.price, here.range.bear, here.range.base, here.range.bull)}</span>
-      </summary>
-      {menu}
-    </details>
+    <dialog {...p} className="dlg" aria-labelledby={`${id}-h`}>
+      <h2 id={`${id}-h`}>{title}</h2>
+      <div className="dlg-body">{body}</div>
+      <div className="dlg-act">
+        {/* the safe answer comes first, so the dialog opens on it; CSS shows it second */}
+        <button type="button" className="btn safe" onClick={onClose}>{no}</button>
+        <button type="button" className="danger" onClick={() => { onClose(); onYes() }}>{yes}</button>
+      </div>
+    </dialog>
+  )
+}
+/** A sheet (phones: from the bottom, full height for All pages) or a small dialog on desktop. */
+export function Sheet({ open, title, onClose, full, children }: { open: boolean; title: string; onClose: () => void; full?: boolean; children: ReactNode }) {
+  const p = useModal(open, onClose)
+  const id = useId()
+  return (
+    <dialog {...p} className={`dlg sheet${full ? ' full' : ''}`} aria-labelledby={`${id}-h`}>
+      <div className="sheet-h"><h2 id={`${id}-h`}>{title}</h2><button type="button" className="tbtn" onClick={onClose}>Close</button></div>
+      {open && children}
+    </dialog>
   )
 }
 
-const pageLinks = (here: Here) => PAGES.map(([p, label], i) => ({
-  p, label, key: i + 1, href: pathOf(here.slug, p, p === 'statements' ? (here.page === 'statements' ? here.sub : '') : '', here.version),
-}))
+export interface MenuItem { label: string; href?: string; onClick?: () => void; danger?: boolean }
+/** The ⋯ menu: arrow keys move, Esc closes and returns focus to the button. */
+export function Menu({ label, items }: { label: string; items: MenuItem[] }) {
+  const [open, setOpen] = useState(false)
+  const box = useRef<HTMLSpanElement>(null)
+  const btn = useRef<HTMLButtonElement>(null)
+  const id = useId()
+  useEffect(() => {
+    if (!open) return
+    box.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    const down = (e: PointerEvent) => { if (!box.current?.contains(e.target as Node)) setOpen(false) }
+    document.addEventListener('pointerdown', down)
+    return () => document.removeEventListener('pointerdown', down)
+  }, [open])
+  const close = (refocus: boolean) => { setOpen(false); if (refocus) btn.current?.focus() }
+  const keys = (e: React.KeyboardEvent) => {
+    const all = [...(box.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])]
+    const i = all.indexOf(document.activeElement as HTMLElement)
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(true) }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); all[(i + (e.key === 'ArrowDown' ? 1 : -1) + all.length) % all.length]?.focus() }
+    else if (e.key === 'Tab') setOpen(false)
+  }
+  return (
+    <span className="menu" ref={box} onKeyDown={open ? keys : undefined}>
+      <button ref={btn} type="button" className="kebab" aria-label={label} aria-haspopup="menu" aria-expanded={open}
+        aria-controls={open ? id : undefined} onClick={() => setOpen(o => !o)}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1.5" /><circle cx="8" cy="8" r="1.5" /><circle cx="13" cy="8" r="1.5" /></svg></button>
+      {open && <span className="menu-list" role="menu" id={id} aria-label={label}>
+        {items.map(it => it.href
+          ? <a key={it.label} role="menuitem" href={it.href} onClick={() => setOpen(false)}>{it.label}</a>
+          : <button key={it.label} type="button" role="menuitem" className={it.danger ? 'is-danger' : undefined}
+              onClick={() => { close(true); it.onClick?.() }}>{it.label}</button>)}
+      </span>}
+    </span>
+  )
+}
 
-/** Desktop: brand, switcher, the six pages (the open one lists its sections), theme and the key hint at the foot. */
-export function Side({ here }: { here: Here | null }) {
-  const subs: [string, string][] = !here ? [] : here.page === 'statements'
-    ? STATEMENTS.filter(s => s[0] !== 'quarters' || here.hasQuarters || here.sub === 'quarters').map(s => [pathOf(here.slug, 'statements', s[0], here.version), s[1]])
-    : (SECTIONS[here.page] ?? []).map(([id, t]) => [`#${id}`, t])
+// ---------- the company shell ----------
+
+export interface RailNote { text: string; tone?: 'warn' | 'new' }
+export interface Here {
+  slug: string; version: string | null; page: Page; sub: string; name: string; short: string; models: ModelSummary[] | null
+  hasQuarters: boolean; notes: Partial<Record<Page, RailNote>>
+}
+
+/** The pages in three groups with a quiet count or status each: the rail, and the phone's All pages sheet. */
+function RailList({ here }: { here: Here }) {
+  const href = (p: Page, sub = '') => pathOf(here.slug, p, sub, here.version)
+  return (
+    <nav className="rail-nav" aria-label={`Pages for ${here.short}`}>
+      {RAIL.map(([group, pages]) => (
+        <div key={group} className="rail-g">
+          <p className="rail-gh">{group}</p>
+          <ul>{pages.map(([p, label]) => {
+            const n = here.notes[p]
+            return <li key={p}>
+              <a href={href(p, p === 'statements' && here.page === 'statements' ? here.sub : '')}
+                aria-current={here.page === p ? (p === 'statements' ? 'true' : 'page') : undefined}>
+                <span>{label}</span>{n && <span className={`rn${n.tone ? ` ${n.tone}` : ''}`}>{n.text}</span>}</a>
+              {p === 'statements' && here.page === 'statements' && <ul className="rail-sub">
+                {STATEMENTS.filter(s => s[0] !== 'quarters' || here.hasQuarters || here.sub === 'quarters').map(s => (
+                  <li key={s[0]}><a href={href('statements', s[0])} aria-current={here.sub === s[0] ? 'page' : undefined}>{s[1]}</a></li>))}
+              </ul>}
+            </li>
+          })}</ul>
+        </div>
+      ))}
+    </nav>
+  )
+}
+
+/** Desktop rail: brand, back to the list, the pages, and the quiet status foot. */
+export function Rail({ here, foot }: { here: Here; foot: ReactNode }) {
   return (
     <div className="side">
       <Brand />
-      {here ? <>
-        <Switcher here={here} />
-        <nav className="nav" aria-label={`Pages for ${here.short}`}>
-          {pageLinks(here).map(l => (
-            <div key={l.p}>
-              <a href={l.href} aria-current={here.page === l.p ? (l.p === 'statements' ? 'true' : 'page') : undefined} aria-keyshortcuts={String(l.key)}>
-                {ICONS[l.p]}<span>{l.label}</span><kbd aria-hidden="true">{l.key}</kbd></a>
-              {here.page === l.p && subs.length > 0 && <div className="sub">
-                {subs.map(([h, t]) => <a key={h} href={h} aria-current={here.page === 'statements' && h.split('?')[0].endsWith(`/${here.sub}`) ? 'page' : undefined}>{t}</a>)}
-              </div>}
-            </div>
-          ))}
-        </nav>
-      </> : (
-        <nav className="nav" aria-label="Main">
-          <a href="/" aria-current="page">{ICONS.companies}<span>Companies</span></a>
-        </nav>
-      )}
-      <div className="side-foot">
-        <div className="row">{here ? <a className="tbtn" href="/">All companies</a> : <span />}<ThemeButton /></div>
-        {here && <KeyHint />}
-      </div>
+      <a className="back" href="/">← Your companies</a>
+      <RailList here={here} />
+      <div className="side-foot">{foot}<KeysFoot /></div>
+    </div>
+  )
+}
+const KeysFoot = () => (
+  <div className="row"><ThemeButton /><button type="button" className="tbtn" onClick={openKeys} aria-label="Keyboard keys">Keys <kbd>?</kbd></button></div>
+)
+
+/** Rail on Your companies and Add a company. */
+export function HomeRail({ here, count, foot }: { here: 'home' | 'add'; count: number | null; foot?: ReactNode }) {
+  return (
+    <div className="side">
+      <Brand />
+      <nav className="rail-nav" aria-label="Your library">
+        <div className="rail-g">
+          <p className="rail-gh">Your library</p>
+          <ul>
+            <li><a href="/" aria-current={here === 'home' ? 'page' : undefined}><span>Your companies</span>{count != null && <span className="rn">{count}</span>}</a></li>
+            <li><a href="/#watching"><span>Watching</span></a></li>
+            <li><a href="/add" aria-current={here === 'add' ? 'page' : undefined}><span>Add a company</span></a></li>
+          </ul>
+        </div>
+      </nav>
+      <div className="side-foot">{foot}<KeysFoot /></div>
     </div>
   )
 }
 
-function KeyHint() {
+/** Phones: back to the list, the switcher and the ⋯ menu on top. */
+export function PhoneTop({ short, menu }: { short?: string; menu: MenuItem[] }) {
+  return (
+    <div className="mtop">
+      {short != null
+        ? <><a className="m-back" href="/" aria-label="All your companies">‹ All</a>
+          <button type="button" className="m-switch" onClick={() => openFinder('switch')} aria-label={`Company: ${short}. Switch company`}>
+            <b>{short}</b> <span aria-hidden="true">▾</span></button></>
+        : <><Brand short /><b className="mtop-name">Stock Model Builder</b></>}
+      <Menu label="More: theme and keys" items={[...menu, { label: 'Switch light or dark theme', onClick: toggleTheme }, { label: 'Keyboard keys', onClick: openKeys }]} />
+    </div>
+  )
+}
+/** Phones: the four pages most used and All pages (the rail as a sheet); on the list pages, Companies, Watching, Add. */
+export function BottomBar({ here }: { here: Here | 'home' | 'add' }) {
+  const [all, setAll] = useState(false)
+  if (typeof here === 'string') return (
+    <nav className="bnav" aria-label="Your library">
+      <a href="/" aria-current={here === 'home' ? 'page' : undefined}>{ICON.companies}Companies</a>
+      <a href="/#watching">{ICON.watching}Watching</a>
+      <a href="/add" aria-current={here === 'add' ? 'page' : undefined}>{ICON.add}Add</a>
+    </nav>
+  )
+  const link = (p: Page, label: string) => (
+    <a href={pathOf(here.slug, p, '', here.version)} aria-current={here.page === p ? 'page' : undefined}>{ICON[p]}{label}</a>)
+  return (
+    <>
+      <nav className="bnav" aria-label={`Pages for ${here.short}`}>
+        {link('summary', 'Summary')}{link('value', 'Cheap?')}{link('risks', 'Risks')}{link('forecast', 'Forecast')}
+        <button type="button" onClick={() => setAll(true)} aria-haspopup="dialog">{ICON.all}All pages</button>
+      </nav>
+      <Sheet open={all} title={`${here.short}: all pages`} onClose={() => setAll(false)} full>
+        <div onClick={e => { if ((e.target as Element).closest('a')) setAll(false) }}><RailList here={here} /></div>
+        <a className="back" href="/" onClick={() => setAll(false)}>← Your companies</a>
+      </Sheet>
+    </>
+  )
+}
+
+// ---------- go-to box and company switcher (one listbox), and the keys list ----------
+
+const ALIASES: Partial<Record<Page, string>> = {
+  summary: 'overview home answers', value: 'value valuation cheap dcf worth', 'priced-in': 'priced in reverse implied assume',
+  risks: 'risks checks warning forensic flags', changes: 'changes results tracking new', peers: 'peers compare',
+  forecast: 'forecast inputs assumptions model', note: 'note research thesis', business: 'business fundamentals growth',
+  statements: 'statements p&l balance cash ratios quarters', documents: 'documents sources filings audit', versions: 'versions history saved',
+}
+interface Item { key: string; label: string; find: string; href: string; extra?: ReactNode; side?: ReactNode }
+
+/** `/`: go to any company or any page of the open one; the switcher: any company, keeping the page you're on. */
+export function Finder({ mode, onClose, models, here }: {
+  mode: 'goto' | 'switch' | null; onClose: () => void; models: ModelSummary[] | null
+  here: { slug: string; short: string; name: string; page: Page; sub: string } | null
+}) {
+  const p = useModal(mode != null, onClose)
+  const id = useId()
+  const [q, setQ] = useState('')
+  const [active, setActive] = useState(0)
+  useEffect(() => { if (mode) { setQ(''); setActive(0) } }, [mode])
+  const pages: Item[] = here && mode === 'goto' ? PAGES.map(([pg, label]) => ({
+    key: `p-${pg}`, label: `${here.short} · ${label}`, find: `${here.short} ${here.name} ${label} ${ALIASES[pg] ?? ''}`, href: pathOf(here.slug, pg),
+  })) : []
+  const cos: Item[] = latestOf(models).map(m => ({
+    key: m.id, label: m.company, find: `${m.company} ${m.symbol ?? ''}`,
+    href: pathOf(slugOf(m.id), here?.page ?? 'summary', here?.page === 'statements' ? here.sub : ''),
+    extra: <span className="fi-sub">{m.symbol ?? 'from an Excel export'}{here?.slug === slugOf(m.id) ? ' · open now' : ''}</span>,
+    side: <><Verdict price={m.price} values={m.values} words={false} /><Scale price={m.price} bear={m.values?.bear} base={m.values?.base} bull={m.values?.bull} size="mini" /></>,
+  }))
+  const toks = q.toLowerCase().split(/\s+/).filter(Boolean)
+  const hit = (it: Item) => toks.every(t => it.find.toLowerCase().includes(t))
+  const items = [...(toks.length ? pages.filter(hit) : []), ...cos.filter(hit),
+    { key: 'add', label: '+ Add a company', find: '', href: '/add' }]
+  const go = (it: Item | undefined) => { if (!it) return; onClose(); navigate(it.href) }
+  const opt = (i: number) => `${id}-o${i}`
+  return (
+    <dialog {...p} className="dlg finder" aria-label={mode === 'switch' ? 'Switch company' : 'Go to a company or page'}>
+      <label className="sr" htmlFor={`${id}-q`}>{mode === 'switch' ? 'Find a company' : 'Go to a company or page'}</label>
+      <input id={`${id}-q`} className="fi-q" type="text" role="combobox" autoComplete="off" spellCheck={false} value={q} autoFocus
+        placeholder={mode === 'switch' ? 'Find a company' : here ? `A company, or a page of ${here.short} (e.g. “${here.short.toLowerCase()} cheap”)` : 'A company'}
+        aria-expanded="true" aria-controls={`${id}-l`} aria-autocomplete="list" aria-activedescendant={opt(Math.min(active, items.length - 1))}
+        onChange={e => { setQ(e.target.value); setActive(0) }}
+        onKeyDown={e => {
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setActive(a => (a + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length) }
+          else if (e.key === 'Enter') { e.preventDefault(); go(items[Math.min(active, items.length - 1)]) }
+        }} />
+      <ul className="fi-list" role="listbox" id={`${id}-l`} aria-label="Matches">
+        {items.map((it, i) => (
+          <li key={it.key} id={opt(i)} role="option" aria-selected={i === active} className={`${i === active ? 'on' : ''}${it.key === 'add' ? ' fi-add' : ''}`}
+            onMouseDown={e => e.preventDefault()} onMouseEnter={() => setActive(i)} onClick={() => go(it)}>
+            <span className="fi-main"><b>{it.label}</b>{it.extra}</span>{it.side && <span className="fi-side">{it.side}</span>}
+          </li>))}
+      </ul>
+      <p className="fi-hint small muted">↑ ↓ to pick · Enter to open · Esc to close</p>
+    </dialog>
+  )
+}
+
+export function KeysDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [on, setOn] = useState(keysOn)
   const flip = () => {
     try { localStorage.setItem(KEYS, on ? 'off' : 'on') } catch { /* private mode: stays as it is */ }
     setOn(keysOn())
   }
-  return <span>{on ? <>Press <kbd>1</kbd>–<kbd>6</kbd> to switch pages · </> : 'Page keys are off · '}
-    <button type="button" className="link" onClick={flip}>{on ? 'Turn off' : 'Turn on'}</button></span>
-}
-
-/** Phones: brand mark, the company switcher and theme on top; the six pages along the bottom. */
-export function MobileTop({ here }: { here: Here | null }) {
   return (
-    <div className="mtop">
-      <Brand short />
-      {here ? <Switcher here={here} compact /> : <b className="mtop-name">Stock Model Builder</b>}
-      <ThemeButton label={false} />
-    </div>
-  )
-}
-export function BottomNav({ here }: { here: Here }) {
-  return (
-    <nav className="bnav" aria-label={`Pages for ${here.short}`}>
-      {pageLinks(here).map(l => <a key={l.p} href={l.href} aria-current={here.page === l.p ? 'page' : undefined}>{ICONS[l.p]}{l.label}</a>)}
-    </nav>
-  )
-}
-
-/** A long page's sections as chips (phones; the sidebar lists them on desktop). */
-export function Toc({ page, extra = [] }: { page: Page; extra?: [string, string][] }) {
-  const s = SECTIONS[page] && [...extra, ...SECTIONS[page]!]
-  if (!s) return null
-  return <nav className="toc" aria-label="On this page">{s.map(([id, t]) => <a key={id} href={`#${id}`}>{t}</a>)}</nav>
-}
-
-/** Every page opens the same way: what it is (label), a heading that answers it, one sentence on what to do, the next action. */
-export function PageHead({ label, title, purpose, next }: { label: ReactNode; title: ReactNode; purpose: ReactNode; next?: ReactNode }) {
-  return (
-    <div className="p-head">
-      <div>
-        <p className="label">{label}</p>
-        <h1 id="page-h" tabIndex={-1}>{title}</h1>
-        <p className="purpose">{purpose}</p>
-      </div>
-      {next && <div className="next">{next}</div>}
-    </div>
+    <Sheet open={open} title="Keyboard keys" onClose={onClose}>
+      <dl className="keylist">
+        <dt><kbd>/</kbd></dt><dd>Go to a company or a page</dd>
+        <dt><kbd>1</kbd>–<kbd>6</kbd></dt><dd>The six answer pages: Summary, Is it cheap?, What does the price assume?, What could go wrong?, What changed?, How does it compare?</dd>
+        <dt><kbd>?</kbd></dt><dd>This list</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close a menu, sheet or box</dd>
+      </dl>
+      <p className="small muted">Keys never act while you type in a box.</p>
+      <p><button type="button" className="btn" aria-pressed={!on} onClick={flip}>{on ? 'Turn keys off' : 'Keys are off: turn them on'}</button></p>
+    </Sheet>
   )
 }

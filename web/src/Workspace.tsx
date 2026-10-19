@@ -1,18 +1,20 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { withFlagNotes, withNotes } from './Sources'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useAi, withFlagNotes, withNotes } from './Sources'
 import Note, { shortName } from './Note'
 import ModelView, { UPGRADED, type Upgrade } from './Model'
 import Evidence from './Evidence'
 import Fundamentals from './Fundamentals'
 import StatementsPage from './Statements'
 import ValuationPage from './Valuation'
-import { BottomNav, DL, MobileTop, Side, type Here } from './Shell'
-import { Refresh, SourceNote } from './Fetch'
-import { Changed } from './Tracking'
-import { HrefCtx, PAGES, STATEMENTS, pathOf, placed, type Href, type Route } from './route'
+import { PeersSection } from './Peers'
+import { BottomBar, CHECK, DL, Next, PageHead, PhoneTop, Rail, Scale, Sheet, Verdict, openFinder, slugOf, type Here, type RailNote } from './Shell'
+import { SourceNote, ago, pendingMerge, streamFetch } from './Fetch'
+import { Accuracy, Changed, latestScored, unreviewed } from './Tracking'
+import { month } from './Statements'
+import { HrefCtx, PAGES, REPORTED, STATEMENTS, pathOf, placed, type Href, type Page, type Route } from './route'
 import type { SaveState } from './App'
 import {
-  NAMES, api, clock, flat, fmt, groupKeys, money, postJson, rs, when, SCENARIOS,
+  NAMES, api, clock, flat, fmt, groupKeys, postJson, rs, sevCounts, verdict, when, SCENARIOS,
   type Company, type Filing, type ModelDoc, type ModelSummary, type Parsed, type Projection, type Proposal, type Scenario,
 } from './lib'
 
@@ -30,16 +32,21 @@ interface Props {
   save: SaveState
   notice: string | null
   onRetry: () => Promise<string | false>
+  onRestore: () => void // the open older version becomes today's (today's is kept)
+  onNotice: () => void // dismiss the other-tab notice
 }
 
-/** One company: the shell (sidebar, context bar, bottom nav) and its six pages. Stays mounted while you move between
- * pages, so the projection and every input are kept; /api/project runs again only when an input changes. */
-export default function Workspace({ route, models, parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, save, notice, onRetry }: Props) {
+type Check = { state: 'idle' | 'running' | 'done'; msg: ReactNode }
+
+/** One company: the rail, the company bar, the phone bars and its pages. Stays mounted while you move between pages,
+ * so the projection and every input are kept; /api/project runs again only when an input changes. */
+export default function Workspace({ route, models, parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, save, notice, onRetry, onRestore, onNotice }: Props) {
   const { company, years: histYears, drivers } = parsed
   const { n, scenarios, valuation, filings, notes, flag_notes, assumption_sources, excluded_years } = doc
   const peers = doc.peers ?? null
   const track = doc.track ?? []
   const slug = route.slug!
+  const ai = useAi()
   // any change to what the numbers come from puts the note back to draft; an input changed without a new source
   // (a strip, a typed value) is yours: its source flips to "manual"
   const setDoc = (f: (d: ModelDoc) => ModelDoc) => setDocRaw(d => {
@@ -57,7 +64,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const [projection, setProjection] = useState<Projection | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
-  const [retried, setRetried] = useState<string | null>(null)
+  const [sheet, setSheet] = useState(false)
   const nHist = histYears.length
 
   useEffect(() => {
@@ -119,19 +126,88 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     } catch (e) { setError((e as Error).message) } finally { setPendingYear(null) }
   }
 
-  // Refresh (today's price, new results) or an Excel export's years: a new company; the assumptions stay as they are
-  // (new filings move the defaults, which the Forecast and Checks pages then offer in one click)
+  // Check for new results (today's price, new results) or an Excel export's years: a new company; the assumptions stay
+  // as they are (new filings move the defaults, which the Forecast and Risks pages then offer in one click)
   const onCompany = (p: Parsed | null, c: Company) => {
     if (p) setParsed({ ...p, company: c })
     else setParsed({ ...parsed, company: c })
     const add = p?.fetched?.filings ?? []
     setDoc(d => ({ ...d, company: c, filings: add.length ? [...d.filings, ...add.filter((f: Filing) => !d.filings.some(x => x.id === f.id))] : d.filings }))
   }
-  // Refresh found new results: the server recorded the forecast they replace (/api/track/apply); assumptions as they were
+  // new results came in: the server recorded the forecast they replace (/api/track/apply); assumptions as they were
   const onResults = (p: Parsed, nd: ModelDoc) => {
     setParsed(p)
     setDoc(d => ({ ...d, company: nd.company, filings: nd.filings, track: nd.track, reviewed_at: nd.reviewed_at }))
   }
+
+  // ---- Check for new results: today's price, then any results filed since; never changes an assumption ----
+  const sym = company.source?.symbol ?? null
+  const [chk, setChk] = useState<Check>({ state: 'idle', msg: null })
+  const chkCtl = useRef<AbortController | null>(null)
+  useEffect(() => () => chkCtl.current?.abort(), [])
+  const href: Href = (page, anchor = '', sub = '') => pathOf(slug, page, sub, route.version, anchor)
+  const check = async () => {
+    if (!sym) {
+      setChk({ state: 'done', msg: <>{shortName(company.name)} came from an Excel export, so there’s no NSE symbol to check. Newer years can be added from a newer export on <a href={href('documents')}>Documents and sources</a>.</> })
+      return
+    }
+    const s = company.source!
+    const ctl = new AbortController()
+    chkCtl.current = ctl
+    setChk({ state: 'running', msg: null })
+    try {
+      const r = await api<{ price: number | null; shares: number | null; face_value: number | null; at: string; stale: boolean }>('/api/nse/price', postJson({ symbol: sym }, ctl.signal))
+      if (r.stale) { // NSE didn't answer: the cache did. Never say "nothing new" for that
+        setChk({ state: 'done', msg: <span className="bad">Couldn’t reach NSE: the price is from {clock(r.at)} and new results weren’t checked. Your model is unchanged. <button type="button" className="link" onClick={check}>Try again</button></span> })
+        return
+      }
+      const m = company.market ?? { price: null, shares: null, price_hist: [], shares_hist: [] }
+      const c: Company = { ...company, market: { ...m, price: r.price ?? m.price, shares: r.shares ?? m.shares, face_value: r.face_value ?? m.face_value },
+        source: { ...s, price_at: r.at } }
+      let got: Parsed | null = null
+      await streamFetch({ symbol: sym, company: c, documents: false, fresh: true }, ctl.signal, e => {
+        if (e.company) got = e.company
+        if (e.error) throw new Error(e.error)
+      })
+      const p = got as Parsed | null
+      const a = p && await api<{ doc: ModelDoc | null; years: string[]; quarter: string | null }>('/api/track/apply',
+        postJson({ doc: { ...doc, company: c }, company: p.company, filings: p.fetched?.filings ?? [] }, ctl.signal))
+      const at = clock(new Date().toISOString())
+      if (p && a?.doc) {
+        onResults({ ...p, company: a.doc.company }, a.doc)
+        setChk({ state: 'done', msg: <>New results: {a.years.length ? a.years.join(', ') : `${month(a.quarter!)} quarter`}. Your inputs haven’t changed. <a href={href('changes')}>See what changed</a></> })
+      } else {
+        onCompany(null, c)
+        setChk({ state: 'done', msg: `Checked ${at}: nothing new${Date.now() - new Date(r.at).getTime() > 60_000 ? ` (the price is from ${clock(r.at)}; NSE is asked at most every 15 minutes)` : ''}.` })
+      }
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') { setChk({ state: 'done', msg: 'Stopped. Nothing changed.' }); return }
+      setChk({ state: 'done', msg: <span className="bad">Couldn’t check: {(e as Error).message} Your model is unchanged. <button type="button" className="link" onClick={check}>Try again</button></span> })
+    }
+  }
+  const stopCheck = () => chkCtl.current?.abort()
+
+  // ---- "Add these years to it" from Add a company: merged here, so your inputs, notes and review stay ----
+  const [merging, setMerging] = useState<string | null>(null)
+  useEffect(() => {
+    const i = pendingMerge.findIndex(x => x.company === company.name)
+    if (i < 0) return
+    const m = pendingMerge.splice(i, 1)[0]
+    const symbol = m.symbol ?? sym
+    if (!symbol) { if (m.parsed) onCompany(m.parsed, { ...m.parsed.company, name: company.name }); return } // two exports: the newer one's years
+    setMerging(`Adding ${m.parsed ? 'the export’s' : 'NSE’s'} years to ${shortName(company.name)}…`)
+    let got: Parsed | null = null
+    streamFetch({ symbol, company: m.parsed?.company ?? company, documents: false }, new AbortController().signal, e => {
+      if (e.company) got = e.company
+      if (e.error) throw new Error(e.error)
+    }).then(() => {
+      const g = got as Parsed | null
+      if (!g) throw new Error('The server stopped before the years were ready. Try again from Add a company.')
+      const c = { ...g.company, name: company.name, source: g.company.source && { ...g.company.source, from: m.parsed ? 'your Excel export' : g.company.source.from } }
+      onCompany({ ...g, company: c }, c)
+      setMerging(null)
+    }).catch(e => setMerging(`Couldn’t add the years: ${(e as Error).message}`))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const exportXlsx = async () => {
     setExporting(true)
@@ -144,25 +220,33 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
       URL.revokeObjectURL(url)
     } catch (e) { setError((e as Error).message) } finally { setExporting(false) }
   }
-  const retry = async () => {
-    const at = await onRetry()
-    if (at) setRetried(at)
-  }
 
   const proj = projection?.scenarios.base.length === n ? projection : null // null while a new horizon loads
   const v = proj?.valuation ?? null
   const m = company.market
-  const price = valuation.price ?? m?.price ?? null
-  const shares = valuation.shares ?? m?.shares ?? null
-  const fromDocs = Object.values(doc.assumption_sources.base ?? {}).filter(x => x !== 'manual' && x !== 'history').length
-  const ai = Object.values(notes).some(x => (x as { ai?: boolean })?.ai) || doc.note != null || doc.flag_notes.length > 0
-  const short = shortName(company.name)
+  const price = v?.price ?? valuation.price ?? m?.price ?? null
+  const values = { bear: v?.scenarios.bear.per_share ?? null, base: v?.scenarios.base.per_share ?? null, bull: v?.scenarios.bull.per_share ?? null }
+  const mine = values[doc.active]
+  const short = sym ?? shortName(company.name)
   const hasQuarters = !!company.quarters?.dates.length
-  const here: Here = {
-    slug, version: route.version, page: route.page, sub: route.sub, name: company.name, short, models, hasQuarters,
-    range: { price: v?.price ?? price, bear: v?.scenarios.bear.per_share ?? null, base: v?.scenarios.base.per_share ?? null, bull: v?.scenarios.bull.per_share ?? null },
+  const tracking = proj?.tracking
+  const yours = Object.values(doc.assumption_sources[doc.active] ?? {}).filter(x => x === 'manual').length
+  const vd = verdict(price, values)
+  const sev = sevCounts(parsed.forensic)
+  const versions = (models ?? []).filter(x => slugOf(x.id) === slug)
+  const fresh = !!latestScored(tracking) && unreviewed(doc, tracking)
+  const lastQ = company.quarters?.dates.at(-1)
+  const railNotes: Partial<Record<Page, RailNote>> = {
+    value: { text: vd.kind === 'none' ? 'no price' : vd.word.toLowerCase(), tone: vd.kind === 'fix' ? 'warn' : undefined },
+    ...(sev.signs ? { risks: { text: String(sev.signs), tone: 'warn' } } : {}),
+    changes: fresh ? { text: 'New', tone: 'new' } : { text: lastQ ? month(lastQ) : histYears[nHist - 1] },
+    peers: { text: doc.peers?.approved_at ? `${doc.peers.chosen.length} peers` : 'none yet' },
+    ...(yours ? { forecast: { text: `${yours} yours` } } : {}),
+    note: { text: doc.note ? when(doc.note.written_at).replace(/ \d{4}$/, '') : ai && !ai.available ? 'AI off' : 'not written' },
+    ...(doc.reports.length ? { documents: { text: String(doc.reports.length) } } : {}),
+    ...(versions.length > 1 ? { versions: { text: String(versions.length) } } : {}),
   }
-  const href: Href = (page, anchor = '', sub = '') => pathOf(slug, page, sub, route.version, anchor)
+  const here: Here = { slug, version: route.version, page: route.page, sub: route.sub, name: company.name, short, models, hasQuarters, notes: railNotes }
 
   // ---- page change: title, place (Back returns to it), anchor, focus on the heading ----
   const label = PAGES.find(p => p[0] === route.page)![1]
@@ -196,74 +280,154 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   }, [route, ready]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const common = { parsed, doc, setDoc, projection: proj }
+  const checkButton = (cls = 'btn') => chk.state === 'running'
+    ? <span className="chk-run" role="status">Checking NSE… <button type="button" className="link" onClick={stopCheck}>Stop</button></span>
+    : <button type="button" className={cls} onClick={check} aria-disabled={!sym || undefined}
+        title={sym ? `Fetches today’s price and any results filed since ${lastQ ? month(lastQ) : histYears[nHist - 1]}` : 'Added from an Excel export: no NSE symbol to check'}>
+        {CHECK}<span>Check for new results</span></button>
   let page: ReactNode
   switch (route.page) {
-    case 'fundamentals': page = <Fundamentals parsed={parsed} tracking={proj?.tracking} />; break
+    case 'business': page = <Fundamentals parsed={parsed} tracking={tracking} />; break
     case 'statements': page = <StatementsPage parsed={parsed} doc={doc} projection={proj} sub={route.sub} />; break
     case 'forecast': page = <ModelView {...common} anchor={route.anchor} upgrades={upgrades} onApply={applyUpgrades} />; break
-    case 'valuation': page = <ValuationPage {...common} />; break
-    case 'checks': page = <Evidence {...common} upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals}
+    case 'value': case 'priced-in': page = <ValuationPage {...common} />; break
+    case 'risks': case 'documents': page = <Evidence {...common} upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals}
       toggleYear={toggleYear} pendingYear={pendingYear} defaultsNote={defaultsNote} />; break
+    case 'peers': page = <>
+      <PageHead title="How does it compare?" purpose={<>{shortName(company.name)} next to listed companies in the
+        same line of business, on size, growth, profitability and price.</>} />
+      <PeersSection parsed={parsed} doc={doc} setDoc={setDoc} projection={proj} short={shortName(company.name)} />
+      <Next lead="Then see the price against our value."><a className="btn" href={href('value')}>Is it cheap?</a></Next></>
+      break
+    case 'changes': {
+      const since = company.source?.fetched_at ?? doc.saved_at
+      page = <>
+        <PageHead title="What changed?" purpose="New results set against what this model forecast. Earlier copies of the model are under Saved versions." />
+        {latestScored(tracking)
+          ? <><Changed doc={doc} setDoc={setDoc} projection={proj} /><div id="by-input"><Accuracy doc={doc} setDoc={setDoc} projection={proj} /></div></>
+          : <div className="empty-state">
+              <p className="answer">No new results since {since ? when(since) : 'you built this'}. The latest filed {lastQ ? `quarter is ${month(lastQ)}` : `year is ${histYears[nHist - 1]}`}.
+                Results are usually filed within 45 days of a quarter’s end.</p>
+              <p>{checkButton()}</p>
+              {chk.msg && <p className="small" role="status">{chk.msg}</p>}
+            </div>}
+        <Next lead="Earlier copies of this model."><a className="btn" href={href('versions')}>See saved versions</a></Next></>
+      break
+    }
+    case 'versions': page = <>
+      <PageHead title="Saved versions" purpose={<>One saved copy per day you changed {shortName(company.name)}, plus any copy kept when
+        you replaced it. Open one to read it; to bring it back, open it and choose Restore this version.</>} />
+      {versions.length <= 1
+        ? <p className="empty-state">Only today’s version so far. A new one is kept each day you change {shortName(company.name)}.</p>
+        : <ul className="ver-list">{versions.map((x, i) => {
+          const ver = x.id.split('/')[1], now = i === 0
+          return <li key={x.id}>
+            <span><b>{x.saved_at ? `${when(x.saved_at)}${ver.length > 10 ? `, ${clock(x.saved_at).slice(-5)} (kept on a replace)` : ''}` : ver}</b>
+              <span className="small muted">{now ? ' · the newest' : ''}{(route.version ?? versions[0].id.split('/')[1]) === ver ? ' · open now' : ''}</span></span>
+            <a className="btn" href={pathOf(slug, 'summary', '', now ? null : ver)}>{now ? 'Open' : 'Open read-only'}</a>
+          </li>
+        })}</ul>}
+      <Next lead="See how the latest results compare with the forecast."><a className="btn" href={href('changes')}>What changed?</a></Next></>
+      break
     default: page = <Note {...common} changed={<Changed doc={doc} setDoc={setDoc} projection={proj} />} provenance={<SourceNote company={company} doc={doc} onCompany={onCompany} />} />
   }
+
+  // ---- the company bar: who, price against our value, then case, years, check and Excel in the same place everywhere ----
+  const inert = REPORTED.includes(route.page)
+  const priceSrc = valuation.price != null ? 'you typed it' : sym ? `NSE, ${ago(company.source?.price_at)}` : 'from the Excel export'
+  const facts = (
+    <>
+      {price != null
+        ? <span className="bf"><span className="bl">Price</span> <b className="num mkt">Rs {rs(price)}</b> <span className="bs">({priceSrc})</span></span>
+        : <a className="bf" href={href('value', 'v-price')}>No share price: type one</a>}
+      <span className={`bf${yours ? ' you' : ''}`} title={yours ? `Includes ${yours} number${yours > 1 ? 's' : ''} you set` : undefined}>
+        <span className="bl">Our {doc.active === 'base' ? '' : `${NAMES[doc.active].toLowerCase()} `}value</span>{' '}
+        {mine != null ? <b className="num ours">Rs {rs(mine)}</b> : <b>{proj ? 'none yet' : '…'}</b>}</span>
+      <Verdict price={price} values={{ ...values, base: mine }} />
+    </>
+  )
+  const controls = (where: 'bar' | 'sheet') => <Controls where={where} doc={doc} setDoc={setDoc} inert={inert} check={checkButton(where === 'sheet' ? 'btn wide' : 'btn')}
+    excel={<button type="button" className={where === 'sheet' ? 'btn wide' : 'btn'} onClick={exportXlsx} disabled={!proj || exporting}
+      aria-label={exporting ? 'Exporting to Excel' : 'Download as Excel, with live formulas'}>{DL}<span>{exporting ? 'Exporting…' : 'Excel'}</span></button>} />
+  const foot = (
+    <>
+      <p className={save.error ? 'bad' : 'saved'}>{save.error
+        ? <>Couldn’t save · <button type="button" className="link" onClick={onRetry}>Try again</button></>
+        : route.version ? 'Older version: read only' : save.at ? `✓ Saved ${clock(save.at)}` : 'Not changed yet'}</p>
+      <p>{doc.reviewed_at ? <span className="reviewed">● Reviewed {when(doc.reviewed_at).replace(/ \d{4}$/, '')}</span> : <span className="draft">○ Draft, not reviewed</span>}{' · '}
+        <button type="button" className="link" onClick={() => setDocRaw(d => ({ ...d, reviewed_at: d.reviewed_at ? null : new Date().toISOString() }))}>
+          {doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed'}</button></p>
+      {sym && <p>Prices checked {ago(company.source?.price_at)}</p>}
+    </>
+  )
+  const verLabel = route.version ? when(versions.find(x => x.id.endsWith(`/${route.version}`))?.saved_at ?? route.version.slice(0, 10)).replace(/ \d{4}$/, '') : ''
 
   return (
     <HrefCtx.Provider value={href}>
       <div className="app">
         <a className="skip" href="#main" onClick={e => { e.preventDefault(); document.getElementById('main')?.focus() }}>Skip to the page</a>
-        <Side here={here} />
+        <Rail here={here} foot={foot} />
         <div className="col">
-          <MobileTop here={here} />
-          <header className="ctx" aria-label={`${company.name}: case, years and status`}>
-            <div className="ctx-in">
-              <p className="facts">
-                <b>{company.name}</b>
-                {price != null
-                  ? <span>Price <span className="num mkt">Rs {rs(price)}</span>{valuation.price != null ? ' (typed)' : ''}</span>
-                  : <a href={href('valuation', 'v-price')}>No share price: type one</a>}
-                <Refresh doc={doc} onCompany={onCompany} onResults={onResults} />
-                {v?.scenarios[doc.active].per_share != null && <span>Our {doc.active} value <span className="num ours">Rs {rs(v.scenarios[doc.active].per_share!)}</span>
-                  {v.scenarios[doc.active].upside != null && <> ({v.scenarios[doc.active].upside! < 0 ? '−' : '+'}{Math.round(Math.abs(v.scenarios[doc.active].upside!) * 100)}% vs price)</>}</span>}
-                {price != null && shares != null && <span className="wide">Market cap <span className="num">Rs {money(price * shares)} cr</span></span>}
-                <span className="wide">Rs crore · reported {histYears[0]}–{histYears[nHist - 1]}</span>
-              </p>
-              <div className="controls">
-                <span className="label case-l" id="case-l" aria-hidden="true">Case</span>
-                <div className="seg" role="radiogroup" aria-label="Case: bear is cautious, base is central, bull is hopeful">
-                  {ORDER.map(s => (
-                    <button key={s} type="button" role="radio" aria-checked={doc.active === s} tabIndex={doc.active === s ? 0 : -1}
-                      onClick={() => setDoc(d => ({ ...d, active: s }))}
-                      onKeyDown={e => groupKeys(e, ORDER, doc.active, s => setDoc(d => ({ ...d, active: s })))}>{NAMES[s]}</button>
-                  ))}
-                </div>
-                <label className="sr" htmlFor="horizon">Years to forecast</label>
-                <select id="horizon" className="sel" value={n} onChange={e => setDoc(d => ({ ...d, n: +e.target.value }))}>
-                  {HORIZONS.map(h => <option key={h} value={h}>{h} years</option>)}
-                </select>
-                <button type="button" className="btn" onClick={exportXlsx} disabled={!proj || exporting}
-                  aria-label={exporting ? 'Exporting to Excel' : 'Download as Excel, with live formulas'}>
-                  {DL}<span className="t-l">{exporting ? 'Exporting…' : 'Excel'}</span></button>
+          <PhoneTop short={short} menu={[{ label: doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed',
+            onClick: () => setDocRaw(d => ({ ...d, reviewed_at: d.reviewed_at ? null : new Date().toISOString() })) }]} />
+          <header className="bar" aria-label={`${company.name}: price, our value, case and years`}>
+            <div className="bar-in">
+              <div className="bar-id">
+                <button type="button" className="switch" onClick={() => openFinder('switch')} aria-label={`Company: ${company.name}. Switch company`}>
+                  <b>{short}</b> <span aria-hidden="true">▾</span></button>
+                {short !== shortName(company.name) && <span className="bar-name">{shortName(company.name)}</span>}
               </div>
-              <p className="status" aria-live="polite">
-                {save.error
-                  ? <span className="bad" role="alert">Not saved: {save.error}{' '}<button type="button" className="link" onClick={retry}>Try again</button></span>
-                  : save.at && <span className="saved">{retried === save.at ? 'Saved' : `Saved ${clock(save.at)}`}</span>}
-                <span className={doc.reviewed_at ? 'reviewed' : 'draft'}>
-                  {doc.reviewed_at ? `Reviewed by you ${when(doc.reviewed_at)}` : 'Draft: you haven’t reviewed it'}</span>
-                <button type="button" className="link"
-                  onClick={() => setDocRaw(d => ({ ...d, reviewed_at: d.reviewed_at ? null : new Date().toISOString() }))}>
-                  {doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed'}</button>
-                <span className="src">Numbers: calculated, no AI{filings.length ? ', filings' : ''}{fromDocs ? `, ${fromDocs} input${fromDocs > 1 ? 's' : ''} from documents` : ''}</span>
-                <span className="src words">Words: {ai ? 'AI-written, cited' : 'none by AI yet'}</span>
-                {error && <span className="bad" role="alert">{error}</span>}
-                {notice && <span className="note">{notice}</span>}
-              </p>
+              <div className="bar-facts">{facts}<Scale price={price} bear={values.bear} base={values.base} bull={values.bull} size="mini" /></div>
+              <div className="bar-ctl">{controls('bar')}</div>
+              <button type="button" className="m-ctl btn" onClick={() => setSheet(true)} aria-haspopup="dialog">
+                {inert ? 'Reported years' : `${NAMES[doc.active]} · ${n} yrs`} ▾</button>
             </div>
+            {(chk.msg || merging) && route.page !== 'changes' && <p className="bar-msg" role="status">{merging ?? chk.msg}</p>}
           </header>
+          <Sheet open={sheet} title="Case, years, new results and Excel" onClose={() => setSheet(false)}>{controls('sheet')}</Sheet>
+          {route.version && <div className="notice-bar ro" role="region" aria-label="Older version">
+            You’re looking at the {verLabel} version. Changes won’t be saved.{' '}
+            <a href={pathOf(slug, route.page, route.sub, null, '')}>Back to today</a> · <button type="button" className="link" onClick={onRestore}>Restore this version</button></div>}
+          {save.error && <div className="notice-bar bad" role="alert">Couldn’t save{save.at ? ` after ${clock(save.at)}` : ''}: {save.error}. Your changes are kept in this tab.{' '}
+            <button type="button" className="link" onClick={onRetry}>Try again</button></div>}
+          {notice && <div className="notice-bar" role="status">{notice} <button type="button" className="link" onClick={onNotice}>OK</button></div>}
+          {error && <div className="notice-bar bad" role="alert">{error}</div>}
           <main id="main" className="page" tabIndex={-1}>{page}</main>
         </div>
-        <BottomNav here={here} />
+        <BottomBar here={here} />
       </div>
     </HrefCtx.Provider>
+  )
+}
+
+/** Case, years, Check for new results and Excel: the same four, in the same order, on every page. On pages that show
+ * reported years only, case and years are dimmed (still focusable) and say so. */
+function Controls({ where, doc, setDoc, inert, check, excel }: {
+  where: 'bar' | 'sheet'; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; inert: boolean; check: ReactNode; excel: ReactNode
+}) {
+  const id = useId()
+  const pick = (s: Scenario) => { if (!inert) setDoc(d => ({ ...d, active: s })) }
+  return (
+    <div className={`ctl ${where}${inert ? ' inert' : ''}`}>
+      <div className="ctl-g">
+        <span className="ctl-l" id={`${id}-c`}>Case</span>
+        <div className="seg" role="group" aria-labelledby={`${id}-c`}>
+          {ORDER.map(s => (
+            <button key={s} type="button" aria-pressed={doc.active === s} aria-disabled={inert || undefined}
+              onClick={() => pick(s)} onKeyDown={e => groupKeys(e, ORDER, doc.active, pick)}>{NAMES[s]}</button>
+          ))}
+        </div>
+      </div>
+      <div className="ctl-g">
+        <label className="ctl-l" htmlFor={`${id}-y`}>Years</label>
+        <select id={`${id}-y`} className="sel" value={doc.n} aria-disabled={inert || undefined}
+          onChange={e => { if (!inert) setDoc(d => ({ ...d, n: +e.target.value })) }}>
+          {HORIZONS.map(h => <option key={h} value={h}>{h}</option>)}
+        </select>
+      </div>
+      {inert && <span className="ctl-note">Reported years only</span>}
+      {check}
+      {excel}
+    </div>
   )
 }

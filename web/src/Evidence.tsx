@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import Sources, { AiOffNote, Explain, FlagExplain, useAi } from './Sources'
 import type { Upgrade } from './Model'
-import { PageHead, Toc } from './Shell'
+import { PageHead } from './Shell'
 import {
   DOC_KINDS, fmt, isAnnual, money, rs, when, type Forensic, type ModelDoc, type OneOff, type OneOffNote, type Parsed, type Projection, type Proposal,
   type Severity,
@@ -63,7 +63,6 @@ export default function Evidence({ parsed, doc, setDoc, projection, upgrades, on
         purpose={<>Fixed rules look for warning signs in the reported years. Attach an annual report or a call transcript
           below to run the rest, draft inputs and explain a flag with a quote from the filing.</>}
         next={<a className="btn" href="#documents">Add documents</a>} />
-      <Toc page="checks" />
       <AiOffNote ai={ai} />
       {restated && (
         <section className="blk restated" aria-labelledby="restated-h">
@@ -97,7 +96,7 @@ export default function Evidence({ parsed, doc, setDoc, projection, upgrades, on
         <p className="why">What the app has read, and what each missing document would add. Attach them in the panel below: pick the document type first.</p>
         <div className="docs">
           <div className="doc"><h3>{company.source?.symbol ? `NSE: ${company.source.symbol}` : 'Excel export'}</h3><p>{company.name}, {years[0]}–{years[years.length - 1]}, read by rules
-            {company.source?.symbol ? ` (${Object.values(company.source.years).filter(w => w === 'NSE filing').length} years from NSE filings; where each came from is on the Overview)` : ''}.
+            {company.source?.symbol ? ` (${Object.values(company.source.years).filter(w => w === 'NSE filing').length} years from NSE filings; where each came from is on the Summary)` : ''}.
             {doc.saved_at ? ` Saved ${when(doc.saved_at)}.` : ''}</p></div>
           <div className={`doc${doc.filings.length ? '' : ' missing'}`}><h3>Exchange results filings <span className="term">XBRL: the machine-readable results file on NSE or BSE</span></h3>
             <p>{doc.filings.length ? `${doc.filings.length} attached; annual ones that tie to the export add payables, leases and cash-flow capex.`
@@ -117,7 +116,7 @@ export default function Evidence({ parsed, doc, setDoc, projection, upgrades, on
       </section>
 
       <details className="blk audit" id="audit">
-        <summary>Audit trail: every claim on the Overview, its source and the rule that checked it</summary>
+        <summary>Audit trail: every claim on the Summary, its source and the rule that checked it</summary>
         <div className="ledger">
           <div className="lg head" aria-hidden="true"><div>Claim</div><div>Source and calculation</div><div>Check</div></div>
           {sv?.per_share != null && v && <Row id="verdict" kind="rule"

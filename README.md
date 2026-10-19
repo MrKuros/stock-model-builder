@@ -18,17 +18,24 @@ Numbers come from fixed rules. Words come from an AI command you choose, and eve
 
 ## Pages
 
-Every company has six pages, each with its own address, so a link, a bookmark, a reload or a second browser tab opens exactly that page. Keys 1–6 switch between them (N, M and E still open Overview, Forecast and Checks).
+Every page has its own address, so a link, a bookmark, a reload or a second browser tab opens exactly that page. Each company's pages sit in a rail in three groups (Answers, Work on it, Evidence), each with a quiet count or status; on a phone the four most used are along the bottom with All pages beside them. The company bar on every page holds the same controls in the same place: the company switcher, today's price, our value, the verdict ("Looks expensive · 22% downside"), the case (Cautious, Central, Hopeful), the years, Check for new results and Excel. Keys: `/` goes to any company or page, 1–6 open the answer pages, `?` lists the keys and turns them off. Older addresses (`/overview`, `/valuation`, `/checks`...) still open the page that replaced them.
 
-| Page | Address | What it answers |
+| Page | Address | What it's for |
 |---|---|---|
-| Your companies | `/` | The watchlist: every company's price today against our value range, upside to our base, what the price assumes, warning signs and its latest results, sorted and filtered in plain words; tickers you watch before modelling them; add a company by name or NSE symbol, by Excel export, or try the sample |
-| Overview | `/c/<company>/overview` | What the price assumes against what the business does: the verdict, the business in five numbers, price against value, rule checks, thesis, risks and key numbers |
-| Fundamentals | `/c/<company>/fundamentals` | How the business has done: growth over 3, 5 and 10 years, eight charts (revenue, margin, profit, cash against profit, returns, free cash and dividends, receivable days, net cash) and a table of key ratios, each opening the statement row behind it |
+| Your companies | `/` | Every company's price today against our value on one shared scale (the price is always the middle line), the verdict word, what the price assumes against our forecast, warning signs and the latest results; Today chips to show only those that look cheap, need a fix, have new results or aren't reviewed; sort cheapest first (our value ÷ price), most warning signs, recently changed or A–Z; Refresh prices, Check all for new results; each row's ⋯ menu (Open, Saved versions, Delete with a confirm); tickers you watch before modelling them |
+| Add a company | `/add` | Search by name or NSE symbol, then Build model or Watch price right on the match; a progress card that keeps running while you look elsewhere; an Excel export (`/add#upload`) or the sample company. Adding a company you already have asks first: add these years to it, keep both, or replace it (today's version is kept under Saved versions) |
+| Summary | `/c/<company>/summary` | What the price assumes against what the business does: the verdict, the business in five numbers, price against value, rule checks, thesis, risks and key numbers |
+| Is it cheap? | `/c/<company>/value` | The discount-rate inputs, value by case, the what-if grids, the multiples and the bridge |
+| What does the price assume? | `/c/<company>/priced-in` | Works backwards from the price: what moves the value and what the price needs |
+| What could go wrong? | `/c/<company>/risks` | Warning signs found by rules and unusual years |
+| What changed? | `/c/<company>/changes` | New results against the forecast, input by input |
+| How does it compare? | `/c/<company>/peers` | The company next to listed peers |
+| Our forecast | `/c/<company>/forecast` | Every input with where it came from, the editor, drafting inputs from documents, and the projection |
+| Research note | `/c/<company>/note` | The AI-written note, every number checked by rules |
+| How the business is doing | `/c/<company>/business` | Growth over 3, 5 and 10 years, eight charts and a table of key ratios, each opening the statement row behind it |
 | Statements | `/c/<company>/statements/<profit-and-loss, balance-sheet, cash-flow, ratios, quarters>` | Every reported line, then the forecast in blue |
-| Forecast | `/c/<company>/forecast` | Every input with where it came from, the editor for the selected one, drafting inputs from documents, and the projection |
-| Valuation | `/c/<company>/valuation` | The discount-rate inputs, value by case, what moves the value, what would close the gap, the what-if grids and the multiples |
-| Checks | `/c/<company>/checks` | Warning signs found by rules, unusual years, the documents (attached right there) and the audit trail |
+| Documents and sources | `/c/<company>/documents` | The documents (attached right there), filings and the audit trail |
+| Saved versions | `/c/<company>/versions` | One copy per day you changed it, plus copies kept on a replace; open any read-only (`?v=`) and restore it |
 
 The case (bear, base, bull), the forecast years, the Excel download, the save and review status sit in the same bar on every company page. Tabs on the same company stay in step: a save in one tab reloads the others (the last save wins, and the other tab says so).
 
@@ -102,8 +109,8 @@ server.py         API + local model library and watchlist
 sources.py        NSE client: search, quote, results filings, reports; polite, allow-listed, cached
 ai.py             LLM_CMD calls, PDF page text and picking, quote and number checks
 test_model.py     self-check incl. Excel parity
-web/src/          App (routing, autosave, tab sync), Shell, Workspace, Landing + Watch (Your companies), Fetch, Peers, Tracking, Note (Overview), Fundamentals, Statements,
-                  Model (Forecast), Valuation, Evidence (Checks), Ruler, Draft, DriverStrip, Chart, Sources, route
+web/src/          App (routing, autosave, tab sync, keys), Shell (rail, company bar, switcher, dialogs, scale), Workspace, Home + Watch (Your companies), Add, Fetch, Peers, Tracking, Note (Summary), Fundamentals, Statements,
+                  Model (Forecast), Valuation, Evidence (Risks, Documents), Ruler, Draft, DriverStrip, Chart, Sources, route
 ```
 
 ## Design notes

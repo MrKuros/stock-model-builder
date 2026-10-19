@@ -41,7 +41,8 @@ export function copyBase(setDoc: (f: (d: ModelDoc) => ModelDoc) => void, scenari
   setDoc(d => ({ ...d, scenarios: seed(d.scenarios.base),
     assumption_sources: { ...d.assumption_sources, bull: { ...d.assumption_sources.base }, bear: { ...d.assumption_sources.base } } }))
 }
-export const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
+/** The cases in plain words (the Excel export keeps its sheet names). */
+export const NAMES: Record<Scenario, string> = { base: 'Central', bull: 'Hopeful', bear: 'Cautious' }
 
 /** Share price (Rs) and count (crore) from the export; null when the export left them out. */
 export interface Market { price: number | null; shares: number | null; price_hist: (number | null)[]; shares_hist: (number | null)[]; face_value?: number | null }
@@ -387,4 +388,40 @@ export function groupKeys<T>(e: KeyboardEvent<HTMLElement>, ids: T[], cur: T, se
   const j = (step[e.key] + ids.length) % ids.length
   select(ids[j])
   ;(e.currentTarget.parentElement?.children[j] as HTMLElement | undefined)?.focus()
+}
+
+/** Price against value in words, one way everywhere: value / price - 1, "79% upside" or "22% downside". */
+export function gap(price: number | null | undefined, value: number | null | undefined): string | null {
+  if (price == null || value == null || !(price > 0)) return null
+  const g = value / price - 1
+  return `${noNegZero((Math.abs(g) * 100).toFixed(0))}% ${g >= 0 ? 'upside' : 'downside'}`
+}
+
+export type VerdictKind = 'cheap' | 'range' | 'dear' | 'fix' | 'none'
+/** Where the price sits against our cautious and hopeful values. ponytail: thresholds are cautious/hopeful only; add a
+ * margin-of-safety setting if asked. */
+export function verdict(price: number | null | undefined, v: Partial<Record<Scenario, number | null>> | null | undefined): { kind: VerdictKind; word: string } {
+  if (v?.base == null) return { kind: 'fix', word: 'Needs a fix' }
+  if (price == null) return { kind: 'none', word: 'No price yet' }
+  if (v.bear != null && price < v.bear) return { kind: 'cheap', word: 'Looks cheap' }
+  if (v.bull != null && price > v.bull) return { kind: 'dear', word: 'Looks expensive' }
+  return { kind: 'range', word: 'Inside our range' }
+}
+
+/** The one severity scale (engine level -> word). Unusual years and data notes are never part of it. */
+export const SEV_WORD: Record<Severity, string> = { high: 'Serious', medium: 'Worth a look', low: 'Minor', ok: 'Passed', not_checked: 'Not checked yet' }
+/** Every warning-sign count in the app comes from here. signs = serious + worth a look + minor. */
+export function sevCounts(fs: Forensic[] | null | undefined) {
+  const c: Record<Severity, number> = { high: 0, medium: 0, low: 0, ok: 0, not_checked: 0 }
+  for (const f of fs ?? []) c[f.severity]++
+  return { ...c, signs: c.high + c.medium + c.low }
+}
+
+/** Where a year's numbers came from, in the words the UI may show: anything not on this list reads "an Excel export", so
+ * no data vendor's name can reach the screen. */
+export function sourceLabel(s: string | null | undefined): string {
+  const t = (s ?? '').toLowerCase()
+  if (t.includes('nse')) return 'NSE filings'
+  if (t.includes('annual report')) return 'the company’s annual report'
+  return 'an Excel export'
 }
