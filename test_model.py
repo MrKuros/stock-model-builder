@@ -2750,6 +2750,13 @@ def fetch_api_check(server, root, co, data):
                                                    filings=[], excluded_years=[]))
         server.save_model(mine, root, now=datetime(2026, 10, 1, 9, 0))
         server.save_model(server.ModelDoc.model_validate(data), root, now=datetime(2026, 10, 1, 9, 0))  # an upload
+        # adding by ticker over an earlier Excel upload: by default its years fill in (one model, its name); "Keep
+        # separate" leaves it alone and names the new one apart, so the library keeps both
+        tw = next(e["company"] for e in fetch(documents=False) if "company" in e)["company"]
+        assert tw["source"]["from"] == "your earlier Excel upload" and tw["name"] == "Test Industries Ltd", tw["source"]["from"]
+        sep = next(e["company"] for e in fetch(documents=False, separate=True) if "company" in e)["company"]
+        assert sep["source"]["from"] is None and sep["name"].endswith(" (NSE)") and len(sep["dates"]) == 4, sep["name"]
+        assert server.slug(sep["name"]) != server.slug(tw["name"])
         lines = [json.loads(x) for x in client.post("/api/track/check").text.splitlines()]
         res = {e["result"]["company"]: e["result"] for e in lines if "result" in e}
         assert lines[-1] == {"done": True} and res["Tracked Co"]["status"] == "new", lines

@@ -155,9 +155,10 @@ export function FetchRun({ symbol, onAdd, onClose, upload }: {
   const [steps, setSteps] = useState<Step[]>([])
   const [notes, setNotes] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
-  const [state, setState] = useState<'running' | 'stopped' | 'failed' | 'adding'>('running')
+  const [state, setState] = useState<'running' | 'stopped' | 'failed' | 'adding' | 'choose'>('running')
   const [fail, setFail] = useState<{ final?: boolean; lender?: boolean }>({})
   const [run, setRun] = useState(0)
+  const [separate, setSeparate] = useState(false) // "Keep separate": fetched again without your earlier upload's years
   const got = useRef<{ p: Parsed | null; reports: Report[] }>({ p: null, reports: [] })
   const ctl = useRef<AbortController | null>(null)
   const head = useRef<HTMLHeadingElement>(null)
@@ -170,10 +171,12 @@ export function FetchRun({ symbol, onAdd, onClose, upload }: {
     const finish = async () => {
       const { p, reports } = got.current
       if (!p) return
+      // an Excel upload of this company is already saved: ask before its years and this model become one
+      if (!separate && p.company.source?.from === 'your earlier Excel upload') { setState('choose'); return }
       setState('adding')
       try { await onAdd(p, reports) } catch (e) { setError((e as Error).message); setState('failed') }
     }
-    streamFetch({ symbol }, c.signal, e => {
+    streamFetch({ symbol, separate }, c.signal, e => {
       if (e.step) setSteps(s => [...s, { text: e.step! }])
       if (e.detail) setSteps(s => s.map((x, i) => (i === s.length - 1 ? { ...x, detail: e.detail } : x)))
       if (e.note) setNotes(n => [...n, e.note!])
@@ -191,13 +194,19 @@ export function FetchRun({ symbol, onAdd, onClose, upload }: {
       setState('failed')
     })
     return () => c.abort()
-  }, [symbol, run]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [symbol, run, separate]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (state === 'choose') head.current?.focus() }, [state]) // the heading now asks a question
   const stop = () => { ctl.current?.abort(); setState('stopped') }
+  const addIt = () => {
+    setState('adding')
+    onAdd(got.current.p!, got.current.reports).catch(e => { setError((e as Error).message); setState('failed') })
+  }
   const name = got.current.p?.company.name
   const last = steps.length - 1
   return (
     <section className="fetch" aria-labelledby="fetch-h" aria-busy={state === 'running' || state === 'adding'}>
-      <h2 id="fetch-h" ref={head} tabIndex={-1}>{state === 'failed' ? `Couldn’t add ${symbol}` : state === 'stopped' ? `Stopped adding ${symbol}` : `Adding ${symbol} from NSE`}</h2>
+      <h2 id="fetch-h" ref={head} tabIndex={-1}>{state === 'failed' ? `Couldn’t add ${symbol}` : state === 'stopped' ? `Stopped adding ${symbol}`
+        : state === 'choose' ? `You already have ${name} from an Excel export` : `Adding ${symbol} from NSE`}</h2>
       <ol className="steps" aria-live="polite">
         {steps.map((s, i) => {
           const now = i === last && state === 'running'
@@ -209,10 +218,17 @@ export function FetchRun({ symbol, onAdd, onClose, upload }: {
       </ol>
       {notes.length > 0 && <ul className="fetch-notes">{notes.map((n, i) => <li key={i}>{n}</li>)}</ul>}
       {error && <p className="error" role="alert">{error}</p>}
+      {state === 'choose' && <p className="small">NSE’s filings are ready. Adding them to the model you have keeps one model:
+        the export fills the years NSE lacks, NSE’s filings win where both have a year, and your filings, notes and AI
+        proposals carry over. Keeping them separate saves a second model, “{name} (NSE)”, from NSE alone.</p>}
       <div className="fetch-act">
+        {state === 'choose' && <>
+          <button type="button" className="primary" onClick={addIt}>Add these years to it (recommended)</button>
+          <button type="button" className="btn" onClick={() => { setSeparate(true); setRun(r => r + 1) }}>Keep separate</button>
+          <button type="button" className="link" onClick={onClose}>Cancel</button></>}
         {state === 'running' && <button type="button" className="btn" onClick={stop}>Stop</button>}
         {state === 'stopped' && got.current.p && <>
-          <button type="button" className="primary" onClick={() => { setState('adding'); onAdd(got.current.p!, got.current.reports).catch(e => { setError((e as Error).message); setState('failed') }) }}>
+          <button type="button" className="primary" onClick={addIt}>
             Add {name} without the rest</button>
           <span className="small muted">Its numbers are in; documents not yet downloaded can be attached later on the Checks page.</span></>}
         {state === 'failed' && fail.lender

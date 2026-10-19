@@ -1432,6 +1432,7 @@ class FetchRequest(SymbolRequest):
     company: Company | None = None  # Refresh: the open model's company; its years the filings don't cover are kept
     documents: bool = True  # the latest annual report and call transcript too
     fresh: bool = False  # Refresh: "anything new?" needs NSE's answer, not a list kept from before
+    separate: bool = False  # "Keep separate": don't fill years from an earlier Excel upload of the same company
 
 
 @app.post("/api/nse/search")
@@ -1492,12 +1493,15 @@ def _spans(years):
     return [f"{a}{'' if a == b else f' to {b}'}: {why}" for a, b, why in out]
 
 
-def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, quarters=FETCH_QUARTERS, fresh=False):
+def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, quarters=FETCH_QUARTERS, fresh=False,
+                  separate=False):
     """Build a company from NSE's filings, step by step: yields {"step"} (plain words), {"company": payload} once the
     numbers are ready, {"report"} per document kept, {"note"} for what failed, then {"done"}. Every number comes from the
     filings by rules (model.from_filings); an export company (the open model's, an earlier upload of the same company,
     or the optional local source) fills only the years the filings lack. fresh: Offline unless NSE itself answered
-    the filings list (Refresh and "Check all" ask what's new). A bank, NBFC or insurer stops at the quote (model.Lender)."""
+    the filings list (Refresh and "Check all" ask what's new). A bank, NBFC or insurer stops at the quote (model.Lender).
+    separate: an earlier Excel upload of the same company is left alone ("Keep separate"), and the new model is named
+    "<name> (NSE)" so the library keeps the two apart."""
     c, today = nse(), today or datetime.now()
     yield {"step": f"Finding {sym} on NSE…"}
     q = sources.quote(c, sym)
@@ -1542,7 +1546,8 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
             quarters.append(x)
 
     prev = (old or {}).get("source") or {}  # a refreshed model that was fetched before keeps saying where years came from
-    other, whose = (old, "this model") if old else (_saved_company(name), "your earlier Excel upload")
+    twin = None if old else _saved_company(name)
+    other, whose = (old, "this model") if old else (None if separate else twin, "your earlier Excel upload")
     local = False
     if other is None and local_source is not None:
         label = getattr(local_source, "LABEL", "a local source")
@@ -1602,6 +1607,8 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
               "restated": (new_r := co.pop("restated", None) or []) + [
                   r for r in prev.get("restated") or [] if r.get("year") not in {x["year"] for x in new_r}]}
     co["source"] = source
+    if separate and twin:
+        co["name"] = f"{co['name']} (NSE)"
     payload = _company_payload(co, (), read)
     restated = restatements(co, MODELS)
     payload["restated"], payload["fetched"] = restated, {"filings": read}
@@ -1653,7 +1660,8 @@ def nse_fetch(req: FetchRequest):
     """fetch_company as a stream of JSON lines, so the page can show each step and stop it (closing the request stops
     it at the next step; what was downloaded stays cached, so trying again is quick)."""
     sym = _sym(req.symbol)
-    return _stream(fetch_company(sym, req.company.model_dump() if req.company else None, req.documents, fresh=req.fresh),
+    return _stream(fetch_company(sym, req.company.model_dump() if req.company else None, req.documents, fresh=req.fresh,
+                                 separate=req.separate),
                    f"building {sym}", "upload an Excel export instead")
 
 
