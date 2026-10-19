@@ -150,6 +150,10 @@ export default function Note({ parsed, doc, setDoc, projection, provenance, chan
     h1 = <>No value yet.</>
     stand = <>Our base case has no value per share: {why}{to && fix(to, to === 'v-shares' ? 'Type the share count' : to === 'capex_pct' ? 'Open capex' : 'Open Valuation')} The
       rule checks and key numbers below still apply.</>
+  } else if (value <= 0) { // debt worth more than the business at these inputs (Milky Mist with capex cut to a value)
+    h1 = <>Our base case leaves nothing for shareholders: <span className="ours">Rs {rs(value)}</span> a share.</>
+    stand = <>At these inputs the business is worth less than its net debt, so the shares carry no value. A higher margin,
+      lower capex or a lower discount rate (WACC {v ? pc(v.wacc) : '–'}) lifts it.{fix('capex_pct', 'Open capex')}</>
   } else if (price == null) {
     h1 = <>Our base value is <span className="ours">Rs {rs(value)}</span> a share.</>
     stand = <>There’s no share price in this file, so nothing to compare it with.{fix('v-price', 'Type a price')}</>
@@ -160,7 +164,7 @@ export default function Note({ parsed, doc, setDoc, projection, provenance, chan
   } else {
     h1 = <>The price is <span className="mkt">{pc(Math.abs(price / value - 1))}</span> {price > value ? 'above' : 'below'} our base value.</>
   }
-  if (value != null && price != null) {
+  if (value != null && value > 0 && price != null) {
     const where = bull != null && price > bull ? <>the price sits {pc(price / bull - 1)} above even our bull case</>
       : bear != null && price < bear ? <>the price sits {pc(1 - price / bear)} below even our bear case</>
       : <>the price sits inside our range</>

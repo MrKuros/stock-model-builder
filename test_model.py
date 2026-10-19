@@ -1021,6 +1021,14 @@ def valuation_check(co, projs, ex):
     bb = b["scenarios"]["bear"]
     assert "negative" in bb["error"] and bb["per_share"] is None and bb["grid"] == [[None] * 5] * 5, bb["error"]
     assert bb["implied_growth"] is None and b["scenarios"]["base"]["per_share"] == v["scenarios"]["base"]["per_share"]
+    # ... and says why in plain words, with fixes that do give a value when typed as the last year's input
+    assert "capex takes 40.0% of revenue" in bb["error"] and "Any one of these gives it a value" in bb["error"], bb["error"]
+    for key, pat in (("capex_pct", r"capex of at most ([\d.]+)%"), ("ebitda_margin", r"EBITDA margin of at least ([\d.]+)%")):
+        x = float(re.search(pat, bb["error"]).group(1)) / 100
+        fixed = dict(ex["bear"], capex_pct=0.4)
+        fixed[key] = [*fixed[key][:-1], x] if isinstance(fixed[key], list) else [fixed[key]] * 4 + [x]
+        pf = model.project(co["hist"], fixed, 5)
+        assert pf[-1]["fcff"] > 0, (key, x, pf[-1]["fcff"])
     # the default kd is clamped between rf and ke; a typed one isn't
     for rate, want in ((0.30, 0.135), (0.01, 0.065)):
         hi = dict(ex["base"], int_rate=[rate] * 5)

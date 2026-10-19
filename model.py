@@ -1681,6 +1681,30 @@ def _dcf(fcff, period, w, g):
     return {"df": df, "pv": pv, "pv_sum": sum(pv), "tv": tv, "pv_tv": tv * df[-1], "ev": sum(pv) + tv * df[-1]}
 
 
+def _burn(rows, tax):
+    """Why a scenario has no value when its last projected year burns cash, and what would give it one, in plain words.
+    That year's FCFF moves one for one with its capex (x revenue) and with its EBITDA margin (x revenue x (1 - tax)),
+    so the two fixes are exact for the last year. Milky Mist: still growing 15% in year 5 with capex at 12.8% of
+    revenue against a 13% EBITDA margin."""
+    r = rows[-1]
+    rev, f = r["revenue"], r["fcff"]
+    head = (f"Final-year free cash flow is negative (Rs {_inr(f)} cr in the last projected year), so there is no value: "
+            "a perpetuity on a cash burn means nothing.")
+    if rev <= 0:
+        return head + " Raise revenue growth or the EBITDA margin, or lower capex, in the last years."
+    g = rev / rows[-2]["revenue"] - 1 if len(rows) > 1 and rows[-2]["revenue"] > 0 else None
+    # a tenth of a point past break-even, rounded away from it, so the figure shown does give a value
+    cap, mar = math.floor(((r["capex"] + f) / rev - 0.001) * 1000) / 1000, None
+    if tax < 1:
+        mar = math.ceil(((r["ebitda"] - f / (1 - tax)) / rev + 0.001) * 1000) / 1000
+    fixes = [f"capex of at most {_pct(cap)} of revenue by then"] if cap > 0 else []
+    fixes += [f"an EBITDA margin of at least {_pct(mar)} by then"] if mar is not None else []
+    fixes.append("more projection years, with growth fading lower and capex cut to match")
+    return (head + f" That year capex takes {_pct(r['capex'] / rev)} of revenue against an EBITDA margin of "
+            f"{_pct(r['ebitda'] / rev)}" + (f", with revenue still growing {_pct(g)}" if g is not None else "")
+            + ". Any one of these gives it a value: " + "; ".join(fixes) + ".")
+
+
 def valuation(projs, hist, val, base, market, inputs=None, note=False):
     """DCF (free cash flow to firm) of each scenario, discounted from the last reported year end.
     projs: {scenario: project() rows}; val: VALUATION-shaped inputs; base: the base scenario's per-year inputs
@@ -1731,9 +1755,7 @@ def valuation(projs, hist, val, base, market, inputs=None, note=False):
         x = _dcf(fcff, period, wacc, g) or dict.fromkeys(("df", "pv", "pv_sum", "tv", "pv_tv", "ev"))
         ps = per_share(x["ev"])
         out[s] = {**x, "fcff": fcff, "minority": minority(x["ev"]), "equity": equity_of(x["ev"]), "per_share": ps,
-                  "error": None if error or fcff[-1] > 0 else (
-                      "Final-year free cash flow is negative; a perpetuity on it has no meaning. "
-                      "Lower capex or growth in the last years, or extend the projection."),
+                  "error": None if error or fcff[-1] > 0 else _burn(rows, (inputs or {}).get(s, base)["tax_rate"][-1]),
                   "upside": ps / price - 1 if ps is not None and price else None,
                   "tv_share": x["pv_tv"] / x["ev"] if x["ev"] and x["ev"] > 0 else None,
                   "grid": [[per_share((_dcf(fcff, period, wacc + dw, g + dg) or {}).get("ev")) for dg in GRID_G]
