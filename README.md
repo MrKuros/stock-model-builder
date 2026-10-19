@@ -4,12 +4,12 @@ Open an Indian listed company and get a research note: what the price assumes ag
 
 Numbers come from fixed rules. Words come from an AI command you choose, and every number in them is checked against the model before they are saved. It is analysis, not a recommendation.
 
-![Overview: Tata Consultancy Services, the price needs 16.6% growth a year against 5.8%](docs/screenshots/note-light.png)
+![Summary: Tata Consultancy Services, the price needs 13.5% growth a year against 5.8%](docs/screenshots/summary.png)
 
 <table>
 <tr>
-<td><img src="docs/screenshots/fundamentals.png" alt="Fundamentals: twelve years of revenue, margins, profit and cash, each chart opening its table" /></td>
-<td><img src="docs/screenshots/note-dark.png" alt="The Overview in dark mode" /></td>
+<td><img src="docs/screenshots/forecast.png" alt="Our forecast: an input opened in place, with the effect of the change and Undo" /></td>
+<td><img src="docs/screenshots/value-dark.png" alt="Is it cheap? in dark mode: price against our three values and both what-if grids" /></td>
 </tr>
 <tr>
 <td colspan="2"><img src="docs/screenshots/landing.png" alt="Your companies: today's price against our value range for every company, sorted cheapest against our value" /></td>
@@ -24,20 +24,20 @@ Every page has its own address, so a link, a bookmark, a reload or a second brow
 |---|---|---|
 | Your companies | `/` | Every company's price today against our value on one shared scale (the price is always the middle line), the verdict word, what the price assumes against our forecast, warning signs and the latest results; Today chips to show only those that look cheap, need a fix, have new results or aren't reviewed; sort cheapest first (our value ÷ price), most warning signs, recently changed or A–Z; Refresh prices, Check all for new results; each row's ⋯ menu (Open, Saved versions, Delete with a confirm); tickers you watch before modelling them |
 | Add a company | `/add` | Search by name or NSE symbol, then Build model or Watch price right on the match; a progress card that keeps running while you look elsewhere; an Excel export (`/add#upload`) or the sample company. Adding a company you already have asks first: add these years to it, keep both, or replace it (today's version is kept under Saved versions) |
-| Summary | `/c/<company>/summary` | What the price assumes against what the business does: the verdict, the business in five numbers, price against value, rule checks, thesis, risks and key numbers |
-| Is it cheap? | `/c/<company>/value` | The discount-rate inputs, value by case, the what-if grids, the multiples and the bridge |
-| What does the price assume? | `/c/<company>/priced-in` | Works backwards from the price: what moves the value and what the price needs |
+| Summary | `/c/<company>/summary` | The answer in two sentences, five answer cards that each open their page, a live “Try it” sentence for sales growth and margin, the note's three points and Mark as reviewed |
+| Is it cheap? | `/c/<company>/value` | Today's price against our three values, how sure that is (both what-if grids, ▲ where a combination reaches the price), other yardsticks against the peers, where the value comes from; the eight valuation settings and the bridge folded below |
+| What does the price assume? | `/c/<company>/priced-in` | Works backwards from the price: the ruler, and one table of what moves the value with the level each input needs for the price to be fair, tagged “never done”, “within its record” or “a judgement call” |
 | What could go wrong? | `/c/<company>/risks` | Warning signs found by rules and unusual years |
-| What changed? | `/c/<company>/changes` | New results against the forecast, input by input |
-| How does it compare? | `/c/<company>/peers` | The company next to listed peers |
-| Our forecast | `/c/<company>/forecast` | Every input with where it came from, the editor, drafting inputs from documents, and the projection |
-| Research note | `/c/<company>/note` | The AI-written note, every number checked by rules |
+| What changed? | `/c/<company>/changes` | Check for new results; new results against the forecast, what that changed, proposals to use the new figures, and the forecast input by input (`#by-input`) |
+| How does it compare? | `/c/<company>/peers` | The company next to listed peers, with why these peers, plain column names with their direction (“lower is cheaper”), and changing the set |
+| Our forecast | `/c/<company>/forecast` | The inputs in three tiers (the two that move value most, five more, accounting details folded), each opening in place to edit; Suggest from documents; what the forecast produces |
+| Research note | `/c/<company>/note` | The AI-written note, every number checked by rules; each cited number opens its source beside it |
 | How the business is doing | `/c/<company>/business` | Growth over 3, 5 and 10 years, eight charts and a table of key ratios, each opening the statement row behind it |
 | Statements | `/c/<company>/statements/<profit-and-loss, balance-sheet, cash-flow, ratios, quarters>` | Every reported line, then the forecast in blue |
 | Documents and sources | `/c/<company>/documents` | The documents (attached right there), filings and the audit trail |
 | Saved versions | `/c/<company>/versions` | One copy per day you changed it, plus copies kept on a replace; open any read-only (`?v=`) and restore it |
 
-The case (bear, base, bull), the forecast years, the Excel download, the save and review status sit in the same bar on every company page. Tabs on the same company stay in step: a save in one tab reloads the others (the last save wins, and the other tab says so).
+After any change that moves the value, a bar under the company bar shows our value before and after, against the price, whether it's saved, and Undo, with the numbers you set in this case and Reset all to the rules. Numbers you set are highlighted in yellow (“You set this · rule said 26.7%”); the rules' are blue, the AI's suggestions purple until you use them. Tabs on the same company stay in step: a save in one tab reloads the others (the last save wins, and the other tab says so).
 
 ## What it does
 
@@ -46,7 +46,7 @@ The case (bear, base, bull), the forecast years, the Excel download, the save an
 - **Data checks:** checks the books before modelling: assets equal liabilities, lines add up to their totals, PBT less tax matches net profit, and year-end changes are flagged. Banks, NBFCs and insurers are detected and rejected with a clear message, because they need a different model.
 - **Defaults from history:** revenue CAGR, three-year ratio-of-sums margins and working-capital days, and a median for lumpy items like capex and other income. The interest-rate default is capped at 25% (since Phase 5, for every source), so a company with almost no reported borrowings doesn't project a 1,000% rate; export-only models with tiny borrowings and large interest now project less interest than before.
 - **Three-statement projection:** P&L, balance sheet and cash flow stay linked. Cash is the balancing item, and the model borrows automatically when cash would go negative. Depreciation and interest run on opening balances, so there are no circular references.
-- **Steering:** drag, type or use arrow keys on 14 drivers. "Fade" moves a driver from one value to another over the forecast.
+- **Steering:** each input opens in place: type in the box, step it with − and +, or drag the track (arrow keys too) past the reported years, with what the price needs marked. Going beyond the company's record says so. "Change it gradually" moves an input from the rule's figure to yours over the forecast.
 - **Scenarios:** base, bull and bear, shown as overlays on the chart and compared in a single sentence.
 - **Return ratios:** ROE, ROCE, asset turnover, net debt/EBITDA and interest cover, for history and projection.
 - **One-off detection:** unusual years (tax, capex, other income, margin, and the minority's share of profit in years that split it) are flagged with robust statistics (median and MAD). You can leave them out of the defaults. A low capex year read off a falling net block (a disposal or transfer) is marked unreliable rather than cited as low spending.
@@ -62,7 +62,7 @@ The case (bear, base, bull), the forecast years, the Excel download, the save an
 - **Explain unusual years (optional, words only):** each flagged year has an Explain action. Attach that year's annual-report PDF and rules pick the few pages that mention exceptional or one-time items, the flagged line and the year (text read with the system `pdftotext`); the model answers in at most two sentences with a page and a quote, and the explanation is rejected unless that quote really occurs on that page. Without a report it can explain from the numbers only, labelled as such. Approving pins the note next to the flag, marked as AI-written; no number uses it.
 - **Annual-report notes (optional):** attach a year’s annual-report PDF on Documents and sources. For segment revenue, debt maturity, capex, contingent liabilities, related-party transactions, exceptional items, promoter pledge and the auditor's report, rules pick the most likely pages per topic (three; the auditor gets a slot for its signature page), and the app shows the pages and the exact prompt size before anything is sent. The model returns each figure with its page and a quote; rules check that every quote occurs on its page and contains its number, convert the unit (lakh, million...) to Rs crore (pledge is a percentage from 0 to 100, a quoted "nil" counting as 0; the auditor's report is words only: the firm, the opinion and whether the auditor changed, each checked against a quote on its page; exceptional items are words and citations for the note, never fed to the engine), and tie the sums to the statements (segments to revenue within 2%, maturity buckets to borrowings within 5%, capex to the XBRL cash flow when attached). A note that fails is kept as rejected. Approved notes are drawn as a segment mix, a maturity ladder, contingent liabilities against net worth and a related-party table; an approved capex figure becomes that year's capex in the history behind the default.
 - **Summary:** the answer in two sentences by rules ("At Rs 2,465 the market pays more than even our hopeful value. For the price to be fair, sales would need to grow 13.5% a year; TCS has managed 5.8% a year over the last three."), then five answer cards: Is it cheap? on the shared scale, what the price assumes against the best five and last three years, the warning signs by severity, what changed with Check for new results, and how it compares with its peers. Each card opens the page with the evidence. Below sit the research note's three points, where the numbers come from, and Mark as reviewed.
-- **Research note:** the rules' verdict, the AI's three points, priced in, risks and what to watch, and the key numbers; every cited number has a footnote with its source.
+- **Research note:** the rules' verdict, the AI's three points, priced in, risks and what to watch, and the key numbers; every cited number opens its source beside it without moving the page.
 - **What could go wrong?:** each warning sign as a card with a plain title ("Customers are paying more slowly"), one severity word everywhere (Serious, Worth a look, Minor, Passed, Not checked yet), why it matters, what the rule checked, a small chart of the flagged years, and links to its numbers and its forecast input. Checks that wait name the real blocker (no annual report, AI reading off, or not read yet). Years that stand out are listed apart and never counted as warnings; leaving one out of the rules' figures offers the moved figures in one click.
 - **How the business is doing, Statements, Documents and sources:** twelve years of reported growth, charts and ratios with a one-sentence answer; every statement line opening at the first year with a jump to the latest; and one page for the documents read, where each year's numbers came from, the filings line by line, annual-report reading, the audit trail, the AI setting and deleting the model.
 - **Forensic radar:** 15 rules for cash conversion, receivable and inventory days, capital WIP, other income, tax swings, debt and interest cover, working capital, a Beneish-style M-score, and (from approved annual-report notes) contingent liabilities, related parties, promoter pledge and the auditor. Each lit flag can be explained from the annual report with a checked quote.
@@ -113,7 +113,7 @@ sources.py        NSE client: search, quote, results filings, reports; polite, a
 ai.py             LLM_CMD calls, PDF page text and picking, quote and number checks
 test_model.py     self-check incl. Excel parity
 web/src/          App (routing, autosave, tab sync, keys), Shell (rail, company bar, switcher, dialogs, scale), Workspace, Home + Watch (Your companies), Add, Fetch, Peers, Tracking, Summary, Note (research note), Fundamentals (business), Statements,
-                  Model (Forecast), Valuation, Risks, Documents, Ruler, Draft, DriverStrip, Chart, Sources, route
+                  Model (Forecast), Valuation (Is it cheap?, priced in), Risks, Documents, Ruler, Draft, Chart, Sources, route
 ```
 
 ## Design notes

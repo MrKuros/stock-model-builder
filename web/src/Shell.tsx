@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { PAGES, RAIL, STATEMENTS, navigate, pathOf, type Page } from './route'
-import { SEV_WORD, gap, rs, verdict, type ModelSummary, type Scenario, type Severity } from './lib'
+import { SEV_WORD, gap, noNegZero, rs, verdict, type Kind, type ModelSummary, type Scenario, type Severity } from './lib'
 
 const THEME = 'financial-model:theme'
 const KEYS = 'financial-model:keys'
@@ -94,6 +94,39 @@ export function Verdict({ price, values, words = true }: { price: number | null 
 export const Sev = ({ level }: { level: Severity }) => <span className={`sev ${level}`}>{SEV_WORD[level]}</span>
 /** Where a number comes from, in words: rules (blue), yours (yellow highlighter), AI (purple), the market (ochre). */
 export const Src = ({ kind, children }: { kind: 'rule' | 'you' | 'ai' | 'market'; children: ReactNode }) => <span className={`srcw ${kind}`}>{children}</span>
+
+const toText = (v: number, kind: Kind) => noNegZero(kind === 'pct' ? (v * 100).toFixed(1) : String(Math.round(v)))
+const STEP: Record<Kind, number> = { pct: 0.005, days: 1, num: 10 }
+/** A bordered − [value] unit + box: type (Enter or leaving the box commits, Esc restores) or step with the buttons. */
+export function Stepper({ id, label, kind, value, onChange, you }: {
+  id: string; label: string; kind: Kind; value: number; onChange: (v: number) => void; you?: boolean
+}) {
+  const [draft, setDraft] = useState(toText(value, kind))
+  const editing = useRef(false)
+  useEffect(() => { if (!editing.current) setDraft(toText(value, kind)) }, [value, kind])
+  const commit = () => {
+    if (!editing.current) return
+    editing.current = false
+    const t = (kind === 'pct' ? draft : draft.replace(/,/g, '')).trim().replace(/%$/, '')
+    const n = /^-?(\d+\.?\d*|\.\d+)$/.test(t) ? parseFloat(t) : NaN
+    if (Number.isFinite(n)) onChange(kind === 'pct' ? n / 100 : n)
+    else setDraft(toText(value, kind))
+  }
+  const step = (s: number) => onChange(Math.round((value + s * STEP[kind]) * 1e6) / 1e6)
+  return (
+    <span className={`stepper${you ? ' you' : ''}`}>
+      <button type="button" onClick={() => step(-1)} aria-label={`${label}: lower`}>−</button>
+      <input id={id} inputMode="decimal" value={draft} aria-label={label}
+        onFocus={e => { editing.current = true; e.currentTarget.select() }} onChange={e => setDraft(e.target.value)} onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === 'Enter') e.currentTarget.blur()
+          if (e.key === 'Escape') { editing.current = false; setDraft(toText(value, kind)); e.currentTarget.blur() }
+        }} />
+      <span className="unit" aria-hidden="true">{kind === 'pct' ? '%' : kind === 'days' ? 'days' : 'cr'}</span>
+      <button type="button" onClick={() => step(1)} aria-label={`${label}: higher`}>+</button>
+    </span>
+  )
+}
 
 /** Every page opens the same way: kicker, the title (a question or a plain name), what the page is for, the answer. */
 export function PageHead({ label, title, purpose, answer, next }: { label?: ReactNode; title: ReactNode; purpose: ReactNode; answer?: ReactNode; next?: ReactNode }) {

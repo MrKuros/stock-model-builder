@@ -6,34 +6,36 @@ import { cagrOf } from './Fundamentals'
 import { Next, PageHead, Sev } from './Shell'
 import { useHref } from './route'
 import {
-  api, fmt, money, postJson, rs, verdict, when, type Cagr, type Impact, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
-  type Path, type Projection, type RuleCheck, type Row, type ThesisNote, type ValInputs, type Valuation,
+  api, clock, fmt, money, postJson, rs, verdict, when, type Cagr, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
+  type Path, type Projection, type RuleCheck, type Row, type ThesisNote, type Valuation,
 } from './lib'
 
 /** Average of a straight-line path over the projection: what "ours" means for a faded driver. */
 export const avg = (p: Path | undefined) => (p ? (p.start + (p.end ?? p.start)) / 2 : 0)
 export const shortName = (n: string) => n.replace(/\s+(ltd\.?|limited)$/i, '').trim()
 const pc = (v: number) => fmt(v, 'pct')
-const DAYS = new Set(['dso', 'dio', 'dpo'])
-const unit = (key: string, v: number) => (DAYS.has(key) ? `${Math.round(v)} days` : pc(v))
-const stepText = (key: string, s: number) => (DAYS.has(key) ? `${s} days` : `${+(s * 100).toFixed(1)} pp`)
-const NAMES = { growth: 'Revenue growth', ebitda_margin: 'EBITDA margin', wacc: 'Discount rate (WACC)', g: 'Terminal growth' } as const
 
-/** A cited number: dotted underline, a footnote mark that jumps to the Notes list, the source on hover or focus. */
-function Cite({ n, src, children, plain, uid }: { n: number; src: string; children: ReactNode; plain?: boolean; uid?: string }) {
-  const id = `cite-${n}${uid ? `-${uid}` : ''}`
+/** A cited number: a button with a dotted underline; it opens its source beside the claim (under the paragraph on a
+ * phone) without moving the page. Esc or a click elsewhere closes it and focus goes back to the number. */
+function Cite({ n, src, to, children, uid }: { n: number; src: string; to?: string; children: ReactNode; uid: string }) {
+  const [open, setOpen] = useState(false)
+  const box = useRef<HTMLSpanElement>(null)
+  const btn = useRef<HTMLButtonElement>(null)
+  const id = `cite-${n}-${uid}`
+  useEffect(() => {
+    if (!open) return
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); btn.current?.focus() } }
+    const down = (e: PointerEvent) => { if (!box.current?.contains(e.target as Node)) setOpen(false) }
+    document.addEventListener('keydown', key, true)
+    document.addEventListener('pointerdown', down)
+    return () => { document.removeEventListener('keydown', key, true); document.removeEventListener('pointerdown', down) }
+  }, [open])
   return (
-    <span className="cite">
-      <span className={plain ? undefined : 'num'}>{children}</span>
-      <sup><button type="button" className="fnref" aria-describedby={id} title={src}
-        onClick={() => {
-          const el = document.getElementById(`fn-${n}`)
-          const d = el?.closest('details')
-          if (d) d.open = true // the sources sit in a disclosure at the foot of the page
-          el?.scrollIntoView({ block: 'center' }); el?.focus()
-        }}>
-        {n}<span className="sr"> (note {n})</span></button></sup>
-      <span className="tip" role="tooltip" id={id}>{src}</span>
+    <span className="cite" ref={box}>
+      <button ref={btn} type="button" className="cite-b num" aria-expanded={open} aria-controls={open ? id : undefined}
+        onClick={() => setOpen(o => !o)}>{children}<sup aria-hidden="true">{n}</sup><span className="sr"> (source {n})</span></button>
+      {open && <span className="cite-pop" id={id} role="note"><b className="num">{children}</b>: {src}
+        {to && <> <a href={to}>Open it</a></>}</span>}
     </span>
   )
 }
@@ -56,7 +58,7 @@ const nums = (t: string) => (t.match(/\d[\d,]*(?:\.\d+)?/g) ?? []).map(x => x.re
 /** AI prose with every number in mono; a number its refs back gets a footnote and its source on hover or focus.
  * ponytail: a number is tied to the first ref whose text has the same number as written; a rounded one gets no
  * footnote. The rules already checked every number against the facts and quotes; this only picks the footnote */
-export function Prose({ text, refs, tn, refN, uid }: { text: string; refs: NoteRef[]; tn: ThesisNote; refN: Map<string, number>; uid: string }) {
+export function Prose({ text, refs, tn, refN, uid, refTo }: { text: string; refs: NoteRef[]; tn: ThesisNote; refN: Map<string, number>; uid: string; refTo?: Map<string, string> }) {
   const parts = text.split(/((?<![\w.])\d[\d,]*(?:\.\d+)?(?:%|x\b)?)/)
   return <>{parts.map((p, i) => {
     if (i % 2 === 0 || /^(19|20)\d\d$/.test(p)) return p
@@ -65,7 +67,7 @@ export function Prose({ text, refs, tn, refN, uid }: { text: string; refs: NoteR
     const r = refs.find(r => { const s = refSource(tn, r); return s && nums(`${s.text} ${s.quote ?? ''}`).includes(digits) })
     const n = r && refN.get(refKey(r))
     const s = r && refSource(tn, r)
-    return n && s ? <Cite key={i} n={n} uid={`${uid}-${i}`} src={s.quote ? `${s.text}: “${s.quote}”` : `Computed by rules: ${s.text}`}>{p}</Cite>
+    return n && s ? <Cite key={i} n={n} uid={`${uid}-${i}`} to={refTo?.get(refKey(r!))} src={s.quote ? `from ${s.text}: “${s.quote}”` : `computed by rules. ${s.text}`}>{p}</Cite>
       : <span key={i} className="num">{p}</span>
   })}</>
 }
@@ -75,7 +77,7 @@ export const subjectOf = (c: { name: string; source?: { symbol?: string | null }
   shortName(c.name).length <= 22 ? shortName(c.name) : c.source?.symbol ?? 'the company'
 /** Growth in words, never a signed rate: "grow 13.5%", "shrink 5.6%". */
 export const grow = (x: number) => (x < 0 ? `shrink ${pc(-x)}` : `grow ${pc(x)}`)
-const grew = (x: number) => (x < 0 ? `shrank ${pc(-x)}` : `grew ${pc(x)}`)
+export const grew = (x: number) => (x < 0 ? `shrank ${pc(-x)}` : `grew ${pc(x)}`)
 /** Revenue growth a year over the last three reported years (null when either end isn't positive). */
 export const last3Of = (parsed: Parsed) => cagrOf((parsed.hist ?? parsed.company.hist).map(h => h.revenue ?? null), 3)
 
@@ -171,20 +173,22 @@ export default function NotePage({ parsed, doc, setDoc, projection }: Props) {
   const tn = doc.note
   const stale = !!tn && projection?.inputs_hash != null && projection.inputs_hash !== tn.inputs_hash
   const factTo = (k: string) => (k.startsWith('flag_') ? href('risks', k.slice(5)) : k.startsWith('in_') ? href('forecast', k.slice(3))
-    : k.startsWith('oneoff_') ? href('risks', 'unusual') : href('value'))
+    : k.startsWith('oneoff_') ? href('risks', 'unusual') : /implied|break|price|need/.test(k) ? href('priced-in') : href('value'))
   const notes: { kind: string; text: ReactNode; quote?: string; to?: string }[] = []
-  const refN = new Map<string, number>()
+  const refN = new Map<string, number>(), refTo = new Map<string, string>()
   if (tn) for (const r of refsOf(tn)) {
     const k = refKey(r), s = refSource(tn, r)
     if (refN.has(k) || !s) continue
-    notes.push({ kind: s.file ? `File p.${s.page}` : 'Computed', text: s.text, quote: s.quote, to: s.file ? href('documents', 'reading') : factTo(k) })
+    const to = s.file ? href('documents', 'reading') : factTo(k)
+    notes.push({ kind: s.file ? `File p.${s.page}` : 'Computed', text: s.text, quote: s.quote, to })
     refN.set(k, notes.length)
+    refTo.set(k, to)
   }
-  const P = (text: string, refs: NoteRef[], uid: string) => (tn ? <Prose text={text} refs={refs} tn={tn} refN={refN} uid={uid} /> : null)
+  const P = (text: string, refs: NoteRef[], uid: string) => (tn ? <Prose text={text} refs={refs} tn={tn} refN={refN} refTo={refTo} uid={uid} /> : null)
   const { answer } = verdictWords(parsed, projection)
   return (
     <>
-      <PageHead title="Research note"
+      <PageHead label="Work on it · Research note" title="Research note"
         purpose="A short analyst note written by AI from the numbers in this model. Rules check every number against the model before it’s saved; nothing here changes a number."
         answer={answer} />
       {ai && !ai.available && <p className="notice-in">AI writing is off. The verdict, risks and key numbers below are computed by rules.{' '}
@@ -225,7 +229,7 @@ function Risks({ parsed, doc, tn, P }: { parsed: Parsed; doc: ModelDoc; tn: Thes
   const waiting = radar.filter(f => f.needs && f.severity === 'not_checked')
   return (
     <section className="sec" aria-labelledby="risks-h">
-      <h2 id="risks-h" className="label sec-label"><span>Risks · <b>warning signs found by rules</b></span><span>worst first</span></h2>
+      <h2 id="risks-h" className="label sec-label"><span>Risks · <b>warning signs found by rules, then the AI’s wording</b></span><span>worst first</span></h2>
       {!lit.length && !oneoffs.length && !issues.length && <p className="small-note">No forensic rule lit, no unusual years and no data issues in the last three reported years.</p>}
       <ul className="risks">
         {lit.map(f => {
@@ -267,94 +271,6 @@ function Risks({ parsed, doc, tn, P }: { parsed: Parsed; doc: ModelDoc; tn: Thes
   )
 }
 
-/** One input at a time, one step each way: grey bar = value falls, blue = value rises, from the base line. */
-export function Tornado({ impact, base, price, oursOf }: { impact: Impact[]; base: number; price: number | null; oursOf: (k: string) => number }) {
-  const vals = impact.flatMap(d => [d.down, d.up]).filter((x): x is number => x != null)
-  const lo0 = Math.min(base, ...vals), hi0 = Math.max(base, ...vals)
-  const pad = (hi0 - lo0 || 1) * 0.22 // room for the end labels, so they never clip
-  const lo = lo0 - pad, hi = hi0 + pad
-  const x = (v: number) => ((v - lo) / (hi - lo)) * 100
-  const reach = price == null ? [] : impact.filter(d => [d.down, d.up].some(v => v != null && (price > base ? v >= price : v <= price)))
-  return (
-    <section className="sec" aria-labelledby="tor-h">
-      <h2 id="tor-h" className="label sec-label"><span>What moves value · <b>Rs a share</b></span><span>one input at a time</span></h2>
-      <div className="tor" aria-hidden="true">
-        <div className="tor-base" style={{ left: `calc(var(--tor-name) + (100% - var(--tor-name)) * ${x(base) / 100})` }} />
-        {impact.map(d => {
-          const ends = [d.down, d.up].filter((v): v is number => v != null)
-          const l = Math.min(...ends), r = Math.max(...ends)
-          return (
-            <div className="tor-row" key={d.key}>
-              <div className="name">{d.label}<small>{unit(d.key, oursOf(d.key))} ± {stepText(d.key, d.step)}</small></div>
-              <div className="track">
-                {l < base && <i className="bar lo" style={{ left: `${x(l)}%`, width: `${x(base) - x(l)}%` }} />}
-                {r > base && <i className="bar hi" style={{ left: `${x(base)}%`, width: `${x(r) - x(base)}%` }} />}
-                <span className="v l" style={{ left: `${x(l)}%` }}>{rs(l)}</span>
-                <span className="v r" style={{ left: `${x(r)}%` }}>{rs(r)}</span>
-              </div>
-            </div>
-          )
-        })}
-        <div className="tor-axis"><span style={{ left: `${x(base)}%` }}>{rs(base)}</span></div>
-      </div>
-      <div className="sr"><table>
-        <caption>Value per share with one input moved one step down and up, others at base (Rs {rs(base)})</caption>
-        <thead><tr><th scope="col">Input</th><th scope="col">Step</th><th scope="col">Down</th><th scope="col">Up</th></tr></thead>
-        <tbody>{impact.map(d => <tr key={d.key}><th scope="row">{d.label}</th><td>{stepText(d.key, d.step)}</td>
-          <td>{d.down == null ? 'no value' : rs(d.down)}</td><td>{d.up == null ? 'no value' : rs(d.up)}</td></tr>)}</tbody>
-      </table></div>
-      {price != null && <p className="small-note">{reach.length
-        ? <>{reach.map(d => d.label).join(' and ')} alone {reach.length > 1 ? 'reach' : 'reaches'} the price (<span className="num mkt">{rs(price)}</span>) within one step.</>
-        : <>No single input reaches the price (<span className="num mkt">{rs(price)}</span>) within one step.</>}{' '}
-        Payout, other income and interest don’t move a cash-flow-to-firm value.</p>}
-    </section>
-  )
-}
-
-export function BreakEvens({ be, price, oursOf, c3, hist, v, vi, beta0 }: {
-  be: NonNullable<Valuation['note']>['breakevens']; price: number; oursOf: (k: string) => number; c3: Cagr[]; hist: Row[]; v: Valuation; vi: ValInputs; beta0: number
-}) {
-  const margins = hist.map(h => (h.revenue ? (h.ebitda ?? 0) / h.revenue : null)).filter((x): x is number => x != null)
-  const band: Record<string, [number, number, string] | null> = {
-    growth: c3.length ? [Math.min(...c3.map(c => c.value)), Math.max(...c3.map(c => c.value)), 'three-year history'] : null,
-    ebitda_margin: margins.length ? [Math.min(...margins), Math.max(...margins), `${margins.length}-yr range`] : null,
-    wacc: null, g: null,
-  }
-  const rows = (['growth', 'ebitda_margin', 'wacc', 'g'] as const).filter(k => be[k])
-  if (!rows.length) return null
-  return (
-    <section className="sec" aria-labelledby="be-h">
-      <h2 id="be-h" className="label sec-label"><span>Break-evens · <b>to justify Rs {rs(price)}</b></span><span>one at a time</span></h2>
-      <div className="be">
-        {rows.map(k => {
-          const b = be[k]!, need = b.value, ours = oursOf(k), h = band[k]
-          const pts = [ours, ...(need != null ? [need] : []), ...(h ? h.slice(0, 2) as number[] : [])]
-          const lo0 = Math.min(...pts), hi0 = Math.max(...pts), pad = (hi0 - lo0 || 0.02) * 0.15
-          const lo = lo0 - pad, hi = hi0 + pad
-          const x = (n: number) => `${((n - lo) / (hi - lo)) * 100}%`
-          const cap = k === 'wacc'
-            ? <>Ours {pc(ours)}{vi.wacc_override != null ? ' (typed)' : <>: cost of equity {pc(v.ke)} = {pc(vi.rf)} risk-free + {vi.beta} beta × {pc(vi.erp)} premium, blended with debt{vi.beta === beta0 ? ' (beta is the app default, not estimated for this company)' : ''}</>}</>
-            : k === 'g' ? <>Ours {pc(ours)}</>
-            : <>Ours {pc(ours)}{h && <> · {h[2]} <span className="num">{pc(h[0])}–{pc(h[1])}</span></>}</>
-          const label = `${NAMES[k]}: needed ${need == null ? 'none in range' : pc(need)}; ours ${pc(ours)}${h ? `; ${h[2]} ${pc(h[0])} to ${pc(h[1])}` : ''}.`
-          return (
-            <div className="be-row" key={k}>
-              <div className="top-line"><span>{NAMES[k]}</span>
-                <span className="num">{need != null ? pc(need) : `none ${b.range ? `in ${pc(b.range[0])} to ${pc(b.range[1])}` : 'in range'}`}</span></div>
-              {need != null && <div className="gauge" role="img" aria-label={label}>
-                {h && <i className="hist" style={{ left: x(h[0]), width: `calc(${x(h[1])} - ${x(h[0])})` }} />}
-                <i className="o" style={{ left: x(ours) }} />
-                <i className="need" style={{ left: x(need) }} />
-              </div>}
-              <p>{need == null ? <>No {NAMES[k].toLowerCase()} {b.range ? `up to ${pc(b.range[1])}` : 'in range'} reaches the price. </> : null}{cap}</p>
-            </div>
-          )
-        })}
-      </div>
-    </section>
-  )
-}
-
 /** Last reported year against the 3 years before (rules), then our first projected year in blue. */
 function KeyNumbers({ parsed, proj, next, checks, v }: {
   parsed: Parsed; proj: Row | null; next?: string; checks: RuleCheck[]; v: Valuation | null
@@ -385,7 +301,7 @@ function KeyNumbers({ parsed, proj, next, checks, v }: {
   const pe = v?.scenarios.base.multiples
   return (
     <section className="sec" aria-labelledby="keys-h">
-      <h2 id="keys-h" className="label sec-label"><span>Key numbers · <b>what they say</b></span></h2>
+      <h2 id="keys-h" className="label sec-label"><span>Key numbers</span></h2>
       <table className="keys">
         <thead><tr><th scope="col"><span className="sr">Measure</span></th><th scope="col">{year}</th><th scope="col">3-yr median</th>
           {p && <th scope="col" className="ours">{next}</th>}</tr></thead>
@@ -401,54 +317,15 @@ function KeyNumbers({ parsed, proj, next, checks, v }: {
               </tr>
             )
           })}
-          {pe && pe.price_last.pe != null && <tr><th scope="row"><a className="quiet" href={href('valuation', 'multiples')}>P/E at price</a></th>
+          {pe && pe.price_last.pe != null && <tr><th scope="row"><a className="quiet" href={href('value', 'yardsticks')}>Price ÷ earnings (P/E) at the price</a></th>
             <td className="num">{pe.price_last.pe.toFixed(1)}×</td><td className="num dim">{v?.multiples?.median.pe != null ? `${v.multiples.median.pe.toFixed(1)}×` : '–'}</td>
             {p && <td className="num ours">{pe.price_next.pe != null ? `${pe.price_next.pe.toFixed(1)}×` : '–'}</td>}</tr>}
         </tbody>
       </table>
-      <p className="small-note">Black = reported. Grey = median of the three years before ({pe ? 'P/E: all years' : 'rules'}). Blue = our base projection. Circled = a rule check lit.</p>
+      <p className="small-note">Black: reported. Grey: the median of the three years before ({pe ? 'P/E: all years' : 'by rules'}). Blue: our central forecast. A circled figure means a rule check lit on it.</p>
     </section>
   )
 }
-
-/** Computed moves toward and away from the price, from the one-step runs and the break-evens. */
-export function Change({ impact, base, price, oursOf, v, be, tn, P }: {
-  impact: Impact[]; base: number; price: number; oursOf: (k: string) => number; v: Valuation; be: NonNullable<Valuation['note']>['breakevens']
-  tn: ThesisNote | null; P: Pr
-}) {
-  const moves = impact.flatMap(d => ([['down', d.down, -1], ['up', d.up, 1]] as const).filter(m => m[1] != null).map(([, val, s]) => ({
-    d, val: val as number, text: `${d.label} ${s > 0 ? 'up' : 'down'} ${stepText(d.key, d.step)} to ${unit(d.key, oursOf(d.key) + s * d.step)}`,
-  })))
-  const toward = moves.filter(m => Math.abs(price - m.val) < Math.abs(price - base)).sort((a, b) => Math.abs(price - a.val) - Math.abs(price - b.val)).slice(0, 3)
-  const away = moves.filter(m => Math.abs(price - m.val) > Math.abs(price - base)).sort((a, b) => Math.abs(price - b.val) - Math.abs(price - a.val)).slice(0, 3)
-  const bear = v.scenarios.bear.per_share, bull = v.scenarios.bull.per_share
-  const fair = (['wacc', 'growth', 'ebitda_margin'] as const).find(k => be[k]?.value != null)
-  const far = (x: number) => (Math.abs(price - x) < Math.abs(price - base) ? 'closer to the price' : 'further from it')
-  return (
-    <section className="change" aria-label="What would change the view">
-      <div>
-        <h2>What would close the gap</h2>
-        <ul>
-          {toward.map(m => <li key={m.text}><span>{m.text}: <span className="num ours">Rs {rs(m.val)}</span>{(price > base ? m.val >= price : m.val <= price) ? ', past the price' : ''}.</span></li>)}
-          {fair && <li><span>{NAMES[fair]} at <span className="num">{unit(fair, be[fair]!.value!)}</span> instead of {unit(fair, oursOf(fair))}: the price is fair.</span></li>}
-          {price > base && bull != null && <li><span>Bull case: <span className="num ours">Rs {rs(bull)}</span>, {far(bull)}.</span></li>}
-          {!toward.length && !fair && <li><span>Nothing one step away moves our value toward the price.</span></li>}
-          {tn && <li className="ai"><span><span className="kind ai">AI</span><span className="serif">{P(tn.bull_trigger, [], 'bt')}</span></span></li>}
-        </ul>
-      </div>
-      <div className="down">
-        <h2>What would widen it</h2>
-        <ul>
-          {away.map(m => <li key={m.text}><span>{m.text}: <span className="num ours">Rs {rs(m.val)}</span>.</span></li>)}
-          {price > base && bear != null && <li><span>Bear case: <span className="num ours">Rs {rs(bear)}</span>.</span></li>}
-          {price < base && bull != null && <li><span>Bull case: <span className="num ours">Rs {rs(bull)}</span>.</span></li>}
-          {tn && <li className="ai"><span><span className="kind ai">AI</span><span className="serif">{P(tn.bear_trigger, [], 'bt2')}</span></span></li>}
-        </ul>
-      </div>
-    </section>
-  )
-}
-
 
 type Pr = (text: string, refs: NoteRef[], uid: string) => ReactNode
 
@@ -458,6 +335,7 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
   doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; tn: ThesisNote | null; stale: boolean; P: Pr; refN: Map<string, number>
 }) {
   const ai = useAi()
+  const href = useHref()
   const { busy, fail, done, write } = useWrite(doc, setDoc)
   const head = useRef<HTMLHeadingElement>(null)
   // the "Write the note" button unmounts: put focus on the heading, unless you moved on during the wait
@@ -469,7 +347,7 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
   const off = !ai?.available
   const button = (label: string) => (
     <div className="write">
-      <button type="button" className="btn" onClick={write} disabled={busy || off} aria-describedby="thesis-why">{busy ? 'Writing the note…' : label}</button>
+      <button type="button" className="btn" onClick={write} disabled={busy || off} aria-describedby="thesis-why">{busy ? 'Writing the note…' : `${label} (about a minute)`}</button>
       <span id="thesis-why" className="small-note">{off ? (ai ? 'AI off' : 'Checking whether AI is on…')
         : 'About a minute. Sends only the computed facts and approved quotes; rules check every number before it’s saved.'}</span>
     </div>
@@ -480,17 +358,16 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
   return (
     <section className="sec thesis" aria-labelledby="thesis-h">
       <h2 id="thesis-h" ref={head} tabIndex={-1} className="label sec-label"><span>Three points</span>
-        <span className={`who${stale ? ' stale' : ''}`}>{!tn ? 'Not written yet' : stale ? 'Written for earlier inputs' : 'AI-written · cited'}</span></h2>
+        <span className={`ai-tag${stale ? ' stale' : ''}`}>{!tn ? 'Not written yet' : `AI wrote this · rules checked every number · written ${when(tn.written_at)} ${clock(tn.written_at).slice(-5)}`}</span></h2>
       <div aria-live="polite">
         {busy && <p className="small-note">Writing the note · about a minute · you can leave this page.</p>}
         {done && !busy && <p className="sr">Note written and checked against the model.</p>}
-        {fail && <div className="fail" role="alert"><p>{fail.text}</p>
+        {fail && <div className="fail" role="alert"><p>{fail.text} Nothing was saved. <button type="button" className="link" onClick={write} disabled={off}>Try again</button></p>
           {fail.checks?.length ? <ul>{fail.checks.map(c => <li key={c.name}><strong>{c.name}:</strong> {c.detail}</li>)}</ul> : null}</div>}
       </div>
       {!tn && <div className="empty">
-        <p>Not written yet. The writer reads the verdict, what moves value, the break-evens, key numbers, lit rule checks
-          and the quotes you approved, and writes three points, the risks and what to watch. Everything else on this page
-          is computed by rules.</p>
+        <p>No research note yet. AI writes three points, the risks and what to watch from the numbers on these pages; rules check
+          every number before it’s saved. Everything else on this page is computed by rules.</p>
         {button('Write the note')}
       </div>}
       {tn && <>
@@ -517,7 +394,7 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
             </article>
           )
         })}
-        <h3 className="label sub">Priced in</h3>
+        <h3 className="label sub">Priced in <a className="go" href={href('priced-in')}>What does the price assume?</a></h3>
         <p className="serif prose">{P(tn.priced_in, [], 'p')}</p>
         <h3 className="label sub">What to watch</h3>
         <ul className="watch">{tn.what_to_watch.map((w, i) => <li key={i} className="serif">{P(w, [], `w${i}`)}</li>)}</ul>

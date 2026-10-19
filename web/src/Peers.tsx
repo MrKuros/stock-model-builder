@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { ago, streamFetch } from './Fetch'
 import { Checks, useAi } from './Sources'
 import {
-  api, fmt, money, postJson, type ModelDoc, type Parsed, type PeerCandidate, type PeerProposal, type PeerRow, type PeersDoc,
+  api, fmt, money, when, postJson, type ModelDoc, type Parsed, type PeerCandidate, type PeerProposal, type PeerRow, type PeersDoc,
   type PeerTable, type Projection,
 } from './lib'
 
@@ -120,7 +120,7 @@ export function PeersSection({ parsed, doc, setDoc, projection, short }: {
   return (
     <section className="blk" id="peers" aria-labelledby="peers-h">
       <div className="strip-head">
-        <h2 id="peers-h" tabIndex={-1} ref={head}>Against peers</h2>
+        <h2 id="peers-h" tabIndex={-1} ref={head}>{choosing ? (p.approved_at ? 'Change peers' : 'Pick peers') : 'The peer table'}</h2>
         {!choosing && !run && <span className="peer-acts">
           <button type="button" className="link small" onClick={() => read(p.chosen)}>Update prices and results</button>
           <button type="button" className="link small" onClick={() => { setTicked(p.chosen); setEditing(true) }}>Change peers</button>
@@ -131,12 +131,11 @@ export function PeersSection({ parsed, doc, setDoc, projection, short }: {
             cancel={() => { setEditing(false); setTicked(p.chosen) }} />
         : <>
           <p className="why">{short} against {p.chosen.length} listed {p.chosen.length === 1 ? 'company' : 'companies'} in its line of business, each on its last
-            reported year. Rank 1 = best: largest, fastest growing, highest margins, returns and cash conversion, least debt, cheapest multiple.</p>
+            reported year. Rank 1 = best: largest, fastest growing, highest margins, returns and cash conversion, least debt, cheapest.</p>
+          <Why p={p} />
           {steps}{msgs}
-          {t && <PeerWords t={t} chosen={p.chosen} short={short} />}
           {t ? <Table t={t} p={p} short={short} reading={run?.kind === 'read' && !run.stopped} retry={s => read([s])} />
             : (!run || run.stopped) && <p className="val-empty">No peer numbers yet. <button type="button" className="link" onClick={() => read(p.chosen)}>Read them from NSE</button></p>}
-          <Why p={p} />
         </>}
       {choosing && <>{steps}{msgs}</>}
     </section>
@@ -159,7 +158,9 @@ function Pick({ p, own, short, ai, typed, setTyped, find, pick, picking, ticked,
     <p className="why">Compare {short} with listed companies in the same line of business: size, growth, margins, returns, debt and
       P/E, EV/EBITDA, P/B at today’s prices. Rules find candidates on NSE (same sector, closest in size){aiOff ? '; you tick the ones that fit' : '; the AI picks the closest by business mix, rules check each pick, and you approve the set'}.</p>
     {!cands.length && (own
-      ? <p><button type="button" className="primary" disabled={run} onClick={() => find(own)}>Find peers for {own} on NSE</button></p>
+      ? <div className="empty-state"><p>No peers picked yet. Rules find listed companies in the same line of business{aiOff ? '' : '; AI can pick the closest'}; you approve the set.</p>
+          <p className="next-act"><button type="button" className="primary" disabled={run} onClick={() => find(own)}>Find peers on NSE</button>
+            {aiOff && <button type="button" className="btn" disabled>Let AI pick (AI off)</button>}</p></div>
       : <form className="peer-sym" onSubmit={e => { e.preventDefault(); if (SYMBOL.test(sym)) find(sym) }}>
         <label htmlFor={`${id}-sym`}>This model came from a file, so it doesn’t know its NSE symbol. Type it to find peers:</label>
         <span className="add-row"><input id={`${id}-sym`} type="text" value={typed} onChange={e => setTyped(e.target.value)} placeholder="e.g. TCS" spellCheck={false} autoComplete="off"
@@ -170,8 +171,9 @@ function Pick({ p, own, short, ai, typed, setTyped, find, pick, picking, ticked,
       {aiOff && cands.some(c => !c.hand) && <p className="peer-off">AI picking is off on this computer, so {ticked.length
         ? 'the closest companies in the same industry are ticked for you. Untick any that don’t fit, tick others'
         : 'tick the peers that fit'}. The list is NSE’s {cands[0]?.sector ?? 'same-sector'} companies: the same industry first, then the closest in size.</p>}
+      {aiOff && <p><button type="button" className="btn" disabled>Let AI pick (AI off)</button></p>}
       {!aiOff && !p.proposal && own && <p><button type="button" className="primary" disabled={picking || run} onClick={pick}>
-        {picking ? 'The AI is picking…' : 'Let the AI pick the closest'}</button>{' '}
+        {picking ? 'AI is picking…' : <>Let AI pick the closest <span className="ai-tag">AI</span></>}</button>{' '}
         <span className="small muted">or tick them yourself below.</span></p>}
       {p.proposal && <div className="peer-prop">
         <p><span className="tag ai">AI</span> Picked {p.proposal.picks.length}, of which {p.proposal.picks.filter(k => k.pass).length} passed every rule and
@@ -231,7 +233,7 @@ function AddPeer({ onAdd, example }: { onAdd: (c: PeerCandidate) => void; exampl
     setQ(''); setMsg(null)
   }
   return <form className="peer-add" id="peer-add" onSubmit={e => { e.preventDefault(); add() }}>
-    <label htmlFor={`${id}-q`}>Add a peer: type a name or NSE symbol</label>
+    <label htmlFor={`${id}-q`}>Add a peer by name or NSE symbol</label>
     <span className="add-row">
       <input id={`${id}-q`} type="text" list={`${id}-l`} value={q} onChange={e => { setQ(e.target.value); setMsg(null) }} placeholder={example ? `e.g. ${example.name.replace(/\s+(Limited|Ltd\.?)$/i, '')} or ${example.symbol}` : 'e.g. Infosys or INFY'} autoComplete="off" spellCheck={false} />
       <datalist id={`${id}-l`}>{hits.map(h => <option key={h.symbol} value={h.symbol}>{h.name}</option>)}</datalist>
@@ -243,14 +245,14 @@ function AddPeer({ onAdd, example }: { onAdd: (c: PeerCandidate) => void; exampl
 
 /** The comparison: the company (highlighted), each peer, the peers' median and the company's rank per measure. */
 function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; short: string; reading: boolean; retry: (s: string) => void }) {
-  const cols = t.columns
+  const cols = t.columns.map(([k, label, kind, way]) => [k, PLAIN[k]?.[0] ?? label, kind, way, PLAIN[k]?.[1]] as const)
   const waiting = p.chosen.filter(s => !t.peers.some(r => r.symbol === s))
   const at = t.peers.map(r => r.at).filter(Boolean).sort()[0]
   return <>
     <div className="table-wrap peer-wrap" tabIndex={0} role="region" aria-labelledby="peer-cap">
       <table className="peer-table">
         <caption id="peer-cap" className="visually-hidden">The company against its peers: measures, the peers’ median and the company’s rank</caption>
-        <thead><tr><th scope="col">Company</th><th scope="col">Year</th>{cols.map(([k, label]) => <th key={k} scope="col">{label.replace(', Rs crore', ' (Rs cr)')}</th>)}</tr></thead>
+        <thead><tr><th scope="col">Company</th><th scope="col">Year</th>{cols.map(([k, label, , , dir]) => <th key={k} scope="col">{label}{dir && <span className="col-dir">{dir}</span>}</th>)}</tr></thead>
         <tbody>
           <tr className="is-own"><th scope="row">{t.own.name} <span className="sr">(this company)</span></th><td>{t.own.year}</td>
             {cols.map(([k, , kind]) => <td key={k}>{cell(t.own.metrics?.[k], kind)}</td>)}</tr>
@@ -274,12 +276,22 @@ function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; sho
   </>
 }
 
-/** Why these peers: the AI's reason per pick (with its basis), or "ticked by you". */
+const PLAIN: Record<string, [string, string]> = {
+  mcap: ['Size: market cap, Rs cr', 'higher is bigger'], pe: ['Price ÷ earnings (P/E)', 'lower is cheaper'],
+  ev_ebitda: ['Company value ÷ operating profit (EV/EBITDA)', 'lower is cheaper'], pb: ['Price ÷ book value (P/B)', 'lower is cheaper'],
+  revenue: ['Sales, Rs cr', 'higher is bigger'], g3: ['Sales growth, 3 years', 'higher is faster'], g5: ['Sales growth, 5 years', 'higher is faster'],
+  ebitda_margin: ['Operating margin (EBITDA)', 'higher is better'], net_margin: ['Net margin', 'higher is better'],
+  roce: ['Return on capital (ROCE)', 'higher is better'], cash_conv: ['Cash conversion, 3 years', 'cash from operations ÷ profit; higher is better'],
+  nd_ebitda: ['Net debt ÷ operating profit', 'lower is safer'],
+}
+
+/** Why these peers: when and how the set was approved, then the reason per pick (the AI's, with its basis, or yours). */
 function Why({ p }: { p: PeersDoc }) {
   const by = new Map(p.proposal?.picks.map(k => [k.symbol, k]) ?? [])
   const name = (s: string) => p.candidates.find(c => c.symbol === s)?.name ?? p.rows.find(r => r.symbol === s)?.name ?? s
+  const aiN = p.chosen.filter(s => by.get(s)?.pass).length
   return <details className="fold">
-    <summary>Why these peers (approved {p.approved_at ? ago(p.approved_at) : ''})</summary>
+    <summary><span><b>Why these peers</b> · approved {p.approved_at ? when(p.approved_at).replace(/ \d{4}$/, '') : ''}: {aiN ? `${aiN} picked by AI and checked by rules, ` : ''}{p.chosen.length - aiN} ticked by you{p.candidates[0]?.sector ? `; NSE’s ${p.candidates[0].sector} companies` : ''}</span></summary>
     <ul className="peer-rej">{p.chosen.map(s => {
       const k = by.get(s)
       return <li key={s}><b>{name(s)}</b> ({s}): {k?.pass ? <><span className="tag ai">AI</span> {k.reason}</>
@@ -299,8 +311,3 @@ export function peerWords(t: PeerTable, read: number, short: string) {
     ? parts.join(parts.length > 2 ? ', ' : ' and ').replace(/, (?=[^,]*$)/, ' and ') : 'on too few measures to say'}.`
 }
 
-/** The same sentence above the peer table. */
-function PeerWords({ t, chosen, short }: { t: PeerTable; chosen: string[]; short: string }) {
-  const read = t.peers.filter(r => r.metrics && chosen.includes(r.symbol ?? '')).length
-  return read ? <p className="peer-line">{peerWords(t, read, short)}</p> : null
-}

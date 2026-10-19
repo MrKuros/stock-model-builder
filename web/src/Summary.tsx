@@ -7,7 +7,7 @@ import { ago } from './Fetch'
 import { month } from './Statements'
 import { latestScored, unreviewed } from './Tracking'
 import { useAi } from './Sources'
-import { Next, PageHead, Scale, Verdict } from './Shell'
+import { Next, PageHead, Scale, Stepper, Verdict } from './Shell'
 import { useHref } from './route'
 import { NAMES, SEV_WORD, fmt, rs, sevCounts, when, type Cagr, type ModelDoc, type Parsed, type Projection, type Severity } from './lib'
 
@@ -111,7 +111,7 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
           <a className="go" href={href('peers')}>{peers?.approved_at ? 'See the peer table' : 'Pick peers'}</a>
         </article>
       </div>
-      {/* step C: the live "Try it" sentence goes here */}
+      <TryIt doc={doc} setDoc={setDoc} projection={projection} />
 
       <section className="note-x" aria-labelledby="nx-h">
         <h2 id="nx-h">Research note <span className="ai-tag">AI wrote this · rules checked every number</span></h2>
@@ -159,5 +159,25 @@ export function Meter({ c }: { c: Record<Severity, number> }) {
       {(['high', 'medium', 'low', 'ok', 'not_checked'] as Severity[]).map(s => (
         <li key={s} className={`m-${s}${c[s] && s !== 'ok' && s !== 'not_checked' ? ' on' : ''}`}><b className="num">{c[s]}</b><span>{SEV_WORD[s].toLowerCase()}</span></li>))}
     </ul>
+  )
+}
+
+/** Try it: the two inputs that move the value most, as one live sentence on the case you're looking at. The same
+ * setter as Our forecast's rows, so both always agree. A gradual path is edited in the forecast instead. */
+function TryIt({ doc, setDoc, projection }: { doc: ModelDoc; setDoc: Props['setDoc']; projection: Projection | null }) {
+  const href = useHref()
+  const a = doc.scenarios[doc.active], src = doc.assumption_sources[doc.active] ?? {}
+  const value = projection?.scenarios[doc.active].length === doc.n ? projection.valuation.scenarios[doc.active].per_share : null
+  const set = (k: string) => (x: number) => setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [d.active]: { ...d.scenarios[d.active], [k]: { start: x, end: null } } } }))
+  const box = (k: 'growth' | 'ebitda_margin', label: string) => a[k]?.end != null
+    ? <span className="small">changes year by year · <a href={href('forecast', k)}>edit in the forecast</a></span>
+    : <Stepper id={`try-${k}`} label={label} kind="pct" value={a[k]?.start ?? 0} onChange={set(k)} you={!!src[k] && src[k] !== 'history'} />
+  return (
+    <section className="try" aria-labelledby="try-h">
+      <h2 id="try-h">Try it <span className="cnt">{NAMES[doc.active].toLowerCase()} case</span></h2>
+      <p className="answer s">If sales grow {box('growth', 'Sales growth a year')} a year and the operating margin stays at {box('ebitda_margin', 'Operating margin')},
+        one share is worth <b className="num ours">{value != null ? `Rs ${rs(value)}` : 'nothing yet'}</b>.</p>
+      <p className="small muted">These are the same inputs as in <a href={href('forecast')}>Our forecast</a>; changing them here changes them there.</p>
+    </section>
   )
 }

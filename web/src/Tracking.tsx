@@ -65,7 +65,7 @@ export function TrackProposals({ t, setDoc }: { t: Tracking; setDoc: SetDoc }) {
   const [done, setDone] = useState<string | null>(null)
   const odd = t.proposals.filter(p => p.proposed == null), props = t.proposals.filter(p => p.proposed != null)
   const unusual = odd.length > 0 && <p className="small-note">{odd.map(p => `${p.label} came in at ${show(p.key, p.actual)} against your ${show(p.key, p.forecast)}`).join('; ')},
-    but {odd[0].year} is flagged as an unusual year for {odd.length > 1 ? 'them' : 'it'}, so the rules propose no change. <a href={href('checks', 'unusual')}>Unusual years</a> lets you leave it out of the defaults.</p>
+    but {odd[0].year} is flagged as an unusual year for {odd.length > 1 ? 'them' : 'it'}, so the rules propose no change. <a href={href('risks', 'unusual')}>Years that stand out</a> lets you leave it out of the defaults.</p>
   if (!props.length) return <>{done && <p className="small-note" role="status">{done}</p>}{unusual}</>
   return (
     <div className="src-upgrade trk-props" role="group" aria-label="Inputs the new results suggest changing">
@@ -77,15 +77,15 @@ export function TrackProposals({ t, setDoc }: { t: Tracking; setDoc: SetDoc }) {
               the <span className="pencil-num">{show(p.key, p.forecast)}</span> you forecast. With {p.year} in, the rule from the last
               three years gives <span className="pencil-num">{show(p.key, p.proposed!)}</span>.</p>
             <div className="prop-actions">
-              <button type="button" onClick={() => { accept(setDoc, p); setDone(`${p.label}: base now ${show(p.key, p.proposed!)}; bull and bear moved with it.`) }}>
-                Use {show(p.key, p.proposed!)} from now on</button>
+              <button type="button" onClick={() => { accept(setDoc, p); setDone(`${p.label}: central now ${show(p.key, p.proposed!)}; cautious and hopeful moved with it.`) }}>
+                Use the new figure ({show(p.key, p.proposed!)})</button>
               <button type="button" onClick={() => { keep(setDoc, p); setDone(`${p.label}: kept at ${show(p.key, p.current)}.`) }}>
-                Keep {show(p.key, p.current)}</button>
+                Keep mine ({show(p.key, p.current)})</button>
             </div>
           </li>
         ))}
       </ul>
-      <p className="small-note">“Use” sets base and moves bull and bear by the same step; you can still edit it on the Forecast page.{done ? ` ${done}` : ''}</p>
+      <p className="small-note">“Use” sets the central case and moves cautious and hopeful by the same step; you can still edit it in Our forecast.{done ? ` ${done}` : ''}</p>
       {unusual}
     </div>
   )
@@ -93,7 +93,7 @@ export function TrackProposals({ t, setDoc }: { t: Tracking; setDoc: SetDoc }) {
 
 /** Overview, right under the verdict: what came in against your forecast and what that changed. Full while you
  * haven't reviewed the model since the results; afterwards one line. */
-export function Changed({ doc, setDoc, projection }: { doc: ModelDoc; setDoc: SetDoc; projection: Projection | null }) {
+export function Changed({ doc, setDoc, projection, full, answerOnly }: { doc: ModelDoc; setDoc: SetDoc; projection: Projection | null; full?: boolean; answerOnly?: boolean }) {
   const href = useHref()
   const t = projection?.tracking
   const s = latestScored(t)
@@ -102,39 +102,39 @@ export function Changed({ doc, setDoc, projection }: { doc: ModelDoc; setDoc: Se
   const rev = year.lines.find(l => l.key === 'revenue'), pat = year.lines.find(l => l.key === 'pat')
   const fresh = unreviewed(doc, t)
   const vs = (e: number | null) => (e == null ? '' : `${(Math.abs(e) * 100).toFixed(1)}% ${e >= 0 ? 'above' : 'below'}`)
-  const head = rev ? `${year.year} revenue came in ${vs(rev.err)} your forecast` : `${year.year} results are in`
-  if (!fresh) return (
+  const head = rev ? `${year.year} sales came in ${vs(rev.err)} our forecast` : `${year.year} results are in`
+  if (answerOnly) return <>New results: {head}{pat ? `; net profit ${vs(pat.err)}` : ''}.</>
+  if (!fresh && !full) return (
     <p className="trk-line"><span className="label">Latest results</span> {head}{pat ? `; net profit ${vs(pat.err)}` : ''}.{' '}
-      <a className="go" href={href('forecast', 'tracking')}>How the forecast did</a></p>
+      <a className="go" href={href('changes', 'by-input')}>How the forecast did</a></p>
   )
   const was = t.was, now = t.now
   const newFlags = now.flags.filter(f => !was.flags.some(x => x.id === f.id)), gone = was.flags.filter(f => !now.flags.some(x => x.id === f.id))
   return (
     <section className="provenance trk" id="changed" aria-labelledby="changed-h" tabIndex={-1}>
-      <h2 id="changed-h" className="label">New results · <b>{year.year} against your forecast{t.was.made_at ? ` of ${when(t.was.made_at)}` : ''}</b></h2>
-      <p className="trk-head">{head}{pat ? `; net profit ${vs(pat.err)}` : ''}.</p>
+      <h2 id="changed-h">How the forecast did: {year.year}{t.was.made_at ? <span className="cnt">forecast of {when(t.was.made_at)}</span> : null}</h2>
       <div className="scroll" tabIndex={0} role="region" aria-label={`${year.year}: forecast against reported`}>
         <table className="mini-t">
-          <thead><tr><th scope="col">Rs crore</th><th scope="col" className="r">You forecast</th><th scope="col" className="r">Reported</th><th scope="col" className="r">Diff.</th></tr></thead>
+          <thead><tr><th scope="col">Rs crore</th><th scope="col" className="r">Our forecast</th><th scope="col" className="r">Reported</th><th scope="col" className="r">Diff.</th></tr></thead>
           <tbody>{year.lines.map(l => <tr key={l.key}><th scope="row">{l.label}</th><td className="r num ours">{money(l.forecast)}</td>
             <td className="r num">{money(l.actual)}</td><td className="r num">{errOf(l.err)}</td></tr>)}</tbody>
         </table>
       </div>
-      <h3 className="label">What changed</h3>
+      <h3 className="h3">What changed in the model</h3>
       <ul>
-        <li>Value range, bear to bull: <b className="num">{range(was.values)}</b> before, <b className="num">{range(now.values)}</b> now
+        <li>Value range, cautious to hopeful: <b className="num">{range(was.values)}</b> before, <b className="num">{range(now.values)}</b> now
           (base {was.values?.base != null ? sh(was.values.base) : 'no value'} → <span className="num ours">{now.values.base != null ? sh(now.values.base) : 'no value'}</span>).</li>
         <li>Flat revenue growth the price needs: {was.implied == null && now.implied == null ? <>{needs(null)}, before or now</> : <><b className="num">{needs(was.implied)}</b> before, <b className="num">{needs(now.implied)}</b> now</>}{now.price != null && was.price != null && Math.abs(now.price - was.price) > 0.005 ? ` (price Rs ${rs(was.price)} then, Rs ${rs(now.price)} now)` : ''}.</li>
         <li>Warning signs: {newFlags.length || gone.length
-          ? <>{newFlags.length ? <>newly lit: <b>{newFlags.map(f => f.name).join(', ')}</b>. </> : null}{gone.length ? <>cleared: {gone.map(f => f.name).join(', ')}.</> : null} <a href={href('checks', 'flags')}>See the checks</a></>
+          ? <>{newFlags.length ? <>newly lit: <b>{newFlags.map(f => f.name).join(', ')}</b>. </> : null}{gone.length ? <>cleared: {gone.map(f => f.name).join(', ')}.</> : null} <a href={href('risks')}>See the warning signs</a></>
           : <>no change ({now.flags.length} lit).</>}</li>
         <li>Your assumptions haven’t changed. {s.year.drivers.filter(d => !d.hit).length
           ? <>{s.year.drivers.filter(d => !d.hit).length} of {s.year.drivers.length} inputs came in outside the step the app counts as a hit.</>
-          : <>Every input came in within its step.</>} <a className="go" href={href('forecast', 'tracking')}>How each input did</a></li>
+          : <>Every input came in within its step.</>} <a className="go" href="#by-input">How each input did</a></li>
       </ul>
       <TrackProposals t={t} setDoc={setDoc} />
       {doc.note && <Rewrite doc={doc} setDoc={setDoc} />}
-      <p className="small-note">Compared by rules: the forecast saved before these results against the filed numbers. Marking the model reviewed shrinks this to one line.</p>
+      <p className="small-note">Compared by rules: the forecast saved before these results against the filed numbers.</p>
     </section>
   )
 }
@@ -151,7 +151,7 @@ function Rewrite({ doc, setDoc }: { doc: ModelDoc; setDoc: SetDoc }) {
     setMsg(null)
     try {
       const r = await api<ThesisNote>('/api/note/write', postJson(doc))
-      if (r.status === 'written') { setDoc(d => ({ ...d, note: r, reviewed_at: null })); setMsg('Rewritten with the new results and checked. It is in the Thesis below.') }
+      if (r.status === 'written') { setDoc(d => ({ ...d, note: r, reviewed_at: null })); setMsg('Rewritten with the new results and checked. Read it on the Research note page.') }
       else setMsg(`The new note failed the rule checks twice, so the old one stays: ${r.checks.filter(c => c.pass === false).map(c => c.name).join(', ')}.`)
     } catch (e) { setMsg((e as Error).message) } finally { setBusy(false) }
   }
@@ -179,14 +179,14 @@ export function Accuracy({ doc, setDoc, projection }: { doc: ModelDoc; setDoc: S
   const rate = Object.fromEntries(t.hit_rate.map(h => [h.key, h]))
   const n = t.records.filter(r => r.years.length).length
   return (
-    <section className="m-sec" aria-labelledby="trk-h" id="tracking" tabIndex={-1}>
-      <h2 id="trk-h" className="m-h2">How the forecast did <span className="dim">{s.year.year} · forecast saved {s.rec.made_at ? when(s.rec.made_at) : 'before the results'}</span></h2>
-      <p className="small">Blue is what you assumed for {s.year.year} before it was reported, black what the filings show. A hit is within one
+    <section aria-labelledby="trk-h">
+      <h2 id="trk-h">How the forecast did, input by input <span className="cnt">{s.year.year} · forecast saved {s.rec.made_at ? when(s.rec.made_at) : 'before the results'}</span></h2>
+      <p className="small">Blue is what the model assumed for {s.year.year} before it was reported, black what the filings show. A hit is within one
         step: 2 pp for growth, 1 pp for margins and most shares of revenue, 10 days for working capital. The last column counts
         hits {n === 1 ? 'for this forecast' : `over your ${n} saved forecasts, every reported year each one covered`}.</p>
       <div className="tw" tabIndex={0} role="region" aria-labelledby="trk-h">
         <table className="mini-t trk-t">
-          <thead><tr><th scope="col">Input</th><th scope="col" className="r">You assumed</th><th scope="col" className="r">Came in</th>
+          <thead><tr><th scope="col">Input</th><th scope="col" className="r">We assumed</th><th scope="col" className="r">Came in</th>
             <th scope="col" className="r">Difference</th><th scope="col">Hit?</th><th scope="col" className="r">Hit rate</th></tr></thead>
           <tbody>{s.year.drivers.map(d => (
             <tr key={d.key} className={d.hit ? undefined : 'miss'}>
@@ -198,7 +198,7 @@ export function Accuracy({ doc, setDoc, projection }: { doc: ModelDoc; setDoc: S
       </div>
       <TrackProposals t={t} setDoc={setDoc} />
       {!t.proposals.length && <p className="small-note">No input to change: {s.year.drivers.every(d => d.hit) ? 'every one came in within its step.'
-        : `the rule default with ${s.year.year} in doesn't move your ${NAMES.base.toLowerCase()} case toward what came in, or you chose to keep it.`}</p>}
+        : `the rule’s figure with ${s.year.year} in doesn’t move the ${NAMES.base.toLowerCase()} case toward what came in, or you chose to keep it.`}</p>}
       {(doc.track?.length ?? 0) > 1 && <p className="small-note">Saved forecasts: {doc.track!.map(r => `before ${r.new_years.join(', ')}${r.made_at ? ` (${when(r.made_at)})` : ''}`).join('; ')}.</p>}
     </section>
   )

@@ -302,14 +302,22 @@ export default function App() {
     } catch (e) { setWatchMsg(<span className="bad">Couldn’t watch {symbol}: {(e as Error).message}</span>) }
   }
   // Restore: the open older version is saved as today's; today's own file is kept first (keep=1)
-  const restore = async () => {
+  // (Saved versions names the version instead: it is read first, after today's last edit is saved)
+  const restore = async (id?: string) => {
     if (!doc || !parsed) return
     try {
-      const r = await api<{ id: string; saved_at: string }>('/api/models?keep=1', postJson(doc))
+      let [p, d] = [parsed, doc]
+      if (id) {
+        if ((await flushRef.current()) === false) return
+        const o = await api<Opened>(`/api/models/${id}`)
+        ;[p, d] = [o.parsed, o.doc!]
+      }
+      const r = await api<{ id: string; saved_at: string }>('/api/models?keep=1', postJson(d))
       channel?.postMessage({ type: 'saved', id: r.id, saved_at: r.saved_at } satisfies Msg)
-      openDoc(parsed, { ...doc, saved_at: r.saved_at }, r.id, null)
+      openDoc(p, { ...d, saved_at: r.saved_at }, r.id, null)
       loadList()
       navigate(location.pathname + location.hash, true)
+      setNotice('Restored. The version you had before is kept under Saved versions, so you can go back.')
     } catch (e) { setSave(s => ({ ...s, error: (e as Error).message })) }
   }
   const checked = (saved: { id: string; saved_at: string }[]) => { // other tabs on those companies reload them

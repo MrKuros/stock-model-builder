@@ -1,26 +1,28 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useAi, withFlagNotes, withNotes } from './Sources'
-import NotePage, { RulerSection, shortName } from './Note'
-import ModelView, { UPGRADED, type Upgrade } from './Model'
+import NotePage, { shortName, subjectOf } from './Note'
+import ModelView, { UPGRADED, inputName, type Upgrade } from './Model'
 import Summary from './Summary'
 import RisksPage from './Risks'
 import Documents from './Documents'
 import Fundamentals from './Fundamentals'
 import StatementsPage from './Statements'
-import ValuationPage from './Valuation'
-import { PeersSection } from './Peers'
-import { BottomBar, CHECK, DL, Next, PageHead, PhoneTop, Rail, Scale, Sheet, Verdict, openFinder, slugOf, type Here, type RailNote } from './Shell'
+import ValuationPage, { PricedIn } from './Valuation'
+import { PeersSection, peerWords } from './Peers'
+import { BottomBar, CHECK, Confirm, DL, Next, PageHead, PhoneTop, Rail, Scale, Sheet, Verdict, openFinder, slugOf, type Here, type RailNote } from './Shell'
 import { ago, pendingMerge, streamFetch } from './Fetch'
 import { Accuracy, Changed, latestScored, unreviewed } from './Tracking'
+import { path } from './Draft'
 import { month } from './Statements'
 import { HrefCtx, PAGES, REPORTED, STATEMENTS, pathOf, placed, type Href, type Page, type Route } from './route'
 import type { SaveState } from './App'
 import {
-  NAMES, api, clock, flat, fmt, groupKeys, postJson, rs, sevCounts, verdict, when, SCENARIOS,
-  type Company, type Filing, type ModelDoc, type ModelSummary, type Parsed, type Projection, type Proposal, type Scenario,
+  NAMES, api, clock, defaultPaths, flat, fmt, gap, groupKeys, postJson, rs, seed, sevCounts, verdict, when, SCENARIOS,
+  type Company, type Kind, type Filing, type ModelDoc, type ModelSummary, type Parsed, type Projection, type Proposal, type Scenario,
 } from './lib'
 
 const ORDER: Scenario[] = ['bear', 'base', 'bull']
+interface Effect { from: number | null; active: Scenario; at: number; undo: Pick<ModelDoc, 'scenarios' | 'assumption_sources' | 'valuation'> }
 const HORIZONS = [3, 5, 7, 10]
 
 interface Props {
@@ -34,7 +36,7 @@ interface Props {
   save: SaveState
   notice: string | null
   onRetry: () => Promise<string | false>
-  onRestore: () => void // the open older version becomes today's (today's is kept)
+  onRestore: (id?: string) => void // the open older version (or the one named) becomes today's (today's is kept)
   onNotice: () => void // dismiss the other-tab notice
   onDelete: () => Promise<void> // delete every version of this company (after a confirm), then go to the list
 }
@@ -52,6 +54,10 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const ai = useAi()
   // any change to what the numbers come from puts the note back to draft; an input changed without a new source
   // (a strip, a typed value) is yours: its source flips to "manual"
+  // the effect bar: the value before an edit (a burst of edits to one case counts as one) and one level of Undo
+  const effRef = useRef<Effect | null>(null)
+  const mineRef = useRef<number | null>(null)
+  const [effect, setEffect] = useState<Effect | null>(null)
   const setDoc = (f: (d: ModelDoc) => ModelDoc) => setDocRaw(d => {
     let x = f(d)
     if (x.scenarios !== d.scenarios && x.assumption_sources === d.assumption_sources) {
@@ -60,10 +66,25 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
         if (JSON.stringify(x.scenarios[s][k]) !== JSON.stringify(d.scenarios[s][k])) src[s] = { ...src[s], [k]: 'manual' }
       x = { ...x, assumption_sources: src }
     }
+    if (x.scenarios !== d.scenarios || x.valuation !== d.valuation) {
+      const e = effRef.current
+      const keep = e && Date.now() - e.at < 1500 && e.active === d.active
+      effRef.current = { from: keep ? e.from : mineRef.current, active: d.active, at: Date.now(),
+        undo: keep ? e.undo : { scenarios: d.scenarios, assumption_sources: d.assumption_sources, valuation: d.valuation } }
+      const now = effRef.current
+      queueMicrotask(() => setEffect(now))
+    }
     const moved = x.scenarios !== d.scenarios || x.valuation !== d.valuation || x.n !== d.n || x.filings !== d.filings
       || x.excluded_years !== d.excluded_years
     return moved && x.reviewed_at ? { ...x, reviewed_at: null } : x
   })
+  const undo = () => {
+    const e = effRef.current
+    if (!e) return
+    effRef.current = null
+    setEffect(null)
+    setDocRaw(d => ({ ...d, ...e.undo }))
+  }
   const [projection, setProjection] = useState<Projection | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
@@ -235,8 +256,14 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const short = sym ?? shortName(company.name)
   const hasQuarters = !!company.quarters?.dates.length
   const tracking = proj?.tracking
-  const yours = Object.values(doc.assumption_sources[doc.active] ?? {}).filter(x => x === 'manual').length
+  const mineSrc = doc.assumption_sources[doc.active] ?? {}
+  const yoursKeys = Object.keys(mineSrc).filter(k => mineSrc[k] !== 'history')
+  const yours = yoursKeys.length
+  mineRef.current = mine
+  // the effect bar goes with a page change; Undo is for the edit you just made
+  useEffect(() => { effRef.current = null; setEffect(null) }, [route.page, slug])
   const vd = verdict(price, values)
+  const rules = useMemo(() => seed(defaultPaths(parsed.defaults, parsed.default_ends)), [parsed.defaults, parsed.default_ends])
   const sev = sevCounts(parsed.forensic)
   const versions = (models ?? []).filter(x => slugOf(x.id) === slug)
   const fresh = !!latestScored(tracking) && unreviewed(doc, tracking)
@@ -297,50 +324,44 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   switch (route.page) {
     case 'business': page = <Fundamentals parsed={parsed} tracking={tracking} notes={doc.notes} />; break
     case 'statements': page = <StatementsPage parsed={parsed} doc={doc} projection={proj} sub={route.sub} excel={excelButton('primary', 'Download Excel')} />; break
-    case 'forecast': page = <ModelView {...common} anchor={route.anchor} upgrades={upgrades} onApply={applyUpgrades} />; break
+    case 'forecast': page = <ModelView {...common} anchor={route.anchor} upgrades={upgrades} onApply={applyUpgrades} onKeep={() => setUpgrades([])} />; break
     case 'value': page = <ValuationPage {...common} />; break
-    case 'priced-in': page = <><RulerSection {...common} /><ValuationPage {...common} /></>; break // step C rebuilds this page
+    case 'priced-in': page = <PricedIn {...common} />; break
     case 'risks': page = <RisksPage parsed={parsed} doc={doc} setDoc={setDoc} upgrades={upgrades} onApply={applyUpgrades} onKeep={() => setUpgrades([])}
       onProposals={onProposals} toggleYear={toggleYear} pendingYear={pendingYear} />; break
     case 'documents': page = <Documents {...common} versions={versions} upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals}
       onCompany={onCompany} onDelete={onDelete} />; break
     case 'note': page = <NotePage {...common} />; break
-    case 'peers': page = <>
-      <PageHead title="How does it compare?" purpose={<>{shortName(company.name)} next to listed companies in the
-        same line of business, on size, growth, profitability and price.</>} />
-      <PeersSection parsed={parsed} doc={doc} setDoc={setDoc} projection={proj} short={shortName(company.name)} />
-      <Next lead="Then see the price against our value."><a className="btn" href={href('value')}>Is it cheap?</a></Next></>
-      break
-    case 'changes': {
-      const since = company.source?.fetched_at ?? doc.saved_at
+    case 'peers': {
+      const t = proj?.peers, read = t && peers?.approved_at ? t.peers.filter(r => r.metrics && peers.chosen.includes(r.symbol ?? '')).length : 0
       page = <>
-        <PageHead title="What changed?" purpose="New results set against what this model forecast. Earlier copies of the model are under Saved versions." />
-        {latestScored(tracking)
-          ? <><Changed doc={doc} setDoc={setDoc} projection={proj} /><div id="by-input"><Accuracy doc={doc} setDoc={setDoc} projection={proj} /></div></>
-          : <div className="empty-state">
-              <p className="answer">No new results since {since ? when(since) : 'you built this'}. The latest filed {lastQ ? `quarter is ${month(lastQ)}` : `year is ${histYears[nHist - 1]}`}.
-                Results are usually filed within 45 days of a quarter’s end.</p>
-              <p>{checkButton()}</p>
-              {chk.msg && <p className="small" role="status">{chk.msg}</p>}
-            </div>}
-        <Next lead="Earlier copies of this model."><a className="btn" href={href('versions')}>See saved versions</a></Next></>
+        <PageHead label="Answers · How does it compare?" title="How does it compare?" purpose={<>{shortName(company.name)} next to listed companies in the
+          same line of business, on size, growth, profitability and price.</>}
+          answer={!peers?.approved_at ? <>No peers picked yet. Rules find listed companies in the same line of business{ai?.available ? '; AI can pick the closest' : ''}; you approve the set.</>
+            : read && t ? peerWords(t, read, subjectOf(company)) : <>Peers picked; their numbers haven’t been read yet.</>} />
+        <PeersSection parsed={parsed} doc={doc} setDoc={setDoc} projection={proj} short={shortName(company.name)} />
+        <Next lead="See the price against our value, next to these peers."><a className="btn" href={href('value', 'yardsticks')}>Is it cheap?</a></Next></>
       break
     }
-    case 'versions': page = <>
-      <PageHead title="Saved versions" purpose={<>One saved copy per day you changed {shortName(company.name)}, plus any copy kept when
-        you replaced it. Open one to read it; to bring it back, open it and choose Restore this version.</>} />
-      {versions.length <= 1
-        ? <p className="empty-state">Only today’s version so far. A new one is kept each day you change {shortName(company.name)}.</p>
-        : <ul className="ver-list">{versions.map((x, i) => {
-          const ver = x.id.split('/')[1], now = i === 0
-          return <li key={x.id}>
-            <span><b>{x.saved_at ? `${when(x.saved_at)}${ver.length > 10 ? `, ${clock(x.saved_at).slice(-5)} (kept on a replace)` : ''}` : ver}</b>
-              <span className="small muted">{now ? ' · the newest' : ''}{(route.version ?? versions[0].id.split('/')[1]) === ver ? ' · open now' : ''}</span></span>
-            <a className="btn" href={pathOf(slug, 'summary', '', now ? null : ver)}>{now ? 'Open' : 'Open read-only'}</a>
-          </li>
-        })}</ul>}
-      <Next lead="See how the latest results compare with the forecast."><a className="btn" href={href('changes')}>What changed?</a></Next></>
+    case 'changes': {
+      const since = company.source?.fetched_at ?? doc.saved_at
+      const scored = latestScored(tracking)
+      page = <>
+        <PageHead label="Answers · What changed?" title="What changed?" purpose="New results set against what this model forecast. Earlier copies of the model are under Saved versions."
+          answer={scored ? <Changed doc={doc} setDoc={setDoc} projection={proj} answerOnly />
+            : <>No new results since {since ? `you built this on ${when(since).replace(/ \d{4}$/, '')}` : 'you built this'}. The latest filed {lastQ ? `quarter is ${month(lastQ)}` : `year is ${histYears[nHist - 1]}`}.</>} />
+        {scored
+          ? <><Changed doc={doc} setDoc={setDoc} projection={proj} full />
+              <section className="blk" id="by-input" tabIndex={-1}><Accuracy doc={doc} setDoc={setDoc} projection={proj} /></section>
+              <p className="chk-line">{checkButton()} {chk.msg && <span className="small" role="status">{chk.msg}</span>}</p></>
+          : <div className="empty-state">
+              <p>Results are usually filed within 45 days of a quarter’s end. Checking asks NSE for today’s price and any results filed since.</p>
+              <p className="chk-line">{checkButton('primary')} {chk.msg && <span className="small" role="status">{chk.msg}</span>}</p>
+            </div>}
+        <Next lead="Earlier copies of this model, one per day you changed it."><a className="btn" href={href('versions')}>See saved versions</a></Next></>
       break
+    }
+    case 'versions': page = <Versions versions={versions} slug={slug} open={route.version} name={shortName(company.name)} onRestore={onRestore} href={href} />; break
     default: page = <Summary {...common} check={checkButton()} checkMsg={chk.msg} onReview={review} />
   }
 
@@ -387,17 +408,23 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
                   <b>{short}</b> <span aria-hidden="true">▾</span></button>
                 {short !== shortName(company.name) && <span className="bar-name">{shortName(company.name)}</span>}
               </div>
-              <div className="bar-facts">{facts}<Scale price={price} bear={values.bear} base={values.base} bull={values.bull} size="mini" /></div>
+              <div className="bar-facts">{facts}<Scale price={price} bear={values.bear} base={values.base} bull={values.bull} size="mini" ghost={effect?.from} /></div>
               <div className="bar-ctl">{controls('bar')}</div>
               <button type="button" className="m-ctl btn" onClick={() => setSheet(true)} aria-haspopup="dialog">
                 {inert ? 'Reported years' : `${NAMES[doc.active]} · ${n} yrs`} ▾</button>
             </div>
             {(merging || (chk.msg && route.page !== 'changes' && route.page !== 'summary')) && <p className="bar-msg" role="status">{merging ?? chk.msg}</p>}
           </header>
+          {effect && <EffectBar e={effect} now={mine} price={price} active={doc.active} save={save} onUndo={undo}
+            changes={yoursKeys.map(k => {
+              const kind = (byKey[k]?.[2] ?? 'pct') as Kind, p = scenarios[doc.active][k], d = rules[doc.active][k]
+              return p && d ? `${inputName(k, byKey[k]?.[1])} ${path(d, kind)} → ${path(p, kind)}` : null
+            }).filter((x): x is string => !!x)}
+            onReset={() => setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [d.active]: rules[d.active] }, assumption_sources: { ...d.assumption_sources, [d.active]: {} } }))} />}
           <Sheet open={sheet} title="Case, years, new results and Excel" onClose={() => setSheet(false)}>{controls('sheet')}</Sheet>
           {route.version && <div className="notice-bar ro" role="region" aria-label="Older version">
             You’re looking at the {verLabel} version. Changes won’t be saved.{' '}
-            <a href={pathOf(slug, route.page, route.sub, null, '')}>Back to today</a> · <button type="button" className="link" onClick={onRestore}>Restore this version</button></div>}
+            <a href={pathOf(slug, route.page, route.sub, null, '')}>Back to today</a> · <button type="button" className="link" onClick={() => onRestore()}>Restore this version</button></div>}
           {save.error && <div className="notice-bar bad" role="alert">Couldn’t save{save.at ? ` after ${clock(save.at)}` : ''}: {save.error}. Your changes are kept in this tab.{' '}
             <button type="button" className="link" onClick={onRetry}>Try again</button></div>}
           {notice && <div className="notice-bar" role="status">{notice} <button type="button" className="link" onClick={onNotice}>OK</button></div>}
@@ -440,4 +467,66 @@ function Controls({ where, doc, setDoc, inert, check, excel }: {
       {excel}
     </div>
   )
+}
+
+/** The effect of the edit you just made: the value before and now, against the price, saved, Undo; then every input
+ * you set in this case, with Reset all to the rules. role=status, so a screen reader hears the new value. */
+function EffectBar({ e, now, price, active, save, changes, onUndo, onReset }: {
+  e: Effect; now: number | null; price: number | null; active: Scenario; save: SaveState; changes: string[]; onUndo: () => void; onReset: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const ch = e.from != null && now != null && e.from > 0 ? now / e.from - 1 : null
+  const side = (x: number | null) => (x == null || price == null ? null : x >= price ? 'above' : 'below')
+  const saved = save.error ? <span className="bad">Couldn’t save</span> : save.at && Date.parse(save.at) >= e.at - 1000 ? <>✓ Saved</> : <>Saving…</>
+  useLayoutEffect(() => { // the bar sits under the sticky company bar (desktop) or the phone's top bar
+    const set = () => {
+      const top = document.querySelector<HTMLElement>(matchMedia('(max-width: 760px)').matches ? '.mtop' : '.bar')
+      ref.current?.style.setProperty('--eff-top', `${top?.offsetHeight ?? 0}px`)
+    }
+    set()
+    addEventListener('resize', set)
+    return () => removeEventListener('resize', set)
+  }, [])
+  return (
+    // ponytail: a zero-height sticky holder, so the bar floats over the page instead of pushing the row you're editing down
+    <div className="eff-wrap" ref={ref}><div className="effect" role="status" aria-live="polite">
+      <p className="eff-1">
+        <span>Our {NAMES[active].toLowerCase()} value</span>{' '}
+        {e.from != null && <s className="num">Rs {rs(e.from)}</s>} → <b className="num ours">{now != null ? `Rs ${rs(now)}` : 'no value'}</b>
+        {ch != null && Math.abs(ch) >= 0.0005 && <span className="num"> {ch > 0 ? '+' : '−'}{fmt(Math.abs(ch), 'pct')}</span>}
+        {price != null && now != null && <span className="eff-p"> · {side(e.from) === side(now) ? 'still ' : ''}{side(now)} the price of <span className="num mkt">Rs {rs(price)}</span>
+          {' '}({gap(price, now)})</span>}
+        <span className="eff-s"> · {saved} · </span><button type="button" className="btn small-btn" onClick={onUndo}>Undo</button>
+      </p>
+      {changes.length > 0 && <details className="eff-2"><summary>Your changes in this case ({changes.length})</summary>
+        <p>{changes.join(' · ')} · <button type="button" className="link" onClick={onReset}>Reset all to the rules</button></p></details>}
+    </div></div>
+  )
+}
+
+/** Saved versions: one copy per day you changed it, plus copies kept on a replace or restore. */
+function Versions({ versions, slug, open, name, onRestore, href }: {
+  versions: ModelSummary[]; slug: string; open: string | null; name: string; onRestore: (id?: string) => void; href: Href
+}) {
+  const [ask, setAsk] = useState<ModelSummary | null>(null)
+  const label = (x: ModelSummary) => { const ver = x.id.split('/')[1]; return x.saved_at ? `${when(x.saved_at)}${ver.length > 10 ? `, ${clock(x.saved_at).slice(-5)}` : ''}` : ver }
+  return <>
+    <PageHead label="Evidence · Saved versions" title="Saved versions" purpose={<>One saved copy per day you changed {name}, plus any copy kept when
+      you replaced or restored it. Open one to read it; restore it if you want it back.</>}
+      answer={versions.length <= 1 ? <>Only today’s version so far. A new one is kept each day you change {name}.</>
+        : <>{versions.length} versions, the newest {versions[0].saved_at ? when(versions[0].saved_at) : 'today'}.</>} />
+    {versions.length > 1 && <ul className="ver-list">{versions.map((x, i) => {
+      const ver = x.id.split('/')[1], now = i === 0, here = (open ?? versions[0].id.split('/')[1]) === ver
+      return <li key={x.id}>
+        <span><b>{label(x)}</b><span className="small muted">{now ? ' · the newest, the one you edit' : ver.length > 10 ? ' · kept when it was replaced' : ''}{here ? ' · open now' : ''}</span>
+          {x.values?.base != null && <span className="small muted"> · central value Rs {rs(x.values.base)}</span>}</span>
+        <span className="next-act">{now ? <a className="btn" href={pathOf(slug, 'summary')}>Open</a> : <>
+          <a className="btn" href={pathOf(slug, 'summary', '', ver)}>Open read-only</a>
+          <button type="button" className="btn" onClick={() => setAsk(x)}>Restore this version</button></>}</span>
+      </li>
+    })}</ul>}
+    <Confirm open={!!ask} title={ask ? `Restore the ${label(ask)} version?` : ''} yes="Restore it" no="Cancel"
+      body="Today’s version is kept here, so you can go back." onYes={() => ask && onRestore(ask.id)} onClose={() => setAsk(null)} />
+    <Next lead="See how the latest results compare with the forecast."><a className="btn" href={href('changes')}>What changed?</a></Next>
+  </>
 }

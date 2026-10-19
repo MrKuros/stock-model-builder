@@ -74,8 +74,8 @@ export default function Ruler({ price, bear, base, bull, scale, ours, implied, b
 
   const desc = [
     `Rupee scale from ${money(lo)} to ${money(hi)} a share.`,
-    bear != null && bull != null ? `Our range runs from ${rs(bear)} (bear) through ${rs(base)} (base) to ${rs(bull)} (bull).` : `Our base value is ${rs(base)}.`,
-    price != null ? `The price, ${rs(price)}, sits ${above ? `${rs(price - bull!)} above the bull case` : belowBear ? `${rs(bear! - price)} below the bear case` : 'inside the range'}.` : 'No share price.',
+    bear != null && bull != null ? `Our range runs from ${rs(bear)} (cautious) through ${rs(base)} (central) to ${rs(bull)} (hopeful).` : `Our central value is ${rs(base)}.`,
+    price != null ? `The price, ${rs(price)}, sits ${above ? `${rs(price - bull!)} above the hopeful case` : belowBear ? `${rs(bear! - price)} below the cautious case` : 'inside the range'}.` : 'No share price.',
     hasGrowth ? `On the growth scale below, our ${pc(ours)} sits under the base value` +
       (best3 && v3 != null ? `, the best three-year run of ${pc(best3.value)} sits at about ${rs(v3)}` : '') +
       (implied != null ? `, and the price needs ${pc(implied)}.` : '.') : '',
@@ -107,14 +107,14 @@ export default function Ruler({ price, bear, base, bull, scale, ours, implied, b
           return <g className="r-gap draw">
             <rect x={a} y={AX - 18} width={b - a} height={18} fill="url(#hatch-mkt)" />
             <line x1={a} x2={b} y1={AX - 18} y2={AX - 18} />
-            {b - a > 90 && <text x={(a + b) / 2} y={AX - 23} textAnchor="middle">Rs {rs(gap)} {above ? 'above bull' : 'below bear'}</text>}
+            {b - a > 90 && <text x={(a + b) / 2} y={AX - 23} textAnchor="middle">Rs {rs(gap)} {above ? 'above hopeful' : 'below cautious'}</text>}
           </g>
         })()}
-        {bear != null && <g className="r-pin"><text x={clampLabel(x(bear), 6)} y={AX - 50} textAnchor="middle"><tspan className="r-pk">BEAR</tspan><tspan x={clampLabel(x(bear), 6)} dy="13">{rs(bear)}</tspan></text></g>}
-        {bull != null && <g className="r-pin"><text x={clampLabel(x(bull), 6)} y={AX - 50} textAnchor="middle"><tspan className="r-pk">BULL</tspan><tspan x={clampLabel(x(bull), 6)} dy="13">{rs(bull)}</tspan></text></g>}
+        {bear != null && <g className="r-pin"><text x={clampLabel(x(bear), 6)} y={AX - 50} textAnchor="middle"><tspan className="r-pk">CAUTIOUS</tspan><tspan x={clampLabel(x(bear), 6)} dy="13">{rs(bear)}</tspan></text></g>}
+        {bull != null && <g className="r-pin"><text x={clampLabel(x(bull), 6)} y={AX - 50} textAnchor="middle"><tspan className="r-pk">HOPEFUL</tspan><tspan x={clampLabel(x(bull), 6)} dy="13">{rs(bull)}</tspan></text></g>}
         <g className="r-base">
           <line x1={x(base)} x2={x(base)} y1={AX - 46} y2={hasGrowth ? GX : AX} />
-          <text x={clampLabel(x(base), 6)} y={AX - 66} textAnchor="middle"><tspan className="r-pk">BASE</tspan><tspan x={clampLabel(x(base), 6)} dy="15">{rs(base)}</tspan></text>
+          <text x={clampLabel(x(base), 6)} y={AX - 66} textAnchor="middle"><tspan className="r-pk">CENTRAL</tspan><tspan x={clampLabel(x(base), 6)} dy="15">{rs(base)}</tspan></text>
         </g>
 
         {hasGrowth && <>
