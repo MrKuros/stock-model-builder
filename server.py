@@ -1781,7 +1781,9 @@ def check_all(today=None):
                      if "company" in e)
             d, years, q = with_results(doc, p["company"], p["fetched"]["filings"], today)
         except (sources.Offline, ValueError, HTTPException, StopIteration) as e:
-            yield {"result": {**row, "status": "failed", "text": f"Couldn’t check: {getattr(e, 'detail', None) or e}"}}
+            # what the list still shows for it: the results as last read from NSE
+            yield {"result": {**row, "status": "failed", "text": f"Couldn’t check: {getattr(e, 'detail', None) or e}",
+                              "kept": doc.company.source.get("fetched_at") or doc.saved_at}}
             continue
         if d is None:
             yield {"result": {**row, "status": "none", "text": "No new results."}}

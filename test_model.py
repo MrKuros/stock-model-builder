@@ -2773,6 +2773,8 @@ def fetch_api_check(server, root, co, data):
         lines = [json.loads(x) for x in client.post("/api/track/check").text.splitlines()]
         res = {e["result"]["company"]: e["result"] for e in lines if "result" in e}
         assert res["Tracked Co"]["status"] == "failed" and "Couldn’t reach NSE" in res["Tracked Co"]["text"], res
+        kept = server.load_model(res["Tracked Co"]["id"], root).company.source["fetched_at"]
+        assert res["Tracked Co"]["kept"] == kept, "a failed check says when the results the list shows were read"
         online[0] = True
         # caps: a list over the size cap is refused, not truncated; a block page is never cached as data
         big = sources.Client(root / "_cache" / "t", gap=0.0)

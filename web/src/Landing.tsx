@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { MiniRange, latestOf, rangeWords, slugOf } from './Shell'
 import { navigate, pathOf, placed } from './route'
-import { NAMES, api, fmt, postJson, rs, when, type ModelSummary, type Parsed, type Report, type WatchList } from './lib'
+import { NAMES, api, clock, fmt, postJson, rs, when, type ModelSummary, type Parsed, type Report, type WatchList } from './lib'
 import { AddBox, FetchRun, ago, pendingMerge, sameCompany, streamFetch } from './Fetch'
 import { month } from './Statements'
 import { Prices, Spark, WatchSection } from './Watch'
@@ -218,7 +218,7 @@ export default function Landing({ models, error: listError, onAdd, onDeleted, on
           <span>Companies · <b>price against our value range</b></span><span>{latest.length}</span>
         </h2>
         <Prices models={latest} watch={watch?.watch ?? []} onDone={() => { onReload(); loadWatch() }} />
-        {latest.some(m => m.symbol) && <CheckAll n={latest.filter(m => m.symbol).length} onSaved={onChecked} />}
+        {latest.some(m => m.symbol) && <CheckAll n={latest.filter(m => m.symbol).length} models={latest} onSaved={onChecked} />}
         <div className="cov-tools">
           <label>Sort by <select value={sort} onChange={e => setSort(e.target.value as Sort)}>
             {Object.entries(SORTS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
@@ -297,12 +297,15 @@ function coverText(m: ModelSummary): ReactNode {
   return <>Base <span className="num ours">Rs {rs(m.values.base)}</span>, no growth rate reaches the price</>
 }
 
-interface CheckResult { id: string; company: string; status: 'new' | 'none' | 'skipped' | 'failed'; text: string; saved_at?: string }
+interface CheckResult {
+  id: string; company: string; status: 'new' | 'none' | 'skipped' | 'failed'; text: string; saved_at?: string
+  kept?: string | null // failed: when the results the list still shows were last read from NSE
+}
 
 /** "Check all for new results": every company added by ticker, one after another (NSE once a second). New results
  * are saved as today's version with the forecast they replace kept for comparison; assumptions never change. Stop
  * keeps what was saved so far. */
-function CheckAll({ n, onSaved }: { n: number; onSaved: (saved: { id: string; saved_at: string }[]) => void }) {
+function CheckAll({ n, models, onSaved }: { n: number; models: ModelSummary[]; onSaved: (saved: { id: string; saved_at: string }[]) => void }) {
   const [state, setState] = useState<'idle' | 'running' | 'done' | 'stopped' | 'failed'>('idle')
   const [step, setStep] = useState<string | null>(null)
   const [results, setResults] = useState<CheckResult[]>([])
@@ -326,6 +329,10 @@ function CheckAll({ n, onSaved }: { n: number; onSaved: (saved: { id: string; sa
   const running = state === 'running'
   const found = results.filter(r => r.status === 'new').length
   const failed = results.filter(r => r.status === 'failed').length
+  // the oldest results the list still shows for the companies that couldn't be checked
+  const kept = results.filter(r => r.status === 'failed' && r.kept).map(r => r.kept!).sort()[0]
+  const keptLine = kept ? `; the list shows ${failed > 1 ? 'their' : 'its'} results as last checked${failed > 1 ? ', the oldest' : ''} at ${clock(kept)}` : ''
+  const lastSaved = models.map(m => m.saved_at).filter((x): x is string => !!x).sort().at(-1)
   return (
     <div className="check-all" aria-busy={running}>
       <div className="ca-row">
@@ -333,14 +340,16 @@ function CheckAll({ n, onSaved }: { n: number; onSaved: (saved: { id: string; sa
         {running && <button type="button" className="link" onClick={() => { ctl.current?.abort(); setState('stopped') }}>Stop</button>}
         <span className="small muted">{running ? step ?? 'Starting…'
           : state === 'done' ? `Done: ${found ? `new results for ${found} compan${found > 1 ? 'ies' : 'y'}, saved` : failed ? 'nothing new found' : 'nothing new'}${failed
-            ? `; couldn’t check ${failed} compan${failed > 1 ? 'ies' : 'y'}, so try again when NSE can be reached` : ''}.`
+            ? `; couldn’t check ${failed} compan${failed > 1 ? 'ies' : 'y'}${keptLine}. Try again when NSE can be reached` : ''}.`
           : state === 'stopped' ? `Stopped after ${results.filter(r => r.status !== 'skipped').length} of ${n}${found ? `; ${found} saved with new results` : ''}. The rest weren’t checked.`
           : `Asks NSE about the ${n === 1 ? 'company' : `${n} companies`} you added by ticker, about half a minute each. New results are saved next to your forecast; your assumptions never change.`}</span>
       </div>
       {results.length > 0 && <ul className="ca-list" aria-live="polite">{results.map(r => (
         <li key={r.id} className={r.status}><b>{r.company}</b>: {r.status === 'new'
-          ? <>{r.text} <a href={pathOf(slugOf(r.id), 'overview', '', null, 'changed')}>See what changed</a></> : r.text}</li>))}</ul>}
-      {error && <p className="error" role="alert">{error} Refresh on each company works too.</p>}
+          ? <>{r.text} <a href={pathOf(slugOf(r.id), 'overview', '', null, 'changed')}>See what changed</a></>
+          : <>{r.text}{r.kept ? ` Showing its results as last checked at ${clock(r.kept)}.` : ''}</>}</li>))}</ul>}
+      {error && <p className="error" role="alert">{error} The list shows what was saved{lastSaved ? `, last at ${clock(lastSaved)}` : ''}.
+        Refresh on each company works too.</p>}
     </div>
   )
 }
