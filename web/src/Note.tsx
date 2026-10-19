@@ -549,7 +549,7 @@ function OperatingNumbers({ notes }: { notes: Record<string, unknown> }) {
       <h2 id="kpis-h" className="label sec-label"><span>Operating numbers · <b>{n ? `${n.year}, from the annual report` : 'none read yet'}</b></span></h2>
       {n ? <>
         <ul className="kpi-list">{n.rows.map((r, i) => (
-          <li key={i}><span>{r.label}</span> <b className="num">{r.amount == null ? '–' : r.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })} {r.unit}</b>
+          <li key={i}><span>{r.label}</span> <b className="num">{r.amount == null ? '–' : r.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}{r.unit === '%' ? '%' : ` ${r.unit ?? ''}`}</b>
             <span className="small dim"> p.{r.page}<span className="sr">: “{r.quote}”</span></span></li>))}</ul>
         <p className="small-note">As printed in {n.file ?? 'the annual report'}, read by AI and approved by you; they don’t change any
           number in the model. <a href={href('checks', 'documents')}>Quotes</a></p>

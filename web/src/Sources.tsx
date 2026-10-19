@@ -470,7 +470,7 @@ export function KpiRows({ v, caption }: { v: ArValue; caption: string }) {
         <thead><tr><th scope="col">Measure</th><th scope="col">As printed</th><th scope="col">Page</th><th scope="col">Quote</th></tr></thead>
         <tbody>{v.rows.map((r, i) => (
           <tr key={i}><th scope="row">{r.label}</th>
-            <td className="num">{r.amount == null ? '–' : r.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })} {r.unit}</td>
+            <td className="num">{r.amount == null ? '–' : r.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}{r.unit === '%' ? '%' : ` ${r.unit ?? ''}`}</td>
             <td>{r.page}</td><td className="ar-quote">“{r.quote}”</td></tr>
         ))}</tbody>
       </table>
