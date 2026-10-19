@@ -325,6 +325,17 @@ export default function App() {
     setModels(ms => ms && ms.filter(x => !ids.includes(x.id)))
   }
 
+  // Documents → This model → Delete: nothing of it is saved again, every version goes, then the list
+  const removeOpen = async () => {
+    const slug = route.slug!
+    window.clearTimeout(timer.current)
+    pending.current = null
+    await inflight.current
+    const ids = (await loadList() ?? models ?? []).filter(m => slugOf(m.id) === slug).map(m => m.id)
+    for (const id of ids) await api(`/api/models/${id}`, { method: 'DELETE' })
+    deleted(ids)
+    navigate('/')
+  }
   const open = !!route.slug && !!parsed && !!doc && !!openId && slugOf(openId) === route.slug
     && (route.version ?? null) === openedVer.current
   if (open) lastUrl.current = location.pathname + location.search
@@ -357,7 +368,7 @@ export default function App() {
     <Workspace key={route.slug} route={route} models={models} parsed={parsed!} doc={doc!} save={save} notice={notice}
       setDoc={f => setDoc(d => d && mine(f)(d))} onRetry={flush} onRestore={restore} onNotice={() => setNotice(null)}
       setDefaults={defaults => setParsed(p => p && mine<Parsed>(x => ({ ...x, defaults }))(p))}
-      setParsed={next => setParsed(p => p && mine<Parsed>(x => ({ ...next, restated: x.restated }))(p))} />
+      setParsed={next => setParsed(p => p && mine<Parsed>(x => ({ ...next, restated: x.restated }))(p))} onDelete={removeOpen} />
     {global}
   </>)
   const top = route.top === 'add' ? 'add' : 'home'

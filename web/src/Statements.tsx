@@ -1,6 +1,6 @@
-import { useLayoutEffect, useRef } from 'react'
-import { PageHead } from './Shell'
-import { STATEMENTS, useHref } from './route'
+import { useRef, type ReactNode } from 'react'
+import { Next, PageHead } from './Shell'
+import { STATEMENTS, navigate, useHref } from './route'
 import { fmt, type LayoutLine, type LineKind, type ModelDoc, type Parsed, type Projection, type Quarters, type Row, type Ttm } from './lib'
 
 const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf', 'fcf', 'fcff'])
@@ -8,11 +8,11 @@ const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf',
 /** The quarterly tab's inputs: the export's quarters, TTM (and a year earlier), the last reported year (and the one before). */
 export interface QuarterProps { quarters: Quarters; ttm: Ttm | null; ttmPrev: Ttm | null; fy: string; last: Row; prev: Row | null }
 const OPTIONAL = new Set(['cogs', 'lease', 'payables']) // shown only when some year has them
-const NAMES = { base: 'base', bull: 'bull', bear: 'bear' } as const
+import { NAMES } from './lib'
 
 /** Statements: one address per statement (/statements/profit-and-loss ...), history in ink and the active case's
  * forecast in blue. A row named in a link (#revenue) is focused and highlighted on arrival. */
-export default function StatementsPage({ parsed, doc, projection, sub }: { parsed: Parsed; doc: ModelDoc; projection: Projection | null; sub: string }) {
+export default function StatementsPage({ parsed, doc, projection, sub, excel }: { parsed: Parsed; doc: ModelDoc; projection: Projection | null; sub: string; excel: ReactNode }) {
   const href = useHref()
   const { company, years: histYears, layout } = parsed
   const hist = parsed.hist ?? company.hist
@@ -31,18 +31,20 @@ export default function StatementsPage({ parsed, doc, projection, sub }: { parse
   const hide = parsed.sources?.basis === 'cogs' ? undefined : new Set(['cogs'])
   return (
     <>
-      <PageHead label={<>Statements · <b>{cur[1]}</b> · Rs crore</>} title={cur[1]}
+      <PageHead label="Evidence · Statements" title={cur[1]}
         purpose={tab === 'QUARTERS'
-          ? <>The last ten quarters as the company reported them, then the last full year and the trailing twelve months
-            (TTM: the last four quarters added up), so the run rate sits next to the annual figure.</>
-          : <>Every line as the company reported it ({histYears[0]}–{histYears[nHist - 1]}, in black), then our{' '}
-            <b>{NAMES[active]}</b> case’s forecast in blue. Change the case and years at the top; change the inputs in Forecast.</>}
-        next={<a className="btn" href={href('forecast')}>Change the forecast</a>} />
+          ? <>The last ten quarters as {parsed.company.name.replace(/\s+(ltd\.?|limited)$/i, '')} reported them, then the last full year. TTM = the last four
+            quarters added up, so the run rate sits next to the annual figure.</>
+          : <>Every line, every year. Reported years in black; forecast years in blue, marked E. Rs crore.</>}
+        answer={tab === 'QUARTERS' ? (quarterly ? <>Quarters to {month(quarterly.quarters.dates[quarterly.quarters.dates.length - 1])}.</> : <>No quarterly figures in this file.</>)
+          : <>Reported {histYears[0]}–{histYears[nHist - 1].slice(-2)}{proj ? <>, then our {NAMES[active].toLowerCase()} case’s forecast to {projection!.years[n - 1]}</> : null}.</>} />
       <nav className="stmt-tabs" aria-label="Statements">
         {tabs.map(([id, name]) => <a key={id} href={href('statements', '', id)} aria-current={id === cur[0] ? 'true' : undefined}>{name}</a>)}
       </nav>
+      <label className="stmt-sel">Statement{' '}
+        <select className="sel" value={cur[0]} onChange={e => navigate(href('statements', '', e.target.value))}>
+          {tabs.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
       <section className="statements" aria-labelledby="page-h">
-        {tab !== 'QUARTERS' && proj && <p className="small dim scroll-hint">The table scrolls sideways: earlier years are to the left, the forecast ({projection!.years[0]}–{projection!.years[n - 1]}) to the right, in blue.</p>}
         {tab === 'QUARTERS'
           ? quarterly
             ? <div className="table-wrap" tabIndex={0} role="region" aria-label="Quarters"><QuarterTable {...quarterly} /></div>
@@ -67,6 +69,7 @@ export default function StatementsPage({ parsed, doc, projection, sub }: { parse
           </p>
         )}
       </section>
+      <Next lead="The whole model, every formula live, in a workbook.">{excel}</Next>
     </>
   )
 }
@@ -81,21 +84,23 @@ function StatementTable({ layout, section, years, rows, nHist, hide }: {
     else if (key && at === section && !hide?.has(key) && !(OPTIONAL.has(key) && rows.every(r => !r[key])))
       lines.push([label, key, kind as LineKind])
   }
-  // a narrow screen opens on the latest reported year (next to the row names), not on the oldest
+  // opens at the first year; one button jumps to the latest
   const wrap = useRef<HTMLDivElement>(null)
-  useLayoutEffect(() => {
-    const w = wrap.current
-    if (!w || w.scrollWidth <= w.clientWidth) return
-    const th = w.querySelectorAll<HTMLElement>('thead th')
-    if (th[nHist]) w.scrollLeft = Math.max(0, th[nHist].offsetLeft - th[0].offsetWidth - 8)
-  }, [section, nHist, years.length])
-  return (
+  const jump = () => {
+    const w = wrap.current, th = w?.querySelectorAll<HTMLElement>('thead tr:last-child th')
+    if (w && th?.length) w.scrollTo({ left: Math.max(0, th[Math.max(1, nHist - 2)].offsetLeft - th[0].offsetWidth - 8), behavior: 'smooth' })
+  }
+  const nProj = years.length - nHist
+  return (<>
+    <p className="stmt-tools"><button type="button" className="btn" onClick={jump}>Jump to latest years →</button></p>
     <div className="table-wrap" ref={wrap} tabIndex={0} role="region" aria-labelledby="page-h">
       <table>
         <thead>
+          <tr className="mark" aria-hidden="true"><td />
+            <td colSpan={nHist}>Reported</td>{nProj > 0 && <td colSpan={nProj} className="proj">Forecast →</td>}</tr>
           <tr>
             <th scope="col">{section === 'RATIOS' ? 'Ratio' : 'Rs crore'}</th>
-            {years.map((y, i) => <th scope="col" key={y} className={i >= nHist ? 'proj' : undefined}>{y}</th>)}
+            {years.map((y, i) => <th scope="col" key={y} className={i >= nHist ? 'proj' : undefined}>{i >= nHist && !y.endsWith('E') ? `${y}E` : y}</th>)}
           </tr>
         </thead>
         <tbody>
@@ -110,7 +115,7 @@ function StatementTable({ layout, section, years, rows, nHist, hide }: {
         </tbody>
       </table>
     </div>
-  )
+  </>)
 }
 
 const SHOW = 10 // an export has ten quarters

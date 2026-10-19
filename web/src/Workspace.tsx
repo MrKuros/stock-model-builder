@@ -1,14 +1,16 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useAi, withFlagNotes, withNotes } from './Sources'
-import Note, { shortName } from './Note'
+import NotePage, { RulerSection, shortName } from './Note'
 import ModelView, { UPGRADED, type Upgrade } from './Model'
-import Evidence from './Evidence'
+import Summary from './Summary'
+import RisksPage from './Risks'
+import Documents from './Documents'
 import Fundamentals from './Fundamentals'
 import StatementsPage from './Statements'
 import ValuationPage from './Valuation'
 import { PeersSection } from './Peers'
 import { BottomBar, CHECK, DL, Next, PageHead, PhoneTop, Rail, Scale, Sheet, Verdict, openFinder, slugOf, type Here, type RailNote } from './Shell'
-import { SourceNote, ago, pendingMerge, streamFetch } from './Fetch'
+import { ago, pendingMerge, streamFetch } from './Fetch'
 import { Accuracy, Changed, latestScored, unreviewed } from './Tracking'
 import { month } from './Statements'
 import { HrefCtx, PAGES, REPORTED, STATEMENTS, pathOf, placed, type Href, type Page, type Route } from './route'
@@ -34,13 +36,14 @@ interface Props {
   onRetry: () => Promise<string | false>
   onRestore: () => void // the open older version becomes today's (today's is kept)
   onNotice: () => void // dismiss the other-tab notice
+  onDelete: () => Promise<void> // delete every version of this company (after a confirm), then go to the list
 }
 
 type Check = { state: 'idle' | 'running' | 'done'; msg: ReactNode }
 
 /** One company: the rail, the company bar, the phone bars and its pages. Stays mounted while you move between pages,
  * so the projection and every input are kept; /api/project runs again only when an input changes. */
-export default function Workspace({ route, models, parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, save, notice, onRetry, onRestore, onNotice }: Props) {
+export default function Workspace({ route, models, parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, save, notice, onRetry, onRestore, onNotice, onDelete }: Props) {
   const { company, years: histYears, drivers } = parsed
   const { n, scenarios, valuation, filings, notes, flag_notes, assumption_sources, excluded_years } = doc
   const peers = doc.peers ?? null
@@ -111,7 +114,6 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     })
 
   const [pendingYear, setPendingYear] = useState<string | null>(null)
-  const [defaultsNote, setDefaultsNote] = useState('')
   const toggleYear = async (year: string) => {
     if (pendingYear) return
     const ex = doc.excluded_years
@@ -121,8 +123,11 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
       const d = await api<Record<string, number>>('/api/defaults', postJson({ company, excluded_years: next, filings, notes }))
       setDefaults(d)
       setDoc(doc => ({ ...doc, excluded_years: next }))
-      setDefaultsNote(`Defaults ${next.length ? `now leave out ${histYears.filter(y => next.includes(y)).join(', ')}` : 'use every year again'}. ` +
-        'Your assumptions haven’t changed; Reset applies the new defaults to a scenario.')
+      // the rules' figures that moved are offered in one click (Use the new figures · Keep mine); nothing changes by itself
+      const kind = (k: string) => (byKey[k]?.[2] ?? 'pct') as Upgrade['kind']
+      setUpgrades(drivers.map(x => x[0]).filter(k => d[k] != null && fmt(d[k], kind(k)) !== fmt(scenarios.base[k]?.start ?? 0, kind(k))
+        && fmt(d[k], kind(k)) !== fmt(parsed.defaults[k] ?? 0, kind(k)))
+        .map(k => ({ key: k, label: byKey[k]?.[1] ?? k, kind: kind(k), from: scenarios.base[k]?.start ?? 0, to: d[k] })))
     } catch (e) { setError((e as Error).message) } finally { setPendingYear(null) }
   }
 
@@ -280,6 +285,9 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   }, [route, ready]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const common = { parsed, doc, setDoc, projection: proj }
+  const review = () => setDocRaw(d => ({ ...d, reviewed_at: d.reviewed_at ? null : new Date().toISOString() }))
+  const excelButton = (cls: string, word = 'Excel') => <button type="button" className={cls} onClick={exportXlsx} disabled={!proj || exporting}
+    aria-label={exporting ? 'Exporting to Excel' : 'Download as Excel, with live formulas'}>{DL}<span>{exporting ? 'Exporting…' : word}</span></button>
   const checkButton = (cls = 'btn') => chk.state === 'running'
     ? <span className="chk-run" role="status">Checking NSE… <button type="button" className="link" onClick={stopCheck}>Stop</button></span>
     : <button type="button" className={cls} onClick={check} aria-disabled={!sym || undefined}
@@ -287,12 +295,16 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
         {CHECK}<span>Check for new results</span></button>
   let page: ReactNode
   switch (route.page) {
-    case 'business': page = <Fundamentals parsed={parsed} tracking={tracking} />; break
-    case 'statements': page = <StatementsPage parsed={parsed} doc={doc} projection={proj} sub={route.sub} />; break
+    case 'business': page = <Fundamentals parsed={parsed} tracking={tracking} notes={doc.notes} />; break
+    case 'statements': page = <StatementsPage parsed={parsed} doc={doc} projection={proj} sub={route.sub} excel={excelButton('primary', 'Download Excel')} />; break
     case 'forecast': page = <ModelView {...common} anchor={route.anchor} upgrades={upgrades} onApply={applyUpgrades} />; break
-    case 'value': case 'priced-in': page = <ValuationPage {...common} />; break
-    case 'risks': case 'documents': page = <Evidence {...common} upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals}
-      toggleYear={toggleYear} pendingYear={pendingYear} defaultsNote={defaultsNote} />; break
+    case 'value': page = <ValuationPage {...common} />; break
+    case 'priced-in': page = <><RulerSection {...common} /><ValuationPage {...common} /></>; break // step C rebuilds this page
+    case 'risks': page = <RisksPage parsed={parsed} doc={doc} setDoc={setDoc} upgrades={upgrades} onApply={applyUpgrades} onKeep={() => setUpgrades([])}
+      onProposals={onProposals} toggleYear={toggleYear} pendingYear={pendingYear} />; break
+    case 'documents': page = <Documents {...common} versions={versions} upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals}
+      onCompany={onCompany} onDelete={onDelete} />; break
+    case 'note': page = <NotePage {...common} />; break
     case 'peers': page = <>
       <PageHead title="How does it compare?" purpose={<>{shortName(company.name)} next to listed companies in the
         same line of business, on size, growth, profitability and price.</>} />
@@ -329,7 +341,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
         })}</ul>}
       <Next lead="See how the latest results compare with the forecast."><a className="btn" href={href('changes')}>What changed?</a></Next></>
       break
-    default: page = <Note {...common} changed={<Changed doc={doc} setDoc={setDoc} projection={proj} />} provenance={<SourceNote company={company} doc={doc} onCompany={onCompany} />} />
+    default: page = <Summary {...common} check={checkButton()} checkMsg={chk.msg} onReview={review} />
   }
 
   // ---- the company bar: who, price against our value, then case, years, check and Excel in the same place everywhere ----
@@ -347,15 +359,14 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     </>
   )
   const controls = (where: 'bar' | 'sheet') => <Controls where={where} doc={doc} setDoc={setDoc} inert={inert} check={checkButton(where === 'sheet' ? 'btn wide' : 'btn')}
-    excel={<button type="button" className={where === 'sheet' ? 'btn wide' : 'btn'} onClick={exportXlsx} disabled={!proj || exporting}
-      aria-label={exporting ? 'Exporting to Excel' : 'Download as Excel, with live formulas'}>{DL}<span>{exporting ? 'Exporting…' : 'Excel'}</span></button>} />
+    excel={excelButton(where === 'sheet' ? 'btn wide' : 'btn')} />
   const foot = (
     <>
       <p className={save.error ? 'bad' : 'saved'}>{save.error
         ? <>Couldn’t save · <button type="button" className="link" onClick={onRetry}>Try again</button></>
         : route.version ? 'Older version: read only' : save.at ? `✓ Saved ${clock(save.at)}` : 'Not changed yet'}</p>
       <p>{doc.reviewed_at ? <span className="reviewed">● Reviewed {when(doc.reviewed_at).replace(/ \d{4}$/, '')}</span> : <span className="draft">○ Draft, not reviewed</span>}{' · '}
-        <button type="button" className="link" onClick={() => setDocRaw(d => ({ ...d, reviewed_at: d.reviewed_at ? null : new Date().toISOString() }))}>
+        <button type="button" className="link" onClick={review}>
           {doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed'}</button></p>
       {sym && <p>Prices checked {ago(company.source?.price_at)}</p>}
     </>
@@ -368,8 +379,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
         <a className="skip" href="#main" onClick={e => { e.preventDefault(); document.getElementById('main')?.focus() }}>Skip to the page</a>
         <Rail here={here} foot={foot} />
         <div className="col">
-          <PhoneTop short={short} menu={[{ label: doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed',
-            onClick: () => setDocRaw(d => ({ ...d, reviewed_at: d.reviewed_at ? null : new Date().toISOString() })) }]} />
+          <PhoneTop short={short} menu={[{ label: doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed', onClick: review }]} />
           <header className="bar" aria-label={`${company.name}: price, our value, case and years`}>
             <div className="bar-in">
               <div className="bar-id">
@@ -382,7 +392,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
               <button type="button" className="m-ctl btn" onClick={() => setSheet(true)} aria-haspopup="dialog">
                 {inert ? 'Reported years' : `${NAMES[doc.active]} · ${n} yrs`} ▾</button>
             </div>
-            {(chk.msg || merging) && route.page !== 'changes' && <p className="bar-msg" role="status">{merging ?? chk.msg}</p>}
+            {(merging || (chk.msg && route.page !== 'changes' && route.page !== 'summary')) && <p className="bar-msg" role="status">{merging ?? chk.msg}</p>}
           </header>
           <Sheet open={sheet} title="Case, years, new results and Excel" onClose={() => setSheet(false)}>{controls('sheet')}</Sheet>
           {route.version && <div className="notice-bar ro" role="region" aria-label="Older version">

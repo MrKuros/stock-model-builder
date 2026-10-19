@@ -1,7 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { ago, streamFetch } from './Fetch'
 import { Checks, useAi } from './Sources'
-import { useHref } from './route'
 import {
   api, fmt, money, postJson, type ModelDoc, type Parsed, type PeerCandidate, type PeerProposal, type PeerRow, type PeersDoc,
   type PeerTable, type Projection,
@@ -291,18 +290,8 @@ function Why({ p }: { p: PeersDoc }) {
   </details>
 }
 
-/** The Overview's one line: where the company ranks against its peers on three measures, or how to pick peers. */
-export function PeerLine({ doc, t, short }: { doc: ModelDoc; t: PeerTable | null | undefined; short: string }) {
-  const href = useHref()
-  const p = doc.peers
-  if (!p?.approved_at) return <p className="peer-line">No peers picked yet. <a href={href('valuation', 'peers')}>Compare {short} with listed peers</a></p>
-  const read = t?.peers.filter(r => r.metrics && p.chosen.includes(r.symbol ?? '')).length ?? 0
-  if (!t || !read) return <p className="peer-line">Peers picked, numbers not read yet. <a href={href('valuation', 'peers')}>Open the peer table</a></p>
-  return <p className="peer-line">{peerWords(t, read, short)} <a href={href('valuation', 'peers')}>Full peer table</a></p>
-}
-
 /** "Against 4 peers, TCS ranks 2nd of 5 on ROCE (...), ... and 3rd cheapest of 5 on P/E (...)." */
-function peerWords(t: PeerTable, read: number, short: string) {
+export function peerWords(t: PeerTable, read: number, short: string) {
   const bit = (k: string, what: string, kind: 'pct' | 'x', cheap = false) => t.rank[k] == null || t.median[k] == null ? null
     : `${cheap && t.rank[k] === 1 ? 'the cheapest' : `${ordinal(t.rank[k]!)}${cheap ? ' cheapest' : ''}`} of ${t.of[k]} on ${what} (${fmt(t.own.metrics?.[k], kind)} against a median ${fmt(t.median[k], kind)})`
   const parts = [bit('roce', 'ROCE', 'pct'), bit('g3', '3-year growth', 'pct'), bit('pe', 'P/E', 'x', true)].filter(Boolean) as string[]

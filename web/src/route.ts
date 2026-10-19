@@ -40,7 +40,7 @@ export function moved(page: string, anchor = ''): [Page, string] {
     case 'overview': return anchor === 'changed' ? ['changes', ''] : ['summary', anchor]
     case 'fundamentals': return ['business', anchor]
     case 'valuation': return anchor === 'hinges' || anchor === 'gap' ? ['priced-in', ''] : anchor === 'peers' ? ['peers', ''] : ['value', anchor]
-    case 'checks': return anchor === 'documents' || anchor === 'audit' || anchor.startsWith('src-') ? ['documents', anchor] : ['risks', anchor]
+    case 'checks': return anchor === 'documents' ? ['documents', 'add'] : anchor === 'audit' || anchor.startsWith('src-') ? ['documents', anchor.startsWith('src-') ? 'reading' : anchor] : ['risks', anchor === 'flags' ? 'signs' : anchor]
     case 'forecast': return anchor === 'tracking' ? ['changes', 'by-input'] : ['forecast', anchor]
   }
   return PAGES.some(p => p[0] === page) ? [page as Page, anchor] : ['summary', '']

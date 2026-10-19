@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { lower, type Upgrade } from './Model'
+import { useHref } from './route'
 import {
   api, dec2, DOC_KINDS, fmt, isAnnual, money, postJson, type ArNote, type DocKind, type ArValue, type Check, type Company, type Decided, type Filing,
   type FlagNote, type Forensic, type NotesPlan, type OneOffNote, type Proposal, type Report, type Sources as Used,
@@ -30,14 +31,10 @@ const amount = (k: string, v: number) => (PER_SHARE.has(k) ? `Rs ${dec2(v)}` : m
 
 /** Shown once at the top of a page with AI buttons when no AI command is set; each button then just says "AI is off". */
 export function AiOffNote({ ai }: { ai: AiStatus | null }) {
+  const href = useHref()
   if (!ai || ai.available) return null
-  return (
-    <details className="ai-off" id="ai-off">
-      <summary><b>AI writing is off on this computer.</b> The numbers and checks still work. How to turn it on</summary>
-      <p>Set <code>LLM_CMD</code> to a command that reads a prompt and prints a reply (the README shows examples), then
-        restart the app. The AI buttons on this page then work.</p>
-    </details>
-  )
+  return <p className="notice-in" id="ai-off">AI reading and writing is off. Everything else here is computed by rules.{' '}
+    <a href={href('documents', 'ai')}>How to turn it on</a></p>
 }
 
 export interface AiStatus { available: boolean; message: string | null; pdf?: boolean; pdf_message?: string | null }
@@ -47,7 +44,7 @@ export function useAi() {
   const [ai, setAi] = useState<AiStatus | null>(null)
   useEffect(() => {
     aiStatus ??= api<AiStatus>('/api/ai').then(x => (x.available ? x : { ...x,
-      message: 'AI is off (see the note at the top of this page).' }))
+      message: 'AI off' }))
       .catch(() => { aiStatus = null; return null })
     let live = true
     aiStatus.then(x => { if (live) setAi(x) })
@@ -133,14 +130,14 @@ interface Props {
   upgrades: Upgrade[] // defaults the last filing change moved
   onApply: () => void // use them in all three scenarios
   reports: Report[] // annual reports (attached here, or from the unusual-years panel)
-  onReports: (f: (rs: Report[]) => Report[]) => void
   years: string[] // reported years, for the report's year
   notes: Record<string, unknown> // approved notes ("ar:segments:FY2021"...)
+  part: 'filings' | 'reports' // Documents: the filings fold, or the annual-reports fold
 }
 
 /** Exchange filings attached to the model, read by fixed rules, and AI proposals waiting for a decision. */
 export default function Sources({
-  company, filings, proposals, onFilings, onProposals, sources, upgrades, onApply, reports, onReports, years, notes,
+  company, filings, proposals, onFilings, onProposals, sources, upgrades, onApply, reports, years, notes, part,
 }: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -238,7 +235,7 @@ export default function Sources({
   const sorted = [...filings].sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''))
   const apply = () => {
     onApply()
-    setNote('New defaults applied to base, bull and bear.')
+    setNote('The new figures are used in all three cases.')
     head.current?.focus() // the button is gone
   }
   const d = sources?.drivers ?? {}
@@ -247,37 +244,56 @@ export default function Sources({
   const arNotes = Object.entries(notes).filter(([k]) => k.startsWith('ar:')).map(([, v]) => v as ArNote)
     .sort((a, b) => b.year.localeCompare(a.year) || Object.keys(TOPICS).indexOf(a.topic) - Object.keys(TOPICS).indexOf(b.topic))
 
+  const status = <>{error && <p className="error" role="alert">{error}</p>}<p className="src-note" role="status">{note}</p></>
+  const mine = proposals.filter(p => (p.kind === 'mapping') === (part === 'filings') && p.kind !== 'assumption') // assumptions: Forecast
+  const props = mine.length > 0 && <>
+    <h3 className="src-sub">{part === 'filings' ? 'Suggested mappings' : 'What AI read, for you to approve'}</h3>
+    <ul className="src-list" aria-label="Proposals">{mine.map(p => <ProposalItem key={p.id} p={p} busy={!!busy} onDecide={decide} />)}</ul>
+  </>
+  if (part === 'reports') return (
+    <div className="sources">
+      <h3 ref={head} tabIndex={-1} className="sr">Reading the annual reports</h3>
+      <p className="muted small">Rules pick a few pages per topic (segments, debt maturity, capex, possible bills, dealings with
+        insiders, pledges, the auditor, a business that left, operating numbers); AI reads them and quotes each figure; rules check
+        the quotes and tie the sums to the statements; you approve. An approved capex figure becomes that year’s capex.
+        Transcripts and presentations are read only when the forecast asks AI to suggest inputs.</p>
+      {status}
+      {reports.filter(r => years.includes(r.year) && isAnnual(r)).sort((a, b) => b.year.localeCompare(a.year)).map(r => (
+        <div key={r.id} className="src-item"><h4>{r.year} annual report <span className="muted small">{r.file} · {r.pages} pages</span></h4>
+          <ReadNotes report={r} company={company} filings={filings} ai={ai} onProposals={onProposals} /></div>))}
+      {!reports.some(isAnnual) && <p className="small-note">No annual report attached yet: attach one under Documents above.</p>}
+      {arNotes.length > 0 && <section className="src-notes" aria-labelledby="src-notes-head">
+        <h3 id="src-notes-head" className="src-sub">Approved from the annual reports</h3>
+        <p className="muted small"><span className="prop-ai">AI-read</span>, checked by rules and approved by you. Rs crore.</p>
+        {arNotes.map(n => <ArNoteView key={`${n.topic}:${n.year}`} n={n} sources={sources} />)}
+      </section>}
+      {props}
+    </div>
+  )
   return (
-    <section className="sources" aria-labelledby="src-head">
-      <div className="val-top"><h2 id="src-head" ref={head} tabIndex={-1}>Filings and AI proposals</h2></div>
+    <div className="sources">
+      <h3 ref={head} tabIndex={-1} className="sr">Filings, line by line</h3>
       <p className="muted small">
-        Results filings from the exchanges, read by fixed rules and checked against the export’s figures. An annual
-        filing whose revenue matches the export’s adds that year’s trade payables, lease liabilities and cash-flow capex
-        to the model; the totals don’t move. Other filings are kept for reference.
+        Results filings from the exchanges (XBRL: the machine-readable results file on NSE or BSE), read by fixed rules and
+        checked against the reported figures. An annual filing whose revenue matches adds that year’s trade payables, lease
+        liabilities and cash-flow capex to the model; the totals don’t move. Other filings are kept for reference.
       </p>
       <label className={`drop drop-small ${over ? 'is-over' : ''}`} aria-busy={!!busy}
         onDragOver={e => { e.preventDefault(); setOver(true) }} onDragLeave={() => setOver(false)}
         onDrop={e => { e.preventDefault(); setOver(false); attach(e.dataTransfer.files[0]) }}>
         <input type="file" accept=".xml,text/xml,application/xml" className="visually-hidden" disabled={!!busy}
           onChange={e => { attach(e.target.files?.[0]); e.target.value = '' }} />
-        <span className="drop-title">{busy ?? 'Attach an XBRL results filing'}</span>
+        <span className="drop-title">{busy ?? 'Attach a results filing (XBRL)'}</span>
         {!busy && <span className="drop-sub">Drop it here or <u>choose a file</u> (.xml from NSE or BSE)</span>}
       </label>
-      {error && <p className="error" role="alert">{error}</p>}
-      <p className="src-note" role="status">{note}</p>
-      <div aria-live="polite">
-        {upgrades.length > 0 && (
-          <div className="src-upgrade">
-            <p className="small">
-              The filings and approved notes moved these defaults:{' '}
-              {upgrades.map((u, i) => <span key={u.key}>{i > 0 && '; '}{lower(u.label)} now{' '}
-                <span className="pencil-num">{fmt(u.to, u.kind)}</span> (base uses {fmt(u.from, u.kind)})</span>)}.
-              Your assumptions haven’t changed.
-            </p>
-            <button type="button" onClick={apply}>Use the new defaults in base, bull and bear</button>
-          </div>
-        )}
-      </div>
+      {status}
+      {upgrades.length > 0 && (
+        <div className="banner" role="status">
+          <p>The rules’ figures moved: {upgrades.map((u, i) => <span key={u.key}>{i > 0 && ' · '}{lower(u.label)} {fmt(u.from, u.kind)} → {fmt(u.to, u.kind)}</span>)}.
+            Your inputs haven’t changed.</p>
+          <div className="banner-act"><button type="button" className="btn" onClick={apply}>Use the new figures</button></div>
+        </div>
+      )}
       {(used.length > 0 || (sources?.notes.length ?? 0) > 0) && (
         <section className="src-used" aria-labelledby="src-used-head">
           <h3 id="src-used-head" className="src-sub">In the model from filings</h3>
@@ -290,110 +306,52 @@ export default function Sources({
           </ul>
         </section>
       )}
-
       {sorted.length > 0 && (
         <ul className="src-list" aria-label="Filings">
           {sorted.map(f => {
             const facts = Object.entries(f.facts)
             return (
               <li key={f.id} className="src-item">
-                <div className="src-head">
-                  <h3>{title(f)}</h3>
-                  <button type="button" className="link lib-del" onClick={() => remove(f)}
-                    aria-label={`Remove filing ${f.file}, ${title(f)}`}>Remove</button>
-                </div>
-                <p className="muted small src-meta">
-                  {f.file}{f.company && <> · {f.company}</>} · {facts.length} lines mapped · {f.unmapped.length} unmapped
-                </p>
-                {f.unmapped.length > 0 && (
-                  <div className="prop-ask">
-                    <button type="button" onClick={() => propose(f)} disabled={!ai?.available} aria-disabled={!!busy}
-                      aria-describedby={ai && !ai.available ? `ai-off-${f.id}` : undefined}>Propose mappings</button>
-                    <span className="muted small" id={`ai-off-${f.id}`} aria-busy={asking === f.id}>
-                      {asking === f.id ? busy : ai && !ai.available ? ai.message
-                        : 'AI suggests a line for each unmapped tag; rules check it and you approve it.'}
-                    </span>
-                  </div>
-                )}
-                <Checks checks={f.checks} />
-                {facts.length > 0 && (
-                  <details>
-                    <summary>Mapped lines ({facts.length})</summary>
-                    <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={`Mapped lines, ${f.file}`}>
+                <details className="sub-fold">
+                  <summary><b>{title(f)}</b>: {facts.length} lines read, {f.unmapped.length} the rules couldn’t place
+                    {f.checks.some(c => c.pass === false) ? ` · ${f.checks.filter(c => c.pass === false).length} check failed` : ''}</summary>
+                  <p className="muted small src-meta">{f.file}{f.company && <> · {f.company}</>}{' · '}
+                    <button type="button" className="link" onClick={() => remove(f)} aria-label={`Remove filing ${f.file}, ${title(f)}`}>Remove</button></p>
+                  <Checks checks={f.checks} />
+                  {f.unmapped.length > 0 && (
+                    <div className="prop-ask">
+                      <button type="button" className="btn" onClick={() => propose(f)} disabled={!ai?.available} aria-disabled={!!busy}
+                        aria-describedby={`ai-off-${f.id}`}>Let AI suggest where they go</button>
+                      <span className="muted small" id={`ai-off-${f.id}`} aria-busy={asking === f.id}>
+                        {asking === f.id ? busy : ai && !ai.available ? ai.message
+                          : 'AI suggests a line for each; rules check it and you approve it.'}
+                      </span>
+                    </div>
+                  )}
+                  {facts.length > 0 && <details><summary>Lines read ({facts.length})</summary>
+                    <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={`Lines read, ${f.file}`}>
                       <table className="src-table">
                         <thead><tr><th scope="col">Line</th><th scope="col">Rs crore</th></tr></thead>
                         <tbody>{facts.map(([k, v]) => <tr key={k}><th scope="row">{label(k)}</th><td>{amount(k, v)}</td></tr>)}</tbody>
                       </table>
-                    </div>
-                  </details>
-                )}
-                {f.unmapped.length > 0 && (
-                  <details>
-                    <summary>Unmapped tags ({f.unmapped.length})</summary>
-                    <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={`Unmapped tags, ${f.file}`}>
+                    </div></details>}
+                  {f.unmapped.length > 0 && <details><summary>Lines the rules couldn’t place ({f.unmapped.length})</summary>
+                    <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={`Lines the rules couldn’t place, ${f.file}`}>
                       <table className="src-table">
                         <thead><tr><th scope="col">XBRL tag</th><th scope="col">Value</th><th scope="col">Context</th></tr></thead>
                         <tbody>{f.unmapped.map((u, i) => (
                           <tr key={i}><th scope="row" className="src-tag">{u.tag}</th><td>{dec2(u.value)}</td><td>{u.context}</td></tr>
                         ))}</tbody>
                       </table>
-                    </div>
-                  </details>
-                )}
+                    </div></details>}
+                </details>
               </li>
             )
           })}
         </ul>
       )}
-
-      <section className="src-reports" aria-labelledby="src-ar-head">
-        <h3 id="src-ar-head" className="src-sub" tabIndex={-1}>Annual reports, call transcripts and presentations</h3>
-        <p className="muted small">
-          An annual report’s notes: segment revenue, debt maturity, capex, contingent liabilities and related-party
-          transactions. Rules pick a few pages per topic, AI reads them and quotes each figure, rules check the quotes
-          and tie the sums to the statements, and you approve. An approved capex figure becomes that year’s capex.
-          Transcripts and presentations are read only when you draft assumptions (Forecast page).
-        </p>
-        <AttachReport years={years} ai={ai} onReports={onReports} />
-        {reports.length > 0 && (
-          <ul className="src-list" aria-label="Attached documents">
-            {[...reports].sort((a, b) => b.year.localeCompare(a.year)).map(r => (
-              <li key={r.id} className="src-item">
-                <div className="src-head">
-                  <h4>{r.year} {DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}</h4>
-                  <button type="button" className="link lib-del" aria-label={`Remove ${r.file}, ${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}`}
-                    onClick={() => {
-                      if (!window.confirm(`Remove ${r.file} from this model? Its proposals and approved notes stay.`)) return
-                      onReports(rs => rs.filter(x => x.id !== r.id))
-                      head.current?.focus()
-                    }}>Remove</button>
-                </div>
-                <p className="muted small src-meta">{r.file} · {r.pages} pages · read by pdftotext; only the pages rules pick go to the model</p>
-                {years.includes(r.year) && isAnnual(r) && <ReadNotes report={r} company={company} filings={filings} ai={ai}
-                  onProposals={onProposals} />}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      {arNotes.length > 0 && (
-        <section className="src-notes" aria-labelledby="src-notes-head">
-          <h3 id="src-notes-head" className="src-sub">From the annual reports</h3>
-          <p className="muted small"><span className="prop-ai">AI-read</span>, checked by rules and approved by you. Rs crore.</p>
-          {arNotes.map(n => <ArNoteView key={`${n.topic}:${n.year}`} n={n} sources={sources} />)}
-        </section>
-      )}
-
-      {proposals.length > 0 && (
-        <>
-          <h3 className="src-sub">Proposals</h3>
-          <ul className="src-list" aria-label="Proposals">
-            {proposals.map(p => <ProposalItem key={p.id} p={p} busy={!!busy} onDecide={decide} />)}
-          </ul>
-        </>
-      )}
-    </section>
+      {props}
+    </div>
   )
 }
 
@@ -547,7 +505,7 @@ function ArNoteView({ n, sources }: { n: ArNote; sources?: Used }) {
 
 /** Attach a PDF (annual report, call transcript or investor presentation) for one of the reported years; its page text
  * stays on the server. One of each kind per year: a second replaces the first. */
-function AttachReport({ years, ai, onReports }: {
+export function AttachReport({ years, ai, onReports }: {
   years: string[]; ai: AiStatus | null; onReports: (f: (rs: Report[]) => Report[]) => void
 }) {
   const [year, setYear] = useState(years[years.length - 1])
@@ -627,7 +585,7 @@ function ReadNotes({ report, company, filings, ai, onProposals }: {
       } catch (e) { bad.push(`${TOPICS[t]}: ${(e as Error).message}`) }
     }
     setBusy(null)
-    setMsg({ text: [done.length ? `Read ${done.join(', ')}. Check them under Proposals; nothing is used until you approve it.` : '',
+    setMsg({ text: [done.length ? `Read ${done.join(', ')}. Check them under “What AI read, for you to approve”; nothing is used until you approve it.` : '',
       ...bad].filter(Boolean).join(' '), bad: !done.length })
   }
   const id = `notes-${report.id}`

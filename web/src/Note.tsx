@@ -1,30 +1,22 @@
-import { useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import Ruler from './Ruler'
-import { SEV, bySeverity } from './Evidence'
-import { AiOffNote, FlagNoteView, useAi } from './Sources'
-import { FundStrip } from './Fundamentals'
-import { PeerLine } from './Peers'
+import { bySeverity } from './Risks'
+import { FlagNoteView, useAi } from './Sources'
+import { cagrOf } from './Fundamentals'
+import { Next, PageHead, Sev } from './Shell'
 import { useHref } from './route'
 import {
-  api, fmt, type ArNote, money, postJson, rs, when, type Cagr, type Impact, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
+  api, fmt, money, postJson, rs, verdict, when, type Cagr, type Impact, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
   type Path, type Projection, type RuleCheck, type Row, type ThesisNote, type ValInputs, type Valuation,
 } from './lib'
 
 /** Average of a straight-line path over the projection: what "ours" means for a faded driver. */
 export const avg = (p: Path | undefined) => (p ? (p.start + (p.end ?? p.start)) / 2 : 0)
 export const shortName = (n: string) => n.replace(/\s+(ltd\.?|limited)$/i, '').trim()
-/** The name as a sentence subject: long legal names read as "the company" (the export carries no ticker). */
-const COMPANY = 'The company'
-const subject = (n: string) => (shortName(n).length <= 18 ? shortName(n) : COMPANY)
-/** Possessive: "Tata Motors’", "TCS’s" (plural-form names take the apostrophe alone). */
-const poss = (n: string) => (/[a-z]s$/.test(n) ? `${n}’` : `${n}’s`)
-const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen']
 const pc = (v: number) => fmt(v, 'pct')
 const DAYS = new Set(['dso', 'dio', 'dpo'])
 const unit = (key: string, v: number) => (DAYS.has(key) ? `${Math.round(v)} days` : pc(v))
 const stepText = (key: string, s: number) => (DAYS.has(key) ? `${s} days` : `${+(s * 100).toFixed(1)} pp`)
-const SEVERITY: Record<RuleCheck['status'], string> = { red: 'Red flag', amber: 'Amber flag', clear: 'Clear', filing: 'Needs a filing' }
-const LOW = (c: RuleCheck) => (c.severity === 'low' ? ' (low)' : '')
 const NAMES = { growth: 'Revenue growth', ebitda_margin: 'EBITDA margin', wacc: 'Discount rate (WACC)', g: 'Terminal growth' } as const
 
 /** A cited number: dotted underline, a footnote mark that jumps to the Notes list, the source on hover or focus. */
@@ -48,8 +40,6 @@ function Cite({ n, src, children, plain, uid }: { n: number; src: string; childr
 
 interface Props {
   parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null
-  changed?: ReactNode // right under the verdict: new results against your forecast (5.3)
-  provenance?: ReactNode // right under the verdict: where the numbers come from, for a company added by ticker
 }
 
 const refKey = (r: NoteRef) => (typeof r === 'string' ? r : JSON.stringify(r))
@@ -80,265 +70,148 @@ export function Prose({ text, refs, tn, refN, uid }: { text: string; refs: NoteR
   })}</>
 }
 
-/** Overview: the verdict first, then the business in five numbers, price against value, the checks, the thesis and
- * risks next to the key numbers, and where to go deeper. The how-it-is-valued detail lives on Valuation. */
-export default function Note({ parsed, doc, setDoc, projection, provenance, changed }: Props) {
-  const href = useHref()
-  const { company, years } = parsed
-  const hist = parsed.hist ?? company.hist
-  const name = subject(company.name)
-  // where the reported numbers came from: NSE's filings (added by ticker), an Excel export, or both
-  const filed = Object.values(company.source?.years ?? {})
-  const builtFrom = !company.source?.symbol ? 'an Excel export'
-    : filed.every(w => w === 'NSE filing') ? 'NSE results filings' : 'NSE results filings and an Excel export'
-  const nameIn = name === COMPANY ? 'the company' : name
+/** The company in a sentence: its short name when that's short, else its NSE symbol ("TCS", "Coal India"). */
+export const subjectOf = (c: { name: string; source?: { symbol?: string | null } | null }) =>
+  shortName(c.name).length <= 22 ? shortName(c.name) : c.source?.symbol ?? 'the company'
+/** Growth in words, never a signed rate: "grow 13.5%", "shrink 5.6%". */
+export const grow = (x: number) => (x < 0 ? `shrink ${pc(-x)}` : `grow ${pc(x)}`)
+const grew = (x: number) => (x < 0 ? `shrank ${pc(-x)}` : `grew ${pc(x)}`)
+/** Revenue growth a year over the last three reported years (null when either end isn't positive). */
+export const last3Of = (parsed: Parsed) => cagrOf((parsed.hist ?? parsed.company.hist).map(h => h.revenue ?? null), 3)
+
+export interface Fix { page: 'forecast' | 'value'; anchor: string; label: string }
+/** The central case's answer in one or two sentences, by rules: where the price sits against our three values and
+ * what sales growth the price assumes against the last three years. Summary and the research note both open with it. */
+export function verdictWords(parsed: Parsed, projection: Projection | null): { answer: ReactNode; fix: Fix | null } {
+  const name = subjectOf(parsed.company)
   const v = projection?.valuation ?? null
-  const sv = v?.scenarios.base
-  const value = sv?.per_share ?? null
-  const price = v?.price ?? null
+  if (!v) return { answer: <>Working out the value…</>, fix: null }
+  const sv = v.scenarios.base, value = sv.per_share, price = v.price
+  const bear = v.scenarios.bear.per_share, bull = v.scenarios.bull.per_share
+  const yrs = projection!.years, end = yrs[yrs.length - 1].replace(/E$/, '')
+  if (value == null) {
+    if (sv.error?.startsWith('Final-year free cash flow')) return {
+      answer: <>We can’t put a value on {name} yet: in {end} it still spends more cash than it makes, so there’s nothing to value.</>,
+      fix: { page: 'forecast', anchor: 'capex_pct', label: 'Fix the forecast: capex' } }
+    if (!v.error && v.shares == null) return { answer: <>We can’t put a value on {name} yet: there’s no share count.</>,
+      fix: { page: 'value', anchor: 'v-shares', label: 'Type the share count' } }
+    return { answer: <>We can’t put a value on {name} yet: {(v.error ?? sv.error ?? 'the inputs gave an error.').replace(/^./, c => c.toLowerCase())}</>,
+      fix: { page: 'value', anchor: '', label: 'Open How we value it' } }
+  }
+  if (value <= 0) return {
+    answer: <>At these inputs our central value leaves nothing for shareholders (<span className="num ours">Rs {rs(value)}</span> a share):
+      the business is worth less than its net debt.</>,
+    fix: { page: 'forecast', anchor: 'capex_pct', label: 'Fix the forecast: capex' } }
+  if (price == null) return { answer: <>Our central value is <span className="num ours">Rs {rs(value)}</span> a share. There’s no share
+    price in this file to compare it with.</>, fix: { page: 'value', anchor: 'v-price', label: 'Type a price' } }
+  const P = <span className="num mkt">Rs {rs(price)}</span>
+  const k = verdict(price, v.scenarios.bear.per_share != null ? { bear, base: value, bull } : { base: value }).kind
+  const first = k === 'dear' ? <>At {P} the market pays more than even our hopeful value.</>
+    : k === 'cheap' ? <>At {P} the price is below even our cautious value.</>
+    : <>At {P} the price sits inside our range{bear != null && bull != null ? <>, between our cautious <span className="num ours">Rs {rs(bear)}</span> and
+      hopeful <span className="num ours">Rs {rs(bull)}</span></> : null}.</>
+  const implied = sv.implied_growth ?? null, l3 = last3Of(parsed)
+  const second = implied == null ? <>No steady sales growth between −30% and +80% a year gets our central value to the price.</>
+    : l3 == null ? <>The price assumes sales {grow(implied)} a year.</>
+    : implied > l3 ? <>For the price to be fair, sales would need to {grow(implied)} a year; {name} {l3 < 0 ? 'has shrunk' : 'has managed'} {pc(Math.abs(l3))} a
+      year over the last three.</>
+    : <>The price assumes sales {grow(implied)} a year; {name} {grew(l3)} a year over the last three.</>
+  return { answer: <>{first} {second}</>, fix: null }
+}
+
+/** The ruler: price against our range on a value scale, and the yearly sales growth each value needs. */
+export function RulerSection({ parsed, doc, projection }: { parsed: Parsed; doc: ModelDoc; projection: Projection | null }) {
+  const href = useHref()
+  const v = projection?.valuation, sv = v?.scenarios.base, value = sv?.per_share
+  if (!v || value == null) return null
   const base = doc.scenarios.base
-  const ours = avg(base.growth)
-  const isDefault = base.growth.end == null && Math.abs(base.growth.start - parsed.defaults.growth) < 1e-9
-  const c3 = parsed.cagrs?.['3'] ?? [], c5 = parsed.cagrs?.['5'] ?? []
-  const best = (cs: Cagr[]) => (cs.length ? cs.reduce((a, b) => (b.value > a.value ? b : a)) : null)
-  const best3 = best(c3), best5 = best(c5)
-  // the price needs a flat rate for n years: compare it with runs of the same length (or the longest the data has)
-  const hz = Math.min(doc.n, hist.length - 1)
-  const runs: Cagr[] = hist.flatMap((h, i) => {
-    const a = i >= hz ? hist[i - hz].revenue : null, b = h.revenue
-    return a != null && b != null && a > 0 && b > 0 ? [{ from: years[i - hz], to: years[i], value: (b / a) ** (1 / hz) - 1 }] : []
-  })
-  const bestN = best(runs)
-  const implied = sv?.implied_growth ?? null
-  const bear = v?.scenarios.bear.per_share ?? null, bull = v?.scenarios.bull.per_share ?? null
-  const nb = v?.note ?? null
-  const checks = parsed.rule_checks ?? []
-  const last = years[years.length - 1]
+  const best = (cs: Cagr[] = []) => (cs.length ? cs.reduce((a, b) => (b.value > a.value ? b : a)) : null)
+  return (
+    <section className="instrument" aria-labelledby="ruler-h">
+      <header>
+        <h2 id="ruler-h" className="label">Price against value · <b>Rs a share</b>, and the growth each value needs</h2>
+        <a className="go" href={href('value')}>How we value it</a>
+      </header>
+      <p className="small-note">Top: value per share. Bottom: the yearly sales growth each value needs. Hatching: faster than any five
+        years on record.</p>
+      <Ruler price={v.price} bear={v.scenarios.bear.per_share} base={value} bull={v.scenarios.bull.per_share} scale={v.note?.growth_scale ?? null}
+        ours={avg(base.growth)} implied={sv!.implied_growth ?? null} best3={best(parsed.cagrs?.['3'])} best5={best(parsed.cagrs?.['5'])} since={parsed.years[0]} />
+      <details className="fold"><summary>How this is computed</summary>
+        <p className="small">The lower scale is our central value at a steady sales growth from −10% to +40% a year, other inputs as set
+          (operating margin {pc(avg(base.ebitda_margin))}, discount rate {pc(v.wacc)}, long-run growth {pc(v.g)}). The price’s growth is
+          searched from −30% to +80% a year until our central value equals the price.</p></details>
+    </section>
+  )
+}
 
-  // footnotes, numbered in reading order
-  const notes: { kind: string; text: ReactNode; quote?: string; to?: string }[] = []
-  const cite = (kind: string, text: ReactNode, quote?: string, to?: string) => { notes.push({ kind, text, quote, to }); return notes.length }
-  const nImplied = implied == null ? 0 : cite('Computed', <>Reverse DCF: the flat revenue growth, every projected year, at which base value equals the price; searched from −30% to +80%, other inputs as set.</>, undefined, href('checks', 'verdict'))
-  const nValue = cite('Computed', <>DCF of free cash flow to firm, base, bear and bull cases; WACC {v ? pc(v.wacc) : '–'}, terminal growth {v ? pc(v.g) : '–'}, valued at the {last} year end.</>, undefined, href('valuation'))
-  // the written note's refs, in reading order: facts (computed) and quotes (files), each a footnote linking to its evidence
+/** Writing the note: the LLM only when you press the button, from the computed facts and approved quotes; rules
+ * check every number, reference, quote and word before it is saved. */
+export function useWrite(doc: ModelDoc, setDoc: (f: (d: ModelDoc) => ModelDoc) => void) {
+  const [busy, setBusy] = useState(false)
+  const [fail, setFail] = useState<{ text: string; checks?: ThesisNote['checks'] } | null>(null)
+  const [done, setDone] = useState(false)
+  const write = async () => {
+    setBusy(true); setFail(null); setDone(false)
+    try {
+      const r = await api<ThesisNote>('/api/note/write', postJson(doc))
+      if (r.status === 'written') { setDoc(d => ({ ...d, note: r, reviewed_at: null })); setDone(true) } // new words: back to draft
+      else setFail({ text: 'The draft was rejected by the rule checks twice, so nothing was saved.', checks: r.checks.filter(c => c.pass === false) })
+    } catch (e) { setFail({ text: (e as Error).message }) } finally { setBusy(false) }
+  }
+  return { busy, fail, done, write }
+}
+
+const refsOf = (tn: ThesisNote) => [...tn.thesis.flatMap(p => p.refs), ...tn.risks.flatMap(p => p.refs)]
+
+/** Research note: the rules' verdict, then the AI's three points, priced in, risks and what to watch, and the key
+ * numbers. Every cited number has a footnote; the sources are folded at the foot. */
+export default function NotePage({ parsed, doc, setDoc, projection }: Props) {
+  const href = useHref()
+  const ai = useAi()
   const tn = doc.note
-  const refN = new Map<string, number>()
-  const factTo = (k: string) => (k.startsWith('flag_') ? href('checks', k.slice(5)) : k.startsWith('in_') ? href('forecast', k.slice(3))
-    : k.startsWith('oneoff_') ? href('checks', 'unusual') : href('valuation'))
-  const showCagr = value != null && price != null && implied != null && bestN != null
-  const nCagr = showCagr ? cite('Reported', <>Reported revenue ({builtFrom}): {runs.length} rolling {WORDS[hz] ?? hz}-year window{runs.length > 1 ? 's' : ''} from {years[0]}; fastest {bestN!.from}–{bestN!.to}.</>) : 0
   const stale = !!tn && projection?.inputs_hash != null && projection.inputs_hash !== tn.inputs_hash
-  // the written note's facts that the verdict already cites share its footnote (while the words match the inputs)
-  if (tn && !stale) { if (nImplied) refN.set('implied_growth', nImplied); if (nCagr) refN.set(`best${hz}`, nCagr) }
-
-  if (tn) for (const r of [...tn.thesis.flatMap(p => p.refs), ...tn.risks.flatMap(p => p.refs)]) {
+  const factTo = (k: string) => (k.startsWith('flag_') ? href('risks', k.slice(5)) : k.startsWith('in_') ? href('forecast', k.slice(3))
+    : k.startsWith('oneoff_') ? href('risks', 'unusual') : href('value'))
+  const notes: { kind: string; text: ReactNode; quote?: string; to?: string }[] = []
+  const refN = new Map<string, number>()
+  if (tn) for (const r of refsOf(tn)) {
     const k = refKey(r), s = refSource(tn, r)
     if (refN.has(k) || !s) continue
-    refN.set(k, cite(s.file ? `File p.${s.page}` : 'Computed', s.text, s.quote,
-      s.file ? href('checks', 'src-ar-head') : factTo(k)))
+    notes.push({ kind: s.file ? `File p.${s.page}` : 'Computed', text: s.text, quote: s.quote, to: s.file ? href('documents', 'reading') : factTo(k) })
+    refN.set(k, notes.length)
   }
   const P = (text: string, refs: NoteRef[], uid: string) => (tn ? <Prose text={text} refs={refs} tn={tn} refN={refN} uid={uid} /> : null)
-
-  // --- verdict ---
-  let h1: ReactNode, stand: ReactNode = null
-  // a dead end names its fix and links to it (App's anchor falls back to the element id, so focus lands on the input)
-  const fix = (to: string, label: string) => <> <a href={to === 'capex_pct' ? href('forecast', to) : href('valuation', to === 'valuation' ? '' : to)}>{label}</a></>
-  if (value == null) {
-    const why = !v ? 'the model is still calculating, or the inputs gave an error (see the line at the top).'
-      : v.error ?? (sv?.error && sv.error[0].toLowerCase() + sv.error.slice(1)) ?? (v.shares == null ? 'there is no share count. Type one on the Valuation page.' : 'see the Valuation page.')
-    const to = !v ? null : !v.error && v.shares == null ? 'v-shares' : !v.error && sv?.error?.startsWith('Final-year free cash flow') ? 'capex_pct' : 'valuation'
-    h1 = <>No value yet.</>
-    stand = <>Our base case has no value per share: {why}{to && fix(to, to === 'v-shares' ? 'Type the share count' : to === 'capex_pct' ? 'Open capex' : 'Open Valuation')} The
-      rule checks and key numbers below still apply.</>
-  } else if (value <= 0) { // debt worth more than the business at these inputs (Milky Mist with capex cut to a value)
-    h1 = <>Our base case leaves nothing for shareholders: <span className="ours">Rs {rs(value)}</span> a share.</>
-    stand = <>At these inputs the business is worth less than its net debt, so the shares carry no value. A higher margin,
-      lower capex or a lower discount rate (WACC {v ? pc(v.wacc) : '–'}) lifts it.{fix('capex_pct', 'Open capex')}</>
-  } else if (price == null) {
-    h1 = <>Our base value is <span className="ours">Rs {rs(value)}</span> a share.</>
-    stand = <>There’s no share price in this file, so nothing to compare it with.{fix('v-price', 'Type a price')}</>
-  } else if (implied != null) {
-    h1 = <>The price needs <Cite n={nImplied} src="Reverse DCF on our base case, computed by rules" plain><span className="mkt">{pc(implied)}</span></Cite> growth a year. {isDefault
-      ? <>{name} is doing <span className="ours">{pc(ours)}</span>.</>
-      : <>We assume <span className="ours">{pc(ours)}</span>.</>}</>
-  } else {
-    h1 = <>The price is <span className="mkt">{pc(Math.abs(price / value - 1))}</span> {price > value ? 'above' : 'below'} our base value.</>
-  }
-  if (value != null && value > 0 && price != null) {
-    const where = bull != null && price > bull ? <>the price sits {pc(price / bull - 1)} above even our bull case</>
-      : bear != null && price < bear ? <>the price sits {pc(1 - price / bear)} below even our bear case</>
-      : <>the price sits inside our range</>
-    stand = <>Our value range is <Cite n={nValue} src="DCF, bear to bull, computed by rules">Rs {bear != null ? rs(bear) : '–'} – {bull != null ? rs(bull) : '–'}</Cite> a
-      share, bear to bull. At <span className="num mkt">Rs {rs(price)}</span> {where}.{' '}
-      {implied == null
-        ? <>No flat revenue growth between −30% and +80% a year gets our base case to the price.</>
-        : bestN && <>{poss(name)} fastest {WORDS[hz] ?? hz} years since {years[0]}, <Cite n={nCagr} src={`Revenue CAGR ${bestN.from}–${bestN.to}, from reported revenue`}>{pc(bestN.value)}</Cite> a
-          year in {bestN.from}–{bestN.to.slice(-2)}, {bestN.value >= implied ? 'would get there' : 'would not get there'}{hz < doc.n
-            ? <> (the longest run in the data; the price needs {WORDS[doc.n] ?? doc.n} years)</> : null}.</>}</>
-  }
-
-  // how sure: the 50 sensitivity cells against the price
-  const cells: { v: number; what: string }[] = []
-  if (sv && v?.steps && price != null) {
-    sv.grid.forEach((r, i) => r.forEach((x, j) => x != null && cells.push({ v: x, what: `discount rate ${pc(v.wacc + v.steps!.wacc[i])} with ${pc(v.g + v.steps!.g[j])} terminal growth` })))
-    sv.grid_gm?.forEach((r, i) => r.forEach((x, j) => x != null && cells.push({ v: x, what: `growth ${sgn(v.steps!.growth[i])} and margin ${sgn(v.steps!.margin[j])}` })))
-  }
-  const over = cells.filter(c => c.v > price!)
-  const top = nb?.impact[0]
-  const be = nb?.breakevens ?? {}
-  const oursOf = (k: string) => (k === 'wacc' ? v?.wacc ?? 0 : k === 'g' ? v?.g ?? 0 : avg(base[k]))
-
+  const { answer } = verdictWords(parsed, projection)
   return (
     <>
-      <section className="verdict" aria-labelledby="page-h">
-        <div>
-          <p className="label">Summary · <b>central case</b> · what the price assumes against what the business does</p>
-          <h1 id="page-h" tabIndex={-1}>{h1}</h1>
-          {doc.active !== 'base' && <p className="small-note">This summary is about the base case. Your {doc.active} case
-            {v?.scenarios[doc.active].per_share != null ? <> is <span className="num ours">Rs {rs(v.scenarios[doc.active].per_share!)}</span> a share</> : ' has no value yet'}:{' '}
-            <a href={href('valuation', 'worth')}>see every case in Is it cheap?</a>.</p>}
-          {stand && <p className="lede">{stand}</p>}
-        </div>
-        {(sv?.upside != null || cells.length > 0 || top) && <aside className="sure" aria-label="How sure">
-          {sv?.upside != null && <div className="row">
-            <span className="label">{sv.upside < 0 ? 'Downside' : 'Upside'} to our base value</span>
-            <span className="big num">{sv.upside < 0 ? '−' : '+'}{pc(Math.abs(sv.upside))}</span>
-            <p>Base value <span className="num ours">Rs {rs(value!)}</span> against price <span className="num mkt">Rs {rs(price!)}</span>.</p>
-          </div>}
-          {cells.length > 0 && <div className="row">
-            <span className="label">How sure</span>
-            <p><strong>{over.length * 2 > cells.length ? over.length : cells.length - over.length} of {cells.length}</strong> sensitivity
-              cases value {nameIn} {over.length * 2 > cells.length ? 'above' : 'below'} the price.</p>
-            <div className="dots" role="img" aria-label={`${cells.length} squares: ${cells.length - over.length} below the price, ${over.length} above`}>
-              {[...cells].sort((a, b) => a.v - b.v).map((c, i) => <i key={i} className={c.v > price! ? 'over' : undefined} />)}
-            </div>
-            {(over.length > 0 && over.length <= 3) && <p>Above it: {over.map(c => c.what).join('; ')}.</p>}
-            {(cells.length - over.length > 0 && cells.length - over.length <= 3) && <p>Below it: {cells.filter(c => c.v <= price!).map(c => c.what).join('; ')}.</p>}
-          </div>}
-          {top && <div className="row">
-            <span className="label">Hinges on</span>
-            <p>{be[top.key as keyof typeof be]?.value != null
-              ? <>{top.label}. At <span className="num">{unit(top.key, be[top.key as keyof typeof be]!.value!)}</span> instead of our <span className="num">{unit(top.key, oursOf(top.key))}</span>, the price is fair.</>
-              : <>{top.label}: {stepText(top.key, top.step)} either way moves our value between <span className="num ours">Rs {rs(Math.min(top.down ?? top.up!, top.up ?? top.down!))}</span> and <span className="num ours">Rs {rs(Math.max(top.down ?? top.up!, top.up ?? top.down!))}</span>.</>}{' '}
-              <a className="go" href={href('valuation', 'hinges')}>What moves value</a></p>
-          </div>}
-        </aside>}
-      </section>
-      {changed}
-      {provenance}
-
-      <FundStrip parsed={parsed} />
-      <PeerLine doc={doc} t={projection?.peers} short={shortName(company.name)} />
-
-      {value != null && (
-        <section className="instrument" aria-labelledby="ruler-h">
-          <header>
-            <h2 id="ruler-h" className="label">Price against value · <b>Rs a share</b>, and the growth each value needs</h2>
-            <a className="go" href={href('valuation')}>How we value it</a>
-            <div className="legend" aria-hidden="true">
-              <span><i className="lg-band" />Our range, bear to bull</span>
-              <span><i className="lg-mkt" />Market price</span>
-              <span><i className="lg-hatch" />Not explained by our model</span>
-            </div>
-          </header>
-          <Ruler price={price} bear={bear} base={value} bull={bull} scale={nb?.growth_scale ?? null} ours={ours} implied={implied}
-            best3={best3} best5={best5} since={years[0]} />
-          <p className="read">
-            <span>Lower scale: five-year revenue growth each value needs, other inputs at base (margin {pc(avg(base.ebitda_margin))},
-              WACC {pc(v!.wacc)}, terminal {pc(v!.g)}). Red hatching: growth faster than the best five years on record.</span>
-            <a href={href('checks', 'verdict')}>How this is computed</a>
-          </p>
-        </section>
-      )}
-
-      <Strip checks={checks} />
-
+      <PageHead title="Research note"
+        purpose="A short analyst note written by AI from the numbers in this model. Rules check every number against the model before it’s saved; nothing here changes a number."
+        answer={answer} />
+      {ai && !ai.available && <p className="notice-in">AI writing is off. The verdict, risks and key numbers below are computed by rules.{' '}
+        <a href={href('documents', 'ai')}>How to turn it on</a></p>}
       <div className="ov-cols">
         <div className="col">
           <Thesis doc={doc} setDoc={setDoc} tn={tn} stale={stale} P={P} refN={refN} />
           <Risks parsed={parsed} doc={doc} tn={tn} P={P} />
         </div>
         <div className="col">
-          <KeyNumbers parsed={parsed} proj={projection?.scenarios.base[0] ?? null} next={projection?.years[0]} checks={checks} v={v} />
-          <OperatingNumbers notes={doc.notes} />
+          <KeyNumbers parsed={parsed} proj={projection?.scenarios.base[0] ?? null} next={projection?.years[0]} checks={parsed.rule_checks ?? []} v={projection?.valuation ?? null} />
         </div>
       </div>
-
-      <section className="sec deeper" aria-labelledby="next-h">
-        <h2 id="next-h" className="label sec-label"><span>Go deeper</span></h2>
-        <div className="onward">
-          <a href={href('forecast')}><b>Change the forecast</b><span>Growth {pc(avg(base.growth))}, margin {pc(avg(base.ebitda_margin))}: every input, where it came from, and a line to drag.</span></a>
-          <a href={href('valuation', 'gap')}><b>What would close the gap</b><span>{gapText(nb?.impact ?? [], value, price, oursOf)}</span></a>
-          <a href={href('checks', 'documents')}><b>Add documents</b><span>{(parsed.forensic ?? []).some(f => f.severity === 'not_checked' && f.needs)
-            ? `An annual report unlocks ${(parsed.forensic ?? []).filter(f => f.severity === 'not_checked' && f.needs).length} more checks and cited explanations.`
-            : 'Annual reports and call transcripts let the app draft inputs and explain flags, with quotes.'}</span></a>
-        </div>
-      </section>
-
-      <details className="notes audit">
-        <summary>Sources for the numbers on this page ({notes.length})</summary>
-        <ol>
-          {notes.map((n, i) => (
-            <li key={i} id={`fn-${i + 1}`} tabIndex={-1}>
-              <span className={`kind ${n.kind === 'Computed' ? 'rule' : 'file'}`}>{n.kind}</span>{n.text}
-              {n.quote && <q className="quote">{n.quote}</q>}
-              {n.to && <> <a href={n.to}>Open</a></>}
-            </li>
-          ))}
-        </ol>
-      </details>
-
-      <footer className="foot">
-        <p>Analysis, not a recommendation. Built from {builtFrom} and the rules in this app; no management access
-          or channel checks.</p>
-        <div className="key3" aria-label="How to read this note">
-          <span className="s1">{value != null ? <>{rs(value)} computed by rules</> : <>Numbers in mono: computed by rules</>}</span>
-          <span className="s2">Written words, AI, cited</span>
-          <span className="mkt">Market price</span>
-          <span className="ours">Our model</span>
-        </div>
-      </footer>
+      {notes.length > 0 && <details className="fold notes">
+        <summary>All sources ({notes.length})</summary>
+        <ol>{notes.map((n, i) => (
+          <li key={i} id={`fn-${i + 1}`} tabIndex={-1}>
+            <span className={`kind ${n.kind === 'Computed' ? 'rule' : 'file'}`}>{n.kind}</span>{n.text}
+            {n.quote && <q className="quote">{n.quote}</q>}{n.to && <> <a href={n.to}>Open</a></>}
+          </li>))}</ol>
+      </details>}
+      <p className="small-note">Analysis, not a recommendation.</p>
+      <Next lead="Read it and the risks? Mark the model as reviewed on the Summary."><a className="btn" href={href('summary')}>Mark as reviewed</a></Next>
     </>
   )
 }
 
-const sgn = (d: number) => (d === 0 ? 'as set' : `${d > 0 ? '+' : '−'}${+(Math.abs(d) * 100).toFixed(1)} pp`)
-
-/** Where a strip cell's evidence is on the Checks page. */
-const checkAnchor = (id: string) => (id.startsWith('oneoff-') ? 'unusual' : id)
-
-/** The rule checks: each lit one as its own cell, then one cell for the clear ones and one for those waiting on a
- * filing. Every cell is a link to its evidence on Checks. */
-function Strip({ checks }: { checks: RuleCheck[] }) {
-  const href = useHref()
-  if (!checks.length) return null
-  const lit = checks.filter(c => c.status === 'red' || c.status === 'amber')
-  const clear = checks.filter(c => c.status === 'clear'), filing = checks.filter(c => c.status === 'filing')
-  const red = lit.filter(c => c.status === 'red').length, amber = lit.length - red
-  return (
-    <section className="annun" aria-labelledby="flags-h">
-      <div className="strip-head">
-        <h2 id="flags-h" className="label">Warning signs · <b>{red} red · {amber} amber · {clear.length} clear{filing.length ? ` · ${filing.length} need the annual report` : ''}</b></h2>
-        <a className="go" href={href('checks')}>All warning signs, in What could go wrong?</a>
-      </div>
-      <div className="cells">
-        {lit.map((c, i) => (
-          <a key={c.id} href={href('checks', checkAnchor(c.id))} className={`cell ${c.status}${c.severity === 'low' ? ' low' : ''}`} style={{ animationDelay: `${i * 30}ms` }}
-            aria-label={`${SEVERITY[c.status]}${LOW(c)}: ${c.name}, ${c.fact}. Open its evidence.`}>
-            <span className="k">{c.name}</span>
-            <span className="v">{c.fact}</span>
-          </a>
-        ))}
-        {clear.length > 0 && <a className="cell clear" href={href('checks', 'clear')}>
-          <span className="k">{clear.length} check{clear.length > 1 ? 's' : ''} clear</span>
-          <span className="v">{clear.slice(0, 3).map(c => c.name).join('; ')}{clear.length > 3 ? '…' : ''}</span></a>}
-        {filing.length > 0 && <a className="cell filing" href={href('checks', 'src-ar-head')}>
-          <span className="k">{filing.length} not checked yet</span>
-          <span className="v">Attach the annual report →</span></a>}
-      </div>
-    </section>
-  )
-}
 
 /** The forensic flags, worst first, one plain sentence each with any approved explanation (AI-written, cited); then
  * the unusual years and data issues. Each line opens its evidence. */
@@ -359,9 +232,9 @@ function Risks({ parsed, doc, tn, P }: { parsed: Parsed; doc: ModelDoc; tn: Thes
           const n = doc.flag_notes.find(x => x.key === f.key)
           return (
             <li key={f.key}>
-              <p><span className={`sev ${f.severity}`}>{SEV[f.severity]}</span> {f.detail}</p>
+              <p><Sev level={f.severity} /> {f.detail}</p>
               {n && <FlagNoteView note={n} />}
-              <a className="small" href={href('checks', f.key)}
+              <a className="small" href={href('risks', f.key)}
                 aria-label={`${f.title}: ${n ? 'see it in What could go wrong?' : 'explain it in What could go wrong?'}`}>{n ? 'See it' : 'Explain it'}</a>
             </li>
           )
@@ -370,26 +243,26 @@ function Risks({ parsed, doc, tn, P }: { parsed: Parsed; doc: ModelDoc; tn: Thes
           const n = doc.notes[`oneoff:${o.year}`] as OneOffNote | undefined
           return (
             <li key={`${o.year}-${o.metric}`}>
-              <p><span className="sev year">Unusual year</span> {o.note}.</p>
+              <p><span className="sev year">Year that stands out</span> {o.note}.</p>
               {n && <div className="ai-note">
                 <span className="who">AI-written · {n.from_numbers ? 'from the numbers only' : 'cited'}</span>
                 <p className="serif">{n.summary}</p>
                 {n.quote && <p className="src-line"><span className="kind file">File</span>{n.file}, p.{n.page}: <q>{n.quote}</q></p>}
               </div>}
-              {!n && <a className="small" href={href('checks', 'unusual')}
+              {!n && <a className="small" href={href('risks', 'unusual')}
                 aria-label={`Explain ${o.year} from the annual report`}>Explain it from the annual report</a>}
             </li>
           )
         })}
         {issues.length > 0 && <li><p>{issues.length} issue{issues.length > 1 ? 's' : ''} in the reported data, e.g. {issues[0]}.</p>
-          <a className="small" href={href('checks', 'data')}>See them all</a></li>}
+          <a className="small" href={href('documents', 'data')}>See them all</a></li>}
       </ul>
       {tn && <div className="ai-note">
         <span className="who">AI-written · checked against the model</span>
         <ul className="ai-risks">{tn.risks.map((r, i) => <li key={i} className="serif">{P(r.text, r.refs, `r${i}`)}</li>)}</ul>
       </div>}
       {waiting.length > 0 && <p className="small-note">Not checked yet: {waiting.map(f => f.title.toLowerCase()).join(', ')}.{' '}
-        <a href={href('checks', 'src-ar-head')}>Attach the annual report</a></p>}
+        <a href={href('risks', 'waiting')}>What they wait for</a></p>}
     </section>
   )
 }
@@ -538,27 +411,6 @@ function KeyNumbers({ parsed, proj, next, checks, v }: {
   )
 }
 
-/** Operating numbers from the latest approved annual-report note (order book, headcount, attrition, volumes...), each in
- * the unit printed, with its quote. Read by AI, checked by rules, approved by you; they never feed a number. */
-function OperatingNumbers({ notes }: { notes: Record<string, unknown> }) {
-  const href = useHref()
-  const n = Object.entries(notes).filter(([k]) => k.startsWith('ar:kpis:')).map(([, x]) => x as ArNote)
-    .sort((a, b) => b.year.localeCompare(a.year))[0]
-  return (
-    <section className="sec kpis" aria-labelledby="kpis-h">
-      <h2 id="kpis-h" className="label sec-label"><span>Operating numbers · <b>{n ? `${n.year}, from the annual report` : 'none read yet'}</b></span></h2>
-      {n ? <>
-        <ul className="kpi-list">{n.rows.map((r, i) => (
-          <li key={i}><span>{r.label}</span> <b className="num">{r.amount == null ? '–' : r.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}{r.unit === '%' ? '%' : ` ${r.unit ?? ''}`}</b>
-            <span className="small dim"> p.{r.page}<span className="sr">: “{r.quote}”</span></span></li>))}</ul>
-        <p className="small-note">As printed in {n.file ?? 'the annual report'}, read by AI and approved by you; they don’t change any
-          number in the model. <a href={href('checks', 'documents')}>Quotes</a></p>
-      </> : <p className="small-note">Order book, headcount, attrition or volumes, as the annual report prints them: attach the
-        report on <a href={href('documents')}>Documents and sources</a> and read “Operating numbers”.</p>}
-    </section>
-  )
-}
-
 /** Computed moves toward and away from the price, from the one-step runs and the break-evens. */
 export function Change({ impact, base, price, oursOf, v, be, tn, P }: {
   impact: Impact[]; base: number; price: number; oursOf: (k: string) => number; v: Valuation; be: NonNullable<Valuation['note']>['breakevens']
@@ -606,35 +458,20 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
   doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; tn: ThesisNote | null; stale: boolean; P: Pr; refN: Map<string, number>
 }) {
   const ai = useAi()
-  const [busy, setBusy] = useState(false)
-  const [fail, setFail] = useState<{ text: string; checks?: ThesisNote['checks'] } | null>(null)
-  const [done, setDone] = useState(false)
+  const { busy, fail, done, write } = useWrite(doc, setDoc)
   const head = useRef<HTMLHeadingElement>(null)
-  const write = async () => {
-    setBusy(true)
-    setFail(null)
-    setDone(false)
-    try {
-      const r = await api<ThesisNote>('/api/note/write', postJson(doc))
-      if (r.status === 'written') {
-        setDoc(d => ({ ...d, note: r, reviewed_at: null })) // new words: back to draft
-        setDone(true)
-        // the "Write the note" button unmounts: put focus on the heading, unless you moved on during the wait
-        window.setTimeout(() => {
-          const a = document.activeElement
-          if (!a || a === document.body || head.current?.closest('section')?.contains(a)) head.current?.focus()
-        })
-      }
-      else setFail({ text: 'The note failed the rule checks twice, so it wasn’t saved.', checks: r.checks.filter(c => c.pass === false) })
-    } catch (e) { setFail({ text: (e as Error).message }) } finally { setBusy(false) }
-  }
+  // the "Write the note" button unmounts: put focus on the heading, unless you moved on during the wait
+  useEffect(() => {
+    if (!done) return
+    const a = document.activeElement
+    if (!a || a === document.body || head.current?.closest('section')?.contains(a)) head.current?.focus()
+  }, [done])
   const off = !ai?.available
   const button = (label: string) => (
     <div className="write">
-      <button type="button" className="btn" onClick={write} disabled={busy || off} aria-describedby="thesis-why">{busy ? 'Writing…' : label}</button>
-      <span id="thesis-why" className="small-note">{off ? (ai ? 'AI is off (see just below).' : 'Checking whether an AI command is set…')
-        : 'Sends only the computed facts and approved quotes on this page; rules check every number before it is saved.'}</span>
-      <AiOffNote ai={ai} />
+      <button type="button" className="btn" onClick={write} disabled={busy || off} aria-describedby="thesis-why">{busy ? 'Writing the note…' : label}</button>
+      <span id="thesis-why" className="small-note">{off ? (ai ? 'AI off' : 'Checking whether AI is on…')
+        : 'About a minute. Sends only the computed facts and approved quotes; rules check every number before it’s saved.'}</span>
     </div>
   )
   const nCites = tn ? Object.keys(tn.cites).length : 0
@@ -642,10 +479,10 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
   const after = tn && rec && rec.recorded_at > tn.written_at ? rec : null // new results since the note was written (5.3)
   return (
     <section className="sec thesis" aria-labelledby="thesis-h">
-      <h2 id="thesis-h" ref={head} tabIndex={-1} className="label sec-label"><span>Thesis · <b>3 points</b></span>
+      <h2 id="thesis-h" ref={head} tabIndex={-1} className="label sec-label"><span>Three points</span>
         <span className={`who${stale ? ' stale' : ''}`}>{!tn ? 'Not written yet' : stale ? 'Written for earlier inputs' : 'AI-written · cited'}</span></h2>
       <div aria-live="polite">
-        {busy && <p className="small-note">Writing the note from the numbers on this page. This takes a minute or two.</p>}
+        {busy && <p className="small-note">Writing the note · about a minute · you can leave this page.</p>}
         {done && !busy && <p className="sr">Note written and checked against the model.</p>}
         {fail && <div className="fail" role="alert"><p>{fail.text}</p>
           {fail.checks?.length ? <ul>{fail.checks.map(c => <li key={c.name}><strong>{c.name}:</strong> {c.detail}</li>)}</ul> : null}</div>}
@@ -687,7 +524,7 @@ function Thesis({ doc, setDoc, tn, stale, P, refN }: {
         <p className="small-note">AI-written {when(tn.written_at)} from the facts on this page{nCites ? ` and ${nCites} approved quote${nCites > 1 ? 's' : ''}` : ''},
           checked against the model: every number matches one the app computed or a cited quote{tn.rounds > 1 ? ' (passed on the retry)' : ''}.
           Analysis, not a recommendation.</p>
-        {button(after ? 'Rewrite the note with the new results' : 'Rewrite thesis')}
+        {button(after ? 'Rewrite the note with the new results' : 'Rewrite')}
       </>}
     </section>
   )
@@ -714,13 +551,4 @@ export function Bridge({ v, value, price, years }: { v: Valuation; value: number
       {sv.tv_share != null && <p className="small-note">{pc(sv.tv_share)} of value comes from after the forecast years (terminal value).</p>}
     </section>
   )
-}
-
-/** The two one-step moves that bring our value closest to the price, for the Overview's "close the gap" card. */
-function gapText(impact: Impact[], base: number | null, price: number | null, oursOf: (k: string) => number) {
-  if (base == null || price == null || !impact.length) return 'Each input moved one step: which ones bring our value toward the price.'
-  const moves = impact.flatMap(d => ([[d.down, -1], [d.up, 1]] as const).filter(m => m[0] != null).map(([val, s]) => ({
-    val: val as number, text: `${d.label} ${s > 0 ? 'up' : 'down'} ${stepText(d.key, d.step)} to ${unit(d.key, oursOf(d.key) + s * d.step)}`,
-  }))).filter(m => Math.abs(price - m.val) < Math.abs(price - base)).sort((a, b) => Math.abs(price - a.val) - Math.abs(price - b.val)).slice(0, 2)
-  return moves.length ? moves.map(m => `${m.text}: Rs ${rs(m.val)}`).join('. ') + '.' : 'No single step moves our value toward the price.'
 }
