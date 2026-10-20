@@ -4,13 +4,14 @@ import { riskWords } from './Risks'
 import { peerWords } from './Peers'
 import { yearSources } from './Documents'
 import { ago } from './Fetch'
-import { month } from './Statements'
+import { qfy } from './lib'
+import { growth } from './Statements'
 import { latestScored, unreviewed } from './Tracking'
 import { useAi } from './Sources'
 import { Next, PageHead, Scale, Stepper, Verdict } from './Shell'
 import { useHref } from './route'
 import { T } from './Term'
-import { NAMES, SEV_WORD, fmt, properName, rs, sevCounts, when, type Cagr, type ModelDoc, type Parsed, type Projection, type Severity } from './lib'
+import { NAMES, SEV_WORD, capOf, fmt, fy, money, properName, rs, sevCounts, when, type Cagr, type ModelDoc, type Parsed, type Projection, type Severity } from './lib'
 
 const pc = (v: number) => fmt(v, 'pct')
 
@@ -55,15 +56,16 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
   return (
     <>
       <PageHead label="Summary" title={properName(company.name).replace(/\s+(ltd\.?|limited)$/i, '').trim()}
-        purpose="Valuation, implied expectations, forensics, latest results and peers at a glance. Each card opens its page."
+        purpose="Valuation, implied expectations, forensics, latest results and peers."
         answer={answer} />
       {fixLink && <p className="fix-line">{fixLink}</p>}
       {doc.active !== 'base' && <p className="small-note">This page shows the base case. {NAMES[doc.active]}-case fair value:
         {v && (v.scenarios[doc.active].per_share ?? 0) > 0 ? <> <span className="num ours">Rs {rs(v.scenarios[doc.active].per_share!)}</span>/share</> : ' n/a'}.{' '}
         <a href={href('valuation')}>All scenarios on Valuation</a></p>}
-      {fresh && <div className="banner new" role="status"><p><b>New results: {s!.year.year}.</b> {vs(rev?.err)}</p>
+      {fresh && <div className="banner new" role="status"><p><b>New results: {fy(s!.year.year)}.</b> {vs(rev?.err)}</p>
         <div className="banner-act"><a className="btn" href={href('tracking')}>Results tracking</a></div></div>}
 
+      <KeyFinancials parsed={parsed} projection={projection} />
       <div className="cards">
         <article className="acard" aria-labelledby="q1">
           <h2 id="q1">Valuation</h2>
@@ -82,7 +84,7 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
             : implied == null ? <p className="serif">No flat revenue growth between −30% and +80% reconciles base-case FV to CMP.</p>
             : <>
               <p className="serif">CMP implies {pc(implied)} revenue <T k="cagr" /> for {doc.n} years.
-                {best5 && <> Best 5-year CAGR on record: {pc(best5.value)} ({best5.from}–{best5.to.slice(-2)}).</>}</p>
+                {best5 && <> Best 5-year CAGR on record: {pc(best5.value)} ({fy(best5.from)}–{best5.to.slice(-2)}).</>}</p>
               <Bars rows={[['Implied', implied, 'mkt'], ...(best5 ? [['Best 5-yr', best5.value, 'ink'] as const] : []), ...(l3 != null ? [['Last 3-yr', l3, 'ink'] as const] : [])]} />
             </>}
           <a className="go" href={href('reverse-dcf')}>Implied expectations</a>
@@ -97,9 +99,9 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
 
         <article className="acard" aria-labelledby="q4">
           <h2 id="q4">Results tracking</h2>
-          {fresh ? <p className="serif">New results: {s!.year.year}. {vs(rev?.err)}</p>
+          {fresh ? <p className="serif">New results: {fy(s!.year.year)}. {vs(rev?.err)}</p>
             : <p className="serif">No new results since the model was built{since ? ` (${when(since).replace(/ \d{4}$/, '')})` : ''}.
-              {' '}Latest filed: {lastQ ? `${month(lastQ)} quarter` : years[years.length - 1]}.</p>}
+              {' '}Latest filed: {lastQ ? qfy(lastQ) : fy(years[years.length - 1])}.</p>}
           {!fresh && <div className="acard-act">{check}</div>}
           {checkMsg && <p className="small" role="status">{checkMsg}</p>}
           <a className="go" href={href('tracking')}>Results vs forecast</a>
@@ -141,6 +143,50 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
         <button type="button" className={doc.reviewed_at || fix ? 'btn' : 'primary'} onClick={onReview}>{doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed'}</button>
       </Next>
     </>
+  )
+}
+
+/** Page 1 of a broker note: the last reported year and the first two base-case forecast years, with Mcap and EV at CMP. */
+function KeyFinancials({ parsed, projection }: { parsed: Parsed; projection: Projection | null }) {
+  const v = projection?.valuation
+  const p = projection?.scenarios.base
+  if (!v || !p?.length) return null
+  const hist = parsed.hist ?? parsed.company.hist, n = hist.length
+  const now = v.shares ?? null, lastShares = parsed.company.market?.shares_hist?.[n - 1] ?? now
+  const cols = [
+    { y: `${fy(parsed.years[n - 1])}A`, r: hist[n - 1], prev: n > 1 ? hist[n - 2] : null, sh: lastShares, e: false },
+    ...p.slice(0, 2).map((r, i) => ({ y: fy(projection!.years[i]).replace(/E?$/, 'E'), r, prev: i ? p[i - 1] : hist[n - 1], sh: now, e: true })),
+  ]
+  const cap = capOf(v)
+  const div = (a: number | null | undefined, b: number | null | undefined) => (a != null && b != null && b > 0 ? a / b : null)
+  const eps = (c: typeof cols[number]) => div(c.r.pat, c.sh)
+  const epsPrev = (i: number) => (i ? eps(cols[i - 1]) : div(cols[0].prev?.pat, cols[0].sh))
+  const lines: [ReactNode, (c: typeof cols[number], i: number) => string][] = [
+    ['Revenue', c => money(c.r.revenue)],
+    [<>Revenue <T k="yoy" /></>, c => fmt(growth(c.r.revenue, c.prev?.revenue), 'pct')],
+    [<T k="ebitda" />, c => money(c.r.ebitda)],
+    [<T k="ebitda_margin" />, c => fmt(div(c.r.ebitda, c.r.revenue), 'pct')],
+    [<T k="pat" />, c => money(c.r.pat)],
+    [<><T k="eps" /> (Rs)</>, c => { const e = eps(c); return e == null ? '–' : e.toFixed(2) }],
+    [<>EPS <T k="yoy" /></>, (c, i) => { const a = eps(c), b = epsPrev(i); return fmt(a != null && b != null && b > 0 ? a / b - 1 : null, 'pct') }],
+    [<T k="pe" />, c => { const e = eps(c); return fmt(v.price != null && e != null && e > 0 ? v.price / e : null, 'x') }],
+    [<T k="ev_ebitda" />, c => fmt(cap && (c.r.ebitda ?? 0) > 0 ? cap.ev / c.r.ebitda! : null, 'x')],
+    [<T k="roe" />, c => fmt(c.r.roe, 'pct')],
+    [<T k="roce" />, c => fmt(c.r.roce, 'pct')],
+  ]
+  return (
+    <section className="keyfin" aria-labelledby="kf-h">
+      <h2 id="kf-h">Key financials <span className="cnt">Rs cr · base case · multiples at CMP</span></h2>
+      <div className="table-wrap" tabIndex={0} role="region" aria-labelledby="kf-h">
+        <table className="kf-table">
+          <thead><tr><th scope="col"><span className="sr">Metric</span></th>{cols.map(c => <th scope="col" key={c.y} className={c.e ? 'proj' : undefined}>{c.y}</th>)}</tr></thead>
+          <tbody>{lines.map(([label, f], k) => <tr key={k}><th scope="row">{label}</th>
+            {cols.map((c, i) => <td key={c.y} className={c.e ? 'proj' : undefined}>{f(c, i)}</td>)}</tr>)}</tbody>
+        </table>
+      </div>
+      {cap && <p className="small muted">CMP Rs {rs(v.price!)} · <T k="mcap" /> Rs {money(cap.mcap)} cr · <T k="ev" /> Rs {money(cap.ev)} cr ·{' '}
+        <T k="net_debt" /> Rs {money(cap.ev - cap.mcap)} cr</p>}
+    </section>
   )
 }
 

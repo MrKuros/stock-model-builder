@@ -5,9 +5,10 @@ import { Confirm, More, Next, PageHead } from './Shell'
 import { ago, streamFetch, useMinute } from './Fetch'
 import { useHref } from './route'
 import {
-  DOC_KINDS, api, fmt, isAnnual, money, postJson, properName, rs, sourceLabel, when, type Company, type ModelDoc, type ModelSummary, type OneOffNote,
+  DOC_KINDS, api, fmt, fy, isAnnual, money, postJson, properName, rs, sourceLabel, when, type Company, type ModelDoc, type ModelSummary, type OneOffNote,
   type Parsed, type Projection, type Proposal,
 } from './lib'
+import { T } from './Term'
 
 const pc = (v: number) => fmt(v, 'pct')
 /** "FY2019 to FY2022, FY2024" from year labels. */
@@ -18,9 +19,9 @@ export function spans(ys: string[]) {
     if (p && +y.slice(2) === +p[1].slice(2) + 1) p[1] = y
     else out.push([y, y])
   }
-  return out.map(([a, b]) => (a === b ? a : `${a}–${b.slice(-2)}`)).join(', ')
+  return out.map(([a, b]) => (a === b ? fy(a) : `${fy(a)}–${b.slice(-2)}`)).join(', ')
 }
-const LOCAL = 'a 10-year history kept on this computer'
+const LOCAL = 'local 10-yr history'
 /** Where each reported year came from, in the allowed words only: [["NSE filings", "FY2023–26"], ["an Excel export", "FY2015–22"]]. */
 export function yearSources(company: Company, years: string[]): [string, string][] {
   const by = new Map<string, string[]>()
@@ -75,7 +76,7 @@ export default function Documents({ parsed, doc, setDoc, projection, versions, u
         <h2 id="docs-h">Documents</h2>
         <ul className="doc-rows">
           {from.filter(([l]) => l.startsWith('an Excel')).map(([, y]) => row(<>Excel export, {y}</>, 'Read by rules'))}
-          {from.filter(([l]) => l === LOCAL).map(([, y]) => row(<>Older years, {y}</>, 'NSE’s filings only go back to FY2023, so these came from a 10-year history kept on this computer · read by rules'))}
+          {from.filter(([l]) => l === LOCAL).map(([, y]) => row(<>Older years, {y}</>, 'NSE filings start FY23; earlier years from the local 10-yr history · read by rules'))}
           {s?.symbol && row(<>NSE annual results filings, {from.find(f => f[0] === 'NSE filings')?.[1] ?? 'none'}</>, 'Read by rules')}
           {doc.filings.length > 0 && row(<>Results filings kept with the model ({doc.filings.length})</>, 'Read by rules',
             <a href="#filings" onClick={() => { const d = document.getElementById('filings') as HTMLDetailsElement | null; if (d) d.open = true }}>Review</a>)}
@@ -268,8 +269,8 @@ function Audit({ parsed, doc, projection }: { parsed: Parsed; doc: ModelDoc; pro
       {sv && sv.per_share != null && sv.per_share > 0 && v && <Claim id="verdict" kind="rule"
         claim={<>Fair value: bear <span className="num">Rs {rs(v.scenarios.bear.per_share ?? NaN)}</span>, base <span className="num ours">Rs {rs(sv.per_share)}</span>,
           bull <span className="num">Rs {rs(v.scenarios.bull.per_share ?? NaN)}</span></>}
-        src={<>FCFF over {projection!.years.length} years discounted at WACC <span className="num">{pc(v.wacc)}</span> (Ke {pc(v.ke)}, post-tax
-          Kd {pc(v.kd_after_tax)}, {pc(v.we)} equity weight), terminal growth <span className="num">{pc(v.g)}</span>;
+        src={<><T k="fcff" /> over {projection!.years.length} years discounted at <T k="wacc" /> <span className="num">{pc(v.wacc)}</span> (<T k="ke" /> {pc(v.ke)}, post-tax
+          <T k="kd" /> {pc(v.kd_after_tax)}, {pc(v.we)} equity weight), terminal growth <span className="num">{pc(v.g)}</span>;
           equity value = EV − debt + cash + investments, over {v.shares != null ? `${money(v.shares)} cr` : 'no'} shares.</>} st="Rules ✓" />}
       {!((sv?.per_share ?? 0) > 0) && <Claim id="verdict" kind="rule" claim="No fair value" cls="wait"
         src={v?.error ?? sv?.error ?? 'No share count, or the model is still calculating.'} st="See Valuation" />}

@@ -51,10 +51,10 @@ DRIVERS = [
     ("mi_pct", "Minority & associates % of post-tax profit", "pct"),
     ("payout", "Dividend payout", "pct"),
     ("capex_pct", "Capex % revenue", "pct"),
-    ("dso", "Receivable days", "days"),
+    ("dso", "Debtor days", "days"),
     ("cogs_pct", "COGS % revenue", "pct"),
     ("dio", "Inventory days", "days"),  # on COGS or on revenue, see on_cogs()
-    ("dpo", "Payable days", "days"),  # same base as inventory days
+    ("dpo", "Creditor days", "days"),  # same base as inventory days
     ("oca_pct", "Other current assets % revenue", "pct"),
     ("ol_pct", "Other liabilities % revenue", "pct"),
     ("debt_change", "Planned borrowing change per year", "num"),
@@ -1226,6 +1226,12 @@ def _pct(v):
     return "0.0%" if s == "-0.0%" else s
 
 
+def _spct(v):
+    """A share that can be negative, accounting style: -0.0005 -> "(0.05%)"; under 0.1% it keeps two decimals."""
+    s = f"{abs(v):.1%}" if abs(v) >= 0.001 else f"{abs(v):.2%}"
+    return f"({s})" if v < 0 else s
+
+
 def detect_oneoffs(hist, labels, min_years=4):
     """Years where a metric is more than 2 sigma from the company's own median: [{year, metric, value, typical,
     note}]. sigma = 1.4826 x MAD, so the odd years themselves don't widen the band. A metric needs `min_years`
@@ -1393,16 +1399,16 @@ def forensic(hist, labels, notes=None):
                 f"Net profit over {span(k)} adds up to a loss, so cash conversion means nothing.", rule)
             continue
         cc = sum(h["cfo"] for h in w) / pat
-        add(key, title, _sev(cc, CASH_CONV, below=True), cc, CASH_CONV[1], labels[-k:], f"CFO {cc:.2f}x profit, {span(k)}",
+        add(key, title, _sev(cc, CASH_CONV, below=True), cc, CASH_CONV[1], labels[-k:], f"CFO/PAT {cc:.2f}x, {span(k)}",
             f"Over {span(k)} operating cash flow was {cc:.2f}x net profit: Rs {_inr(100 * cc)} of cash for every Rs 100 "
             f"of profit.", rule)
 
     # receivable and inventory days stretching faster than revenue (3 years)
     cogs = on_cogs(hist)
-    for key, title, line, base, what in (("dso", "Receivable days", "receivables", "revenue", "revenue"),
+    for key, title, line, base, what in (("dso", "Debtor days", "receivables", "revenue", "revenue"),
                                          ("dio", "Inventory days", "inventory", "cogs" if cogs else "revenue",
                                           "cost of goods" if cogs else "revenue")):
-        rule = (f"{line.capitalize()} x 365 / {what}, against 3 years before: up {DAYS_UP[2]:.0%} and {DAYS_MIN[2]} days low, "
+        rule = (f"{line.capitalize()} × 365 ÷ {what}, against 3 years before: up {DAYS_UP[2]:.0%} and {DAYS_MIN[2]} days low, "
                 f"{DAYS_UP[1]:.0%} and {DAYS_MIN[1]} days medium, {DAYS_UP[0]:.0%} and {DAYS_MIN[0]} days high")
         if n < 4:
             add(key, title, "not_checked", None, None, labels, "Needs 4 years", "Needs four reported years.", rule)
@@ -1456,8 +1462,8 @@ def forensic(hist, labels, notes=None):
         typ = _median_before(pct)
         if pct[-1] is not None and (pct[-1] < 0 or typ is not None and abs(pct[-1] - typ) > OI_SWING):
             sev = _worst(sev, "low")
-            fact = f"{_pct(pct[-1])} of revenue in {y}" + (f", median {_pct(typ)}" if typ is not None else "")
-            txt += (f" In {y} other income was Rs {_inr(last['other_income'])} cr, {_pct(pct[-1])} of revenue"
+            fact = f"{_spct(pct[-1])} of revenue in {y}" + (f", median {_pct(typ)}" if typ is not None else "")
+            txt += (f" In {y} other income was Rs {_inr(last['other_income'])} cr, {_spct(pct[-1])} of revenue"
                     + (f" against a median of {_pct(typ)} in the 3 years before" if typ is not None else "")
                     + ": other income here includes exceptional items, so this year's reported profit growth "
                     "isn't the business trend (our projection uses the median).")
@@ -1960,8 +1966,8 @@ def _implied(hist, a, period, wacc, g, per_share, price):
 # Payout, other income, interest and minorities don't move a cash-flow-to-firm value, so they aren't here.
 IMPACT = (("growth", "Revenue growth", GRID_GROWTH[3]), ("ebitda_margin", "EBITDA margin", GRID_MARGIN[3]),
           ("wacc", "Discount rate (WACC)", GRID_WACC[3]), ("g", "Terminal growth", GRID_G[3]),
-          ("capex_pct", "Capex % revenue", 0.01), ("tax_rate", "Tax rate", 0.02), ("dso", "Receivable days", 10.0),
-          ("dio", "Inventory days", 10.0), ("dpo", "Payable days", 10.0), ("oca_pct", "Other current assets", 0.01),
+          ("capex_pct", "Capex % revenue", 0.01), ("tax_rate", "Tax rate", 0.02), ("dso", "Debtor days", 10.0),
+          ("dio", "Inventory days", 10.0), ("dpo", "Creditor days", 10.0), ("oca_pct", "Other current assets", 0.01),
           ("ol_pct", "Other liabilities", 0.01), ("dep_pct", "Depreciation rate", 0.01))
 NON_NEG = {"capex_pct", "tax_rate", "dso", "dio", "dpo", "oca_pct", "ol_pct", "dep_pct"}  # a step down stops at 0
 GROWTH_SCALE = [round(-0.10 + 0.02 * i, 2) for i in range(26)]  # flat revenue growth, -10% to +40%, for the ruler
@@ -2037,11 +2043,11 @@ def projected_dates(co, n):
 # ponytail: minority share and planned borrowing aren't scored (a share of profit and a plan in crore, not a rate)
 TRACK = (("growth", "Revenue growth", 0.02), ("ebitda_margin", "EBITDA margin", 0.01),
          ("oi_pct", "Other income % revenue", 0.01), ("tax_rate", "Tax rate", 0.02), ("capex_pct", "Capex % revenue", 0.01),
-         ("dso", "Receivable days", 10.0), ("cogs_pct", "COGS % revenue", 0.02), ("dio", "Inventory days", 10.0),
-         ("dpo", "Payable days", 10.0), ("oca_pct", "Other current assets % revenue", 0.01),
+         ("dso", "Debtor days", 10.0), ("cogs_pct", "COGS % revenue", 0.02), ("dio", "Inventory days", 10.0),
+         ("dpo", "Creditor days", 10.0), ("oca_pct", "Other current assets % revenue", 0.01),
          ("ol_pct", "Other liabilities % revenue", 0.01), ("dep_pct", "Depreciation % opening net block", 0.01),
          ("int_rate", "Interest % opening borrowings", 0.01), ("payout", "Dividend payout", 0.10))
-TRACK_LINES = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "Net profit"), ("fcf", "Free cash flow"))
+TRACK_LINES = (("revenue", "Revenue"), ("ebitda", "EBITDA"), ("pat", "PAT"), ("fcf", "Free cash flow"))
 MAX_TRACK = 20  # forecasts kept per model, one per set of new annual results: twenty years of them
 
 

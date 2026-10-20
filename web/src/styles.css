@@ -1481,11 +1481,28 @@ html:has(.eff-wrap) { scroll-padding-bottom: 110px; }
 /* form fields' outlines at 3:1 or more (WCAG 1.4.11); --rule-2 stays for dividers */
 .sel, .draft-t input, .moved-f input { border-color: var(--ink-3); }
 
-/* a glossary term (Term.tsx): dotted underline; its definition on hover (title) and on keyboard focus (below) */
+/* a glossary term (Term.tsx): dotted underline; its definition on hover (title) and on any focus: tab, click or tap
+   (below). The ring is for the keyboard only. A term in the right half opens its box leftwards (data-end, set on focus). */
 abbr.gt { text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 3px; cursor: help; position: relative; }
+abbr.gt:focus { outline: none; }
 abbr.gt:focus-visible { outline: 2px solid var(--ours); outline-offset: 1px; border-radius: 2px; }
-abbr.gt:focus-visible::after {
-  content: attr(data-def); position: absolute; left: 0; top: calc(100% + 6px); z-index: 50; width: max-content; max-width: min(280px, 80vw);
+abbr.gt[data-end]:focus::after { left: auto; right: 0; }
+abbr.gt:focus::after {
+  content: attr(data-def); position: absolute; left: 0; top: calc(100% + 6px); z-index: 50; width: max-content; max-width: min(280px, calc(100vw - 32px));
   padding: 6px 8px; border: 1px solid var(--ink-3); border-radius: 4px; background: var(--panel); color: var(--ink);
   font: 400 12.5px/1.4 var(--ui); letter-spacing: 0; text-transform: none; white-space: normal; text-align: left;
 }
+/* phones and touch screens: a sheet pinned to the bottom of the screen, so it never widens the page or hides under a table edge */
+@media (max-width: 640px), (hover: none) {
+  abbr.gt:focus::after, abbr.gt[data-end]:focus::after {
+    position: fixed; left: 16px; right: 16px; top: auto; bottom: calc(16px + env(safe-area-inset-bottom)); width: auto; max-width: none;
+    padding: 10px 12px; font-size: 14px; box-shadow: 0 4px 16px rgb(0 0 0 / .18); z-index: 200;
+  }
+}
+/* Summary's key-financials strip: compact, numbers close to their labels */
+.keyfin { margin: 4px 0 24px; display: grid; gap: 8px; }
+.keyfin h2 { font: 700 18px/1.25 var(--ui); }
+.keyfin .table-wrap { margin: 0; }
+.kf-table { width: auto; min-width: min(100%, 520px); }
+.kf-table td { min-width: 9ch; }
+.kf-table tbody th { background: var(--ground); padding-left: 0; }

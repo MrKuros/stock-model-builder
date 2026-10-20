@@ -1,12 +1,13 @@
 import { useRef, type ReactNode } from 'react'
 import { Next, PageHead } from './Shell'
 import { STATEMENTS, navigate, useHref } from './route'
-import { fmt, money, properName, type LayoutLine, type LineKind, type ModelDoc, type Parsed, type Projection, type Quarters, type Row, type Ttm } from './lib'
+import { fmt, fy, money, properName, qfy, type LayoutLine, type LineKind, type ModelDoc, type Parsed, type Projection, type Quarters, type Row, type Ttm } from './lib'
+import { T } from './Term'
 
 const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf', 'fcf', 'fcff'])
 
 /** The quarterly tab's inputs: the export's quarters, TTM (and a year earlier), the last reported year (and the one before). */
-export interface QuarterProps { quarters: Quarters; ttm: Ttm | null; ttmPrev: Ttm | null; fy: string; last: Row; prev: Row | null }
+export interface QuarterProps { quarters: Quarters; ttm: Ttm | null; ttmPrev: Ttm | null; year: string; last: Row; prev: Row | null }
 const OPTIONAL = new Set(['cogs', 'lease', 'payables']) // shown only when some year has them
 import { NAMES } from './lib'
 
@@ -23,23 +24,26 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
   const rows = proj ? [...hist, ...proj] : hist
   const quarterly: QuarterProps | null = company.quarters?.dates.length ? {
     quarters: company.quarters, ttm: parsed.ttm ?? null, ttmPrev: parsed.ttm_prev ?? null,
-    fy: histYears[nHist - 1], last: hist[nHist - 1], prev: nHist > 1 ? hist[nHist - 2] : null,
+    year: histYears[nHist - 1], last: hist[nHist - 1], prev: nHist > 1 ? hist[nHist - 2] : null,
   } : null
   const tabs = STATEMENTS.filter(t => t[0] !== 'quarters' || quarterly || sub === 'quarters')
   const cur = STATEMENTS.find(t => t[0] === sub) ?? STATEMENTS[0]
   const tab = cur[2] as string
   const moved = parsed.sources?.moved_out
   const hide = parsed.sources?.basis === 'cogs' ? undefined : new Set(['cogs'])
+  // EPS per year: reported years on that year's share count where the export has it, the forecast on today's
+  const sh = company.market?.shares_hist ?? [], now = projection?.valuation.shares ?? company.market?.shares ?? null
+  const shares = rows.map((_, i) => (i < nHist ? sh[i] ?? now : now))
   return (
     <>
       <PageHead label="Data · Statements" title={cur[1]}
         purpose={tab === 'QUARTERS'
-          ? <>Last ten quarters as reported by {properName(parsed.company.name).replace(/\s+(ltd\.?|limited)$/i, '')}, the last full year, and TTM (run rate
-            vs the annual figure).</>
-          : tab === 'RATIOS' ? <>Margins, returns, working-capital days and leverage, every year. Reported in black; forecast in blue, marked E.</>
+          ? <>Last ten quarters as reported by {properName(parsed.company.name).replace(/\s+(ltd\.?|limited)$/i, '')}, the last full year, and <T k="ttm" />,
+            with <T k="yoy" /> and QoQ growth.</>
+          : tab === 'RATIOS' ? <>Margins, growth, returns, working-capital days, cash conversion and leverage, every year. Reported in black; forecast in blue, marked E.</>
           : <>Every line, every year. Reported in black; forecast in blue, marked E. Rs cr.</>}
-        answer={tab === 'QUARTERS' ? (quarterly ? <>Quarters to {month(quarterly.quarters.dates[quarterly.quarters.dates.length - 1])}.</> : <>No quarterly data in this file.</>)
-          : <>Reported {histYears[0]}–{histYears[nHist - 1].slice(-2)}{proj ? <>; {NAMES[active]}-case forecast to {projection!.years[n - 1]}</> : null}.</>} />
+        answer={tab === 'QUARTERS' ? (quarterly ? <>Quarters to {qfy(quarterly.quarters.dates[quarterly.quarters.dates.length - 1])}.</> : <>No quarterly data in this file.</>)
+          : <>Reported {fy(histYears[0])}–{histYears[nHist - 1].slice(-2)}{proj ? <>; {NAMES[active]}-case forecast to {fy(projection!.years[n - 1])}</> : null}.</>} />
       <nav className="stmt-tabs" aria-label="Statements">
         {tabs.map(([id, name]) => <a key={id} href={href('statements', '', id)} aria-current={id === cur[0] ? 'true' : undefined}>{name}</a>)}
       </nav>
@@ -52,25 +56,26 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
             ? <div className="table-wrap" tabIndex={0} role="region" aria-label="Quarterly results"><QuarterTable {...quarterly} /></div>
             : <p className="val-empty">No quarterly data in this Excel export. Exports with the Quarters block show the last ten quarters
                 and TTM here.</p>
-          : <StatementTable layout={layout} section={tab} years={years} rows={rows} nHist={nHist} hide={hide} />}
+          : <StatementTable layout={layout} section={tab} years={years} rows={rows} nHist={nHist} hide={hide} shares={shares}
+              cogs={parsed.sources?.basis === 'cogs'} />}
         {tab === 'PROFIT & LOSS' && proj && moved?.year === histYears[nHist - 1] && <p className="guard small">
           Forecast base is Rs {money((hist[nHist - 1].revenue ?? 0) - moved.revenue_out)} cr, not the reported Rs {money(hist[nHist - 1].revenue ?? 0)} cr:
           Rs {money(moved.revenue_out)} cr of {histYears[nHist - 1]} revenue ({moved.reason || 'divested business'}) deconsolidated, so the step down
           into {projection!.years[0]} is deliberate. <a href={href('forecast', 'growth')}>Edit in Forecast</a></p>}
         {tab === 'RATIOS' && (
           <p className="muted small">
-            ROE = PAT / average equity. ROCE = EBIT / average (equity + borrowings + lease liabilities), EBIT = profit before tax +
-            interest. Asset turnover = revenue / average total assets. Averages use opening and closing balances; the
-            first year uses closing. Net debt = borrowings + lease liabilities − cash − investments. – means not meaningful (zero or
-            negative denominator).
+            ROE = PAT ÷ average equity. ROCE = EBIT ÷ average (equity + borrowings + lease liabilities), EBIT = PBT +
+            interest. Asset turnover = revenue ÷ average total assets. Averages use opening and closing balances; the
+            first year uses closing. Days on year-end balances: debtor days on revenue, inventory and creditor days on
+            {parsed.sources?.basis === 'cogs' ? ' COGS' : ' revenue'}. Net debt = borrowings + lease liabilities − cash − investments.
+            – means not meaningful (zero or negative denominator).
           </p>
         )}
         {tab === 'QUARTERS' && quarterly && (
           <p className="muted small">
-            As reported, last {Math.min(quarterly.quarters.dates.length, SHOW)} quarters. EBITDA = PBT + interest + depreciation −
-            other income, as in the annual tables. TTM (trailing twelve
-            months) adds up the last four quarters{quarterly.ttm ? ` to ${month(quarterly.ttm.end)}` : ''}. YoY (year
-            on year) compares a quarter with the same quarter a year earlier, and TTM with the four quarters before it.
+            As reported, last {Math.min(quarterly.quarters.dates.length, SHOW)} quarters (Indian FY, April–March). EBITDA = PBT + interest + depreciation −
+            other income, as in the annual tables. TTM sums the last four quarters{quarterly.ttm ? ` to ${qfy(quarterly.ttm.end)}` : ''}.
+            YoY: against the same quarter a year earlier (TTM: the four quarters before). QoQ: against the previous quarter.
             {!quarterly.ttm && ' No TTM here: the last four quarters in the file aren’t consecutive.'}
           </p>
         )}
@@ -80,15 +85,56 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
   )
 }
 
-function StatementTable({ layout, section, years, rows, nHist, hide }: {
+/** Row labels as an analyst writes them (the engine's LAYOUT labels stay as they are for the Excel sheet). */
+const LABEL: Record<string, ReactNode> = {
+  pat: <T k="pat" />, pbt: 'PBT', roe: <T k="roe" />, roce: <T k="roce" />, nd_ebitda: 'Net debt/EBITDA', int_cover: 'Interest cover',
+  cfo: 'Cash from operations (CFO)', fcff: <T k="fcff" />, cwip: 'Capital WIP (CWIP)',
+}
+type Line = [label: ReactNode, key: string, kind: LineKind, get: (r: Row, i: number) => number | null | undefined]
+const div = (a: number | null | undefined, b: number | null | undefined) => (a != null && b != null && b > 0 ? a / b : null)
+/** A multiple as brokers print it: net cash instead of a negative leverage, and a cap on a meaningless cover. */
+function cell(key: string, v: number | null | undefined, kind: LineKind): string {
+  if (v != null && Number.isFinite(v) && key === 'eps') return v.toFixed(2)
+  if (v != null && key === 'nd_ebitda' && v < 0) return 'Net cash'
+  if (v != null && key === 'int_cover' && v > 100) return '>100x'
+  return fmt(v, kind)
+}
+
+function StatementTable({ layout, section, years, rows, nHist, hide, shares, cogs }: {
   layout: LayoutLine[]; section: string; years: string[]; rows: Row[]; nHist: number; hide?: Set<string>
+  shares: (number | null)[]; cogs: boolean
 }) {
-  const lines: [string, string, LineKind][] = []
+  let lines: Line[] = []
   let at = ''
   for (const [label, key, kind] of layout) {
     if (kind === 'head') at = label
     else if (key && at === section && !hide?.has(key) && !(OPTIONAL.has(key) && rows.every(r => !r[key])))
-      lines.push([label, key, kind as LineKind])
+      lines.push([LABEL[key] ?? label, key, kind as LineKind, r => r[key]])
+  }
+  // UI-only rows, from lines already here (no engine number changes)
+  const eps = (i: number) => div(rows[i].pat, shares[i])
+  const prev = (i: number, f: (j: number) => number | null | undefined) => (i ? div(f(i), f(i - 1)) : null)
+  const yoy = (f: (j: number) => number | null | undefined) => (_: Row, i: number) => { const g = prev(i, f); return g == null ? null : g - 1 }
+  if (section === 'PROFIT & LOSS') {
+    const at = lines.findIndex(l => l[1] === 'pat') + 1
+    lines.splice(at, 0, [<><T k="eps" /> (Rs)</>, 'eps', 'num', (_, i) => eps(i)])
+  }
+  if (section === 'RATIOS') {
+    const base = (r: Row) => (cogs ? r.cogs : r.revenue)
+    const lead: Line[] = [
+      [<T k="ebitda_margin" />, 'ebitda_margin', 'pct', r => div(r.ebitda, r.revenue)],
+      ['PAT margin', 'pat_margin', 'pct', r => div(r.pat, r.revenue)],
+      [<>Revenue <T k="yoy" /></>, 'rev_yoy', 'pct', yoy(j => rows[j].revenue)],
+      [<>EPS <T k="yoy" /></>, 'eps_yoy', 'pct', yoy(eps)],
+    ]
+    const days: Line[] = [
+      [<T k="dso" />, 'dso', 'days', r => div((r.receivables ?? 0) * 365, r.revenue)],
+      [<T k="dio" />, 'dio', 'days', r => div((r.inventory ?? 0) * 365, base(r))],
+      ...(rows.some(r => r.payables) ? [[<T k="dpo" />, 'dpo', 'days', (r: Row) => div((r.payables ?? 0) * 365, base(r))] as Line] : []),
+      [<T k="cfo_pat" />, 'cfo_pat', 'x', r => div(r.cfo, r.pat)],
+    ]
+    const turn = lines.findIndex(l => l[1] === 'asset_turnover') + 1
+    lines = [...lead, ...lines.slice(0, turn), ...days, ...lines.slice(turn)]
   }
   // opens at the first year; one button jumps to the latest
   const wrap = useRef<HTMLDivElement>(null)
@@ -106,16 +152,17 @@ function StatementTable({ layout, section, years, rows, nHist, hide }: {
             <td colSpan={nHist}>Reported</td>{nProj > 0 && <td colSpan={nProj} className="proj">Forecast →</td>}</tr>
           <tr>
             <th scope="col">{section === 'RATIOS' ? 'Ratio' : 'Rs cr'}</th>
-            {years.map((y, i) => <th scope="col" key={y} className={i >= nHist ? 'proj' : undefined}>{i >= nHist && !y.endsWith('E') ? `${y}E` : y}</th>)}
+            {years.map((y, i) => <th scope="col" key={y} className={i >= nHist ? 'proj' : undefined}>{fy(i >= nHist && !y.endsWith('E') ? `${y}E` : y)}</th>)}
           </tr>
         </thead>
         <tbody>
-          {lines.map(([label, key, kind]) => (
+          {lines.map(([label, key, kind, get]) => (
             <tr key={key} id={key} tabIndex={-1} className={TOTALS.has(key) ? 'total' : undefined}>
               <th scope="row">{label}</th>
-              {rows.map((r, i) => (
-                <td key={years[i]} className={i >= nHist ? 'proj' : undefined}>{fmt(r[key], kind)}</td>
-              ))}
+              {rows.map((r, i) => {
+                const v = get(r, i)
+                return <td key={years[i]} className={i >= nHist ? 'proj' : undefined}>{cell(key, v, kind)}</td>
+              })}
             </tr>
           ))}
         </tbody>
@@ -126,8 +173,6 @@ function StatementTable({ layout, section, years, rows, nHist, hide }: {
 
 const SHOW = 10 // an export has ten quarters
 const DAY = 86_400_000
-/** "2021-12-31T00:00:00" -> "Dec 2021" */
-export const month = (iso: string) => new Date(iso).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })
 /** a / b - 1, blank when the base isn't positive (growth off a loss means nothing) */
 export const growth = (a: number | null | undefined, b: number | null | undefined) =>
   a != null && b != null && b > 0 ? a / b - 1 : null
@@ -135,13 +180,15 @@ const margin = (op: number | null | undefined, sales: number | null | undefined)
   op != null && sales ? op / sales : null
 
 /** Last ten quarters in ink, then the last reported year and TTM, so the run rate sits next to the annual figure. */
-function QuarterTable({ quarters, ttm, ttmPrev, fy, last, prev }: QuarterProps) {
+function QuarterTable({ quarters, ttm, ttmPrev, year, last, prev }: QuarterProps) {
   const { dates, rows: q } = quarters
   const from = Math.max(0, dates.length - SHOW)
   const idx = dates.map((_, i) => i).slice(from)
   // same quarter a year earlier: four back, and really ~365 days back (a missing quarter shifts the index)
   const yearAgo = (i: number) =>
     i >= 4 && Math.abs((Date.parse(dates[i]) - Date.parse(dates[i - 4])) / DAY - 365) <= 15 ? i - 4 : -1
+  // the previous quarter: one back, and really ~91 days back
+  const qAgo = (i: number) => (i >= 1 && Math.abs((Date.parse(dates[i]) - Date.parse(dates[i - 1])) / DAY - 91) <= 15 ? i - 1 : -1)
   const at = (k: string, i: number) => (i < 0 ? null : q[k]?.[i] ?? null)
   const t = ttm?.values, tp = ttmPrev?.values
   const lines: [string, LineKind, (i: number) => number | null, number | null, number | null][] = [
@@ -153,17 +200,19 @@ function QuarterTable({ quarters, ttm, ttmPrev, fy, last, prev }: QuarterProps) 
     ['PAT', 'num', i => at('net_profit', i), last.pat, t?.net_profit ?? null],
     ['Revenue YoY', 'pct', i => growth(at('sales', i), at('sales', yearAgo(i))),
       growth(last.revenue, prev?.revenue), growth(t?.sales, tp?.sales)],
+    ['Revenue QoQ', 'pct', i => growth(at('sales', i), at('sales', qAgo(i))), null, null],
     ['PAT YoY', 'pct', i => growth(at('net_profit', i), at('net_profit', yearAgo(i))),
       growth(last.pat, prev?.pat), growth(t?.net_profit, tp?.net_profit)],
+    ['PAT QoQ', 'pct', i => growth(at('net_profit', i), at('net_profit', qAgo(i))), null, null],
   ]
   return (
     <table className="q-table">
       <thead>
         <tr>
           <th scope="col">Rs cr</th>
-          {idx.map(i => <th scope="col" key={dates[i]}>{month(dates[i])}</th>)}
-          <th scope="col" className="q-sum">{fy}</th>
-          {ttm && <th scope="col" className="q-sum"><abbr title="Trailing twelve months">TTM</abbr> {month(ttm.end)}</th>}
+          {idx.map(i => <th scope="col" key={dates[i]}>{qfy(dates[i])}</th>)}
+          <th scope="col" className="q-sum">{fy(year)}</th>
+          {ttm && <th scope="col" className="q-sum"><T k="ttm" /> {qfy(ttm.end)}</th>}
         </tr>
       </thead>
       <tbody>

@@ -5,9 +5,9 @@ import { FlagNoteView, useAi } from './Sources'
 import { cagrOf } from './Fundamentals'
 import { Next, PageHead, Sev } from './Shell'
 import { useHref } from './route'
-import { T } from './Term'
+import { T, def, type TermKey } from './Term'
 import {
-  api, clock, fmt, gap, money, postJson, properName, rs, verdict, when, type Cagr, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
+  api, clock, fmt, fy, gap, money, postJson, properName, rs, verdict, when, type Cagr, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
   type Path, type Projection, type RuleCheck, type Row, type ScenarioValue, type ThesisNote, type Valuation,
 } from './lib'
 
@@ -101,7 +101,7 @@ export function verdictWords(parsed: Parsed, projection: Projection | null): { a
   if (!v) return { answer: <>Running the DCF…</>, fix: null }
   const sv = v.scenarios.base, value = sv.per_share, price = v.price
   const bear = v.scenarios.bear.per_share, bull = v.scenarios.bull.per_share
-  const yrs = projection!.years, end = yrs[yrs.length - 1]
+  const yrs = projection!.years.map(fy), end = yrs[yrs.length - 1]
   if (sv.fix) return {
     answer: <>No fair value: {end} FCFF is negative, so the terminal value is undefined.{burnFix(sv.fix) ? <> {end} {burnFix(sv.fix)} turns it positive.</> : null}</>,
     fix: { page: 'forecast', anchor: 'capex_pct', label: 'Fix the forecast' } }
@@ -116,7 +116,7 @@ export function verdictWords(parsed: Parsed, projection: Projection | null): { a
     fix: { page: 'valuation', anchor: 'v-price', label: 'Enter CMP' } }
   const P = <span className="num mkt">Rs {rs(price)}</span>
   const pe = sv.multiples?.price_next.pe
-  const at = <>CMP {P}{pe != null ? <> ({pe.toFixed(1)}x {yrs[0]} P/E)</> : null}</>
+  const at = <><T k="cmp" /> {P}{pe != null ? <> ({pe.toFixed(1)}x {yrs[0]} <T k="pe" />)</> : null}</>
   const k = verdict(price, { bear, base: value, bull }).kind
   const g = gap(price, value)
   const first = k === 'dear' ? <>{at} is above bull-case fair value of {V(bull!)}; {g} to base-case {V(value)}.</>
@@ -252,7 +252,7 @@ function Risks({ parsed, doc, tn, P }: { parsed: Parsed; doc: ModelDoc; tn: Thes
           const n = doc.flag_notes.find(x => x.key === f.key)
           return (
             <li key={f.key}>
-              <p><Sev level={f.severity} /> {f.detail}</p>
+              <p><Sev level={f.severity} /> {fy(f.detail)}</p>
               {n && <FlagNoteView note={n} />}
               <a className="small" href={href('risks', f.key)}
                 aria-label={`${f.title}: ${n ? 'see it in Risks & forensics' : 'explain it in Risks & forensics'}`}>{n ? 'See it' : 'Explain it'}</a>
@@ -263,7 +263,7 @@ function Risks({ parsed, doc, tn, P }: { parsed: Parsed; doc: ModelDoc; tn: Thes
           const n = doc.notes[`oneoff:${o.year}`] as OneOffNote | undefined
           return (
             <li key={`${o.year}-${o.metric}`}>
-              <p><span className="sev year">Outlier year</span> {o.note}.</p>
+              <p><span className="sev year">Outlier year</span> {fy(o.note)}.</p>
               {n && <div className="ai-note">
                 <span className="who">AI-written · {n.from_numbers ? 'from the numbers only' : 'cited'}</span>
                 <p className="serif">{n.summary}</p>
@@ -310,7 +310,7 @@ function KeyNumbers({ parsed, proj, next, checks, v }: {
     const c = checks.find(c => c.id === id)
     return c && (c.status === 'red' || c.status === 'amber') ? c : null
   }
-  const show = (x: number | null, kind: string) => (x == null ? '–' : kind === 'x' ? `${x.toFixed(2)}×` : kind === 'days' ? `${Math.round(x)}` : fmt(x, 'pct'))
+  const show = (x: number | null, kind: string) => (x == null ? '–' : kind === 'x' ? `${x.toFixed(2)}x` : kind === 'days' ? `${Math.round(x)}` : fmt(x, 'pct'))
   // each measure opens where it is set (an input) or where it is reported (a statement row)
   const TO: Record<string, string> = { growth: href('forecast', 'growth'), ebitda_margin: href('forecast', 'ebitda_margin'), dso: href('forecast', 'dso'),
     pat_growth: href('statements', 'pat'), roce: href('statements', 'roce', 'ratios'), cash_conversion: href('statements', 'cfo', 'cash-flow') }
@@ -319,14 +319,14 @@ function KeyNumbers({ parsed, proj, next, checks, v }: {
     <section className="sec" aria-labelledby="keys-h">
       <h2 id="keys-h" className="label sec-label"><span>Key metrics</span></h2>
       <table className="keys">
-        <thead><tr><th scope="col"><span className="sr">Metric</span></th><th scope="col">{year}</th><th scope="col">3-yr median</th>
-          {p && <th scope="col" className="ours">{next}</th>}</tr></thead>
+        <thead><tr><th scope="col"><span className="sr">Metric</span></th><th scope="col">{fy(year)}</th><th scope="col">3-yr median</th>
+          {p && next && <th scope="col" className="ours">{fy(next)}</th>}</tr></thead>
         <tbody>
           {keys.map(k => {
             const f = flagged(k.key)
             return (
               <tr key={k.key}>
-                <th scope="row"><a className="quiet" href={TO[k.key] ?? href('statements')}>{k.label}</a></th>
+                <th scope="row"><a className="quiet" href={TO[k.key] ?? href('statements')} title={KT[k.key] ? def(KT[k.key]) : undefined}>{k.label}</a></th>
                 <td className="num">{f ? <span className="pen">{show(k.last, k.kind)}<svg aria-hidden="true" viewBox="0 0 100 40" preserveAspectRatio="none"><ellipse cx="50" cy="20" rx="47" ry="16" /></svg><span className="sr"> (flagged: {f.fact})</span></span> : show(k.last, k.kind)}</td>
                 <td className="num dim">{show(k.typical, k.kind)}</td>
                 {p && <td className="num ours">{show(nextOf[k.key] ?? null, k.kind)}</td>}
@@ -334,14 +334,17 @@ function KeyNumbers({ parsed, proj, next, checks, v }: {
             )
           })}
           {pe && pe.price_last.pe != null && <tr><th scope="row"><a className="quiet" href={href('valuation', 'yardsticks')}>P/E at CMP</a></th>
-            <td className="num">{pe.price_last.pe.toFixed(1)}×</td><td className="num dim">{v?.multiples?.median.pe != null ? `${v.multiples.median.pe.toFixed(1)}×` : '–'}</td>
-            {p && <td className="num ours">{pe.price_next.pe != null ? `${pe.price_next.pe.toFixed(1)}×` : '–'}</td>}</tr>}
+            <td className="num">{fmt(pe.price_last.pe, 'x')}</td><td className="num dim">{fmt(v?.multiples?.median.pe, 'x')}</td>
+            {p && <td className="num ours">{fmt(pe.price_next.pe, 'x')}</td>}</tr>}
         </tbody>
       </table>
       <p className="small-note">Black: reported. Grey: median of the prior three years{v?.multiples?.median.pe != null ? ' (P/E: all years)' : ''}. Blue: base-case forecast. Circled: a rule check flagged it.</p>
     </section>
   )
 }
+
+/** Key metrics whose label (a link) carries the glossary definition as its hover title. */
+const KT: Record<string, TermKey> = { roce: 'roce', cash_conversion: 'cfo_pat', ebitda_margin: 'ebitda_margin', dso: 'dso', growth: 'growth' }
 
 type Pr = (text: string, refs: NoteRef[], uid: string) => ReactNode
 
@@ -432,10 +435,10 @@ export function Bridge({ v, value, price, years }: { v: Valuation; value: number
       <h3 id="bridge-h" className="label sec-label"><span>Base-case FV bridge · <b>Rs/share</b></span></h3>
       <table className="keys">
         <tbody>
-          <tr><th scope="row">PV of FCFF {years[0]}–{years[years.length - 1].slice(-3)}</th><td className="num">{b(sv.pv_sum / v.shares)}</td></tr>
+          <tr><th scope="row">PV of FCFF {fy(years[0])}–{years[years.length - 1].slice(-3)}</th><td className="num">{b(sv.pv_sum / v.shares)}</td></tr>
           <tr><th scope="row">PV of terminal value</th><td className="num">{b(sv.pv_tv! / v.shares)}</td></tr>
-          <tr><th scope="row">{v.cash + v.investments - v.borrowings >= 0 ? 'Net cash' : '(Net debt)'}</th><td className="num">{b((v.cash + v.investments - v.borrowings) / v.shares)}</td></tr>
-          {(sv.minority ?? 0) > 0 && <tr><th scope="row">Minority interest</th><td className="num">{b(-sv.minority! / v.shares)}</td></tr>}
+          <tr><th scope="row">{v.cash + v.investments - v.borrowings >= 0 ? 'Add: net cash' : 'Less: net debt'}</th><td className="num">{b((v.cash + v.investments - v.borrowings) / v.shares)}</td></tr>
+          {(sv.minority ?? 0) > 0 && <tr><th scope="row">Less: minority interest</th><td className="num">{b(-sv.minority! / v.shares)}</td></tr>}
           <tr className="tot"><th scope="row">Base-case fair value</th><td className="num ours">{b(value)}</td></tr>
           {price != null && <tr><th scope="row">CMP {price >= value ? 'premium' : 'discount'} to FV</th><td className="num mkt">{b(Math.abs(price - value))}</td></tr>}
         </tbody>

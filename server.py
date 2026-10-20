@@ -1077,7 +1077,7 @@ def _rs(x):
 
 
 _pc = "{:.1%}".format
-SEVERITY_WORD = {"high": "Red", "medium": "Amber", "low": "Amber (low)"}
+SEVERITY_WORD = {"high": "High", "medium": "Medium", "low": "Low"}
 CASE = {"base": "base", "bear": "bear", "bull": "bull"}  # the scenario names every page uses
 IN_FACTS = ("growth", "ebitda_margin", "tax_rate", "capex_pct", "oi_pct")  # always stated, with where each came from
 MAX_CITES = 24  # ponytail: quotes only, never whole pages; the approved quotes already say what the pages hold
@@ -1188,7 +1188,7 @@ def _thesis_facts(doc: "ModelDoc"):
     radar = model.forensic(hist, labels, doc.notes)
     for x in sorted(radar, key=lambda x: model.SEVERITY.index(x["severity"])):  # red first, as the risks rank
         if x["severity"] in SEVERITY_WORD:
-            f[f"flag_{x['key']}"] = f"{SEVERITY_WORD[x['severity']]} rule check, {x['title']}: {x['fact']}. {x['detail']}"
+            f[f"flag_{x['key']}"] = f"{SEVERITY_WORD[x['severity']]}-severity rule check, {x['title']}: {x['fact']}. {x['detail']}"
         elif x["key"] in ("debt", "cover") and x["severity"] == "ok":  # leverage is a point for every note
             f[f"lev_{x['key']}"] = f"Passed rule check, {x['title']}: {x['fact']}. {x['detail']}"
     oneoffs = model.detect_oneoffs(hist, labels)

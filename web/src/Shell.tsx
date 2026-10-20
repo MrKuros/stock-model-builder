@@ -90,10 +90,10 @@ export const ScaleKey = () => (
     <span><i className="k-px" /> CMP</span><span>Log scale, FV ÷ CMP: right of centre = upside</span></p>
 )
 
-/** "Above bull FV · 22% downside": the verdict word and the gap to base FV, the same everywhere. */
-export function Verdict({ price, values, words = true }: { price: number | null | undefined; values: Partial<Record<Scenario, number | null>> | null | undefined; words?: boolean }) {
+/** "Above bull FV · 22% downside to base FV": the verdict word and the gap to base FV, the same everywhere. */
+export function Verdict({ price, values, words = true, to = 'base' }: { price: number | null | undefined; values: Partial<Record<Scenario, number | null>> | null | undefined; words?: boolean; to?: string }) {
   const v = verdict(price, values), g = words ? gap(price, values?.base) : null
-  return <span className={`vd ${v.kind}`}>{v.word}{g && v.kind !== 'fix' ? ` · ${g}` : ''}</span>
+  return <span className={`vd ${v.kind}`}>{v.word}{g && v.kind !== 'fix' ? ` · ${g} to ${to} FV` : ''}</span>
 }
 /** A severity: always a word, the colour only repeats it. */
 export const Sev = ({ level }: { level: Severity }) => <span className={`sev ${level}`}>{SEV_WORD[level]}</span>

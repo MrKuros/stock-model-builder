@@ -5,7 +5,7 @@ import { Next, PageHead } from './Shell'
 import { useHref } from './route'
 import { T, def } from './Term'
 import {
-  NAMES, copyBase, dec2, drifted, fmt, gap, money, noNegZero, verdict, type Cagr, type ModelDoc, type Multiple, type Parsed, type Projection,
+  NAMES, copyBase, dec2, drifted, fmt, fy, gap, money, noNegZero, verdict, type Cagr, type ModelDoc, type Multiple, type Parsed, type Projection,
   type Scenario, type ValInputs, type Valuation,
 } from './lib'
 
@@ -93,7 +93,7 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
   const P = price != null ? <span className="num mkt">Rs {rs(price)}</span> : null
   const V = shown != null ? <span className="num ours">Rs {rs(shown)}</span> : null
   const pe = sa?.multiples?.price_next.pe
-  const at = <>CMP {P}{pe != null && proj ? <> ({pe.toFixed(1)}x {proj.years[0]} P/E)</> : null}</>
+  const at = <><T k="cmp" /> {P}{pe != null && proj ? <> ({pe.toFixed(1)}x {fy(proj.years[0])} <T k="pe" />)</> : null}</>
   const answer: ReactNode = !v ? 'Running the DCF…'
     // the scenario you're on, not the base: its own reason and the way to fix it
     : (shown == null || shown <= 0) && active !== 'base' && !v.error && v.shares != null
@@ -148,7 +148,7 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
           <h2 id="yard-h">Multiples</h2>
           <div className="table-wrap yard-wrap" tabIndex={0} role="region" aria-labelledby="yard-h">
             <table className="yard">
-              <thead><tr><th scope="col"><span className="sr">Multiple</span></th><th scope="col">At CMP, {asOf}</th><th scope="col">At {NAMES[active].toLowerCase()} FV</th><th scope="col">Peer median</th></tr></thead>
+              <thead><tr><th scope="col"><span className="sr">Multiple</span></th><th scope="col">At CMP, {fy(asOf)}</th><th scope="col">At {NAMES[active].toLowerCase()} FV</th><th scope="col">Peer median</th></tr></thead>
               <tbody>{MULTS.map(([key]) => (
                 <tr key={key}><th scope="row"><T k={key} /></th><td className="num mkt">{fmt(m.price_last[key], 'x')}</td><td className="num ours">{fmt(m.value_last[key], 'x')}</td>
                   <td className="num">{peerMed ? fmt(peerMed[key], 'x') : '–'}</td></tr>))}</tbody>
@@ -166,7 +166,7 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
           <h2 id="from-h">Explicit period vs terminal value</h2>
           <p className="why">{tv > 0.6 ? <>Terminal value is {Math.round(tv * 100)}% of EV: fair value is highly sensitive to WACC and terminal growth.</>
             : <>Terminal value is {Math.round(tv * 100)}% of EV; most value sits in the explicit forecast.</>}</p>
-          <div className="two-bar" role="img" aria-label={`PV of FCFF ${proj!.years[0]}–${proj!.years[n - 1]} ${Math.round((1 - tv) * 100)}%, PV of TV ${Math.round(tv * 100)}%`}>
+          <div className="two-bar" role="img" aria-label={`PV of FCFF ${fy(proj!.years[0])}–${fy(proj!.years[n - 1])} ${Math.round((1 - tv) * 100)}%, PV of TV ${Math.round(tv * 100)}%`}>
             <span style={{ width: `${(1 - tv) * 100}%` }}>PV of FCFF, {n}Y {Math.round((1 - tv) * 100)}%</span>
             <span>PV of TV {Math.round(tv * 100)}%</span>
           </div>
@@ -175,7 +175,7 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
 
       <details className="fold blk" id="how">
         <summary><span><b>DCF inputs (8)</b>{v && <> · WACC {fmt(v.wacc, 'pct')} · TG {fmt(v.g, 'pct')}{edited ? ' · edited' : ' · defaults'}</>}</span></summary>
-        <p className="why">Common to all three scenarios. A grey placeholder is the fallback used until you enter a value.
+        <p className="why">Common to all three scenarios.
           {edited && <> <button type="button" className="link" onClick={() => onChange(() => defaults)}>Reset to defaults</button></>}</p>
         <div className="wacc" role="group" aria-label="WACC and terminal growth inputs">
           <Field id="v-rf" label="Risk-free rate (Rf)" term={def('rf')} unit="%" value={inputs.rf} onCommit={x => x != null && set('rf')(x)} />
@@ -212,13 +212,13 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
             <tbody>{ORDER.map(s => {
               const x = v.scenarios[s]
               return <tr key={s} className={s === active ? 'is-active' : undefined}><th scope="row">{NAMES[s]}</th><td>{money(x.ev)}</td><td>{money(x.equity)}</td>
-                <td>{x.per_share == null ? '–' : rs(x.per_share)}</td><td>{price != null && x.per_share != null ? gap(price, x.per_share) : '–'}</td></tr>
+                <td>{x.per_share == null ? '–' : rs(x.per_share)}</td><td>{price != null && x.per_share != null && x.per_share > 0 ? signed(x.per_share / price - 1) : '–'}</td></tr>
             })}</tbody>
           </table>
         </div>
         {v.scenarios.base.per_share != null && proj && <Bridge v={v} value={v.scenarios.base.per_share} price={price} years={proj.years} />}
         <p className="small muted">Equity value = EV − borrowings{v.lease ? ' incl. lease liabilities' : ''} Rs {money(v.borrowings)} cr + cash Rs {money(v.cash)} cr +
-          investments Rs {money(v.investments)} cr ({asOf}){v.nci > 0 && <> − minority interest ({fmt(v.nci, 'pct')} of PAT)</>}. TV: final-year FCFF growing at
+          investments Rs {money(v.investments)} cr ({fy(asOf)}){v.nci > 0 && <> − minority interest (NCI share of PAT, {fmt(v.nci, 'pct')}, applied to equity value)</>}. TV: final-year FCFF growing at
           {' '}{fmt(v.g, 'pct')} in perpetuity. FCFF = EBIT × (1 − t) + D&A − capex − Δ working capital.</p>
       </details>}
 
@@ -228,6 +228,8 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
 }
 
 
+/** Upside/(downside) in the accounting style of the column head: 12% or (83%). */
+const signed = (g: number) => { const t = noNegZero((Math.abs(g) * 100).toFixed(0)); return g < 0 && t !== '0' ? `(${t}%)` : `${t}%` }
 const pp = (d: number) => (d === 0 ? 'base' : `${d > 0 ? '+' : '−'}${Math.abs(d * 100)}`)
 
 /** A 5 × 5 grid: cells at or above CMP get ▲ and an outline; the current cell is boxed and labelled "base". */
@@ -280,8 +282,8 @@ export function PricedIn({ parsed, doc, projection }: Props) {
     : value == null || value <= 0 ? <NoValue parsed={parsed} projection={projection} />
     : price == null ? <>No CMP, so nothing to solve for.</>
     : implied == null ? <>No flat revenue growth between −30% and +80% reconciles base-case FV to {P}.</>
-    : <>CMP {P} implies {fmt(implied, 'pct')} revenue CAGR over {doc.n} years (other drivers at base){ours != null ? <> vs {fmt(ours, 'pct')} in our base case</> : null}.
-      {l3 != null && <> Last 3 years: {fmt(l3, 'pct')}.</>}{b5 && <> Best 5-year CAGR: {fmt(b5.value, 'pct')} ({b5.from}–{b5.to.slice(-2)}).</>}</>
+    : <><T k="cmp" /> {P} implies {fmt(implied, 'pct')} revenue <T k="cagr" /> over {doc.n} years (other drivers at base){ours != null ? <> vs {fmt(ours, 'pct')} in our base case</> : null}.
+      {l3 != null && <> Last 3 years: {fmt(l3, 'pct')}.</>}{b5 && <> Best 5-year CAGR: {fmt(b5.value, 'pct')} ({fy(b5.from)}–{b5.to.slice(-2)}).</>}</>
   return (
     <>
       <PageHead label="Analysis · Reverse DCF" title="Reverse DCF"
@@ -321,9 +323,12 @@ function Moves({ parsed, doc, v, value, price }: { parsed: Parsed; doc: ModelDoc
   const x = (n: number) => 50 + ((n - value) / w) * 50
   const tag = (k: string, need: number | null): ReactNode => {
     if (need == null) return null
-    if (k === 'wacc' || k === 'g') return <span className="tg judge">judgemental</span>
+    if (k === 'wacc' || k === 'g') {
+      const bps = Math.round((need - ours(k)) * 10000)
+      return <span className="tg judge">{bps > 0 ? '+' : bps < 0 ? '−' : ''}{Math.abs(bps)} bps vs base</span>
+    }
     const rec = k === 'growth' ? b5?.value : bestM?.[0]
-    return rec != null && need > rec ? <span className="tg never" title={k === 'growth' && b5 ? `Best 5-year CAGR: ${fmt(b5.value, 'pct')} (${b5.from}–${b5.to.slice(-2)})` : bestM ? `Best year: ${fmt(bestM[0], 'pct')} (${bestM[1]})` : undefined}>above track record</span>
+    return rec != null && need > rec ? <span className="tg never" title={k === 'growth' && b5 ? `Best 5-year CAGR: ${fmt(b5.value, 'pct')} (${fy(b5.from)}–${b5.to.slice(-2)})` : bestM ? `Best year: ${fmt(bestM[0], 'pct')} (${fy(bestM[1])})` : undefined}>above track record</span>
       : <span className="tg ok">within track record</span>
   }
   const tryIt = (k: string) => (k === 'wacc' || k === 'g' ? href('valuation', 'how') : href('forecast', k))
@@ -483,14 +488,14 @@ function Multiples({ v, active, asOf, next }: { v: Valuation; active: Scenario; 
             </tr>
             <tr>
               <th scope="col">Median</th><th scope="col">Low–high</th>
-              <th scope="col">{asOf}</th><th scope="col">{next}</th>
-              <th scope="col" className="ours">{asOf}</th><th scope="col" className="ours">{next}</th>
+              <th scope="col">{fy(asOf)}</th><th scope="col">{fy(next)}</th>
+              <th scope="col" className="ours">{fy(asOf)}</th><th scope="col" className="ours">{fy(next)}</th>
             </tr>
           </thead>
           <tbody>
-            {MULTS.map(([k, name, what]) => (
+            {MULTS.map(([k]) => (
               <tr key={k}>
-                <th scope="row"><abbr className="gt" title={what} data-def={what} tabIndex={0}>{name}</abbr></th>
+                <th scope="row"><T k={k} /></th>
                 <td>{x(h.median[k])}</td>
                 <td>{h.min[k] == null ? '–' : `${x(h.min[k])}–${x(h.max[k])}`}</td>
                 {cell(k, m.price_last[k], false)}{cell(k, m.price_next[k], false)}

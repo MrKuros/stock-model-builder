@@ -1,7 +1,7 @@
-import type { ReactNode } from 'react'
+import type { FocusEvent, ReactNode } from 'react'
 
 /** The one glossary: every abbreviation or term the app labels with, defined once. <T k="wacc" /> prints the label
- * and shows the definition on hover (title) and on keyboard focus (CSS, .gt:focus-visible::after). */
+ * and shows the definition on hover (title) and on focus by tab, click or tap (CSS, .gt:focus::after). */
 export const GLOSSARY = {
   cmp: ['CMP', 'Current market price per share (NSE last traded, or the price you typed)'],
   fv: ['FV', 'Fair value per share: DCF equity value ÷ shares outstanding'],
@@ -48,6 +48,8 @@ export const GLOSSARY = {
   bps: ['bps', 'Basis points: 100 bps = 1 pp'],
   cr: ['Rs cr', 'Rupees crore: 1 crore = 10 million'],
   mscore: ['Beneish M-score', 'Eight-ratio earnings-manipulation score; above −1.78 is a red flag'],
+  pbt: ['PBT', 'Profit before tax'],
+  cwip: ['CWIP', 'Capital work in progress: capex not yet commissioned, so not yet depreciated'],
   cfo_pat: ['CFO/PAT', 'Cash from operations ÷ PAT: cash conversion of reported profit'],
   sens: ['Sensitivity', 'Fair value per share across a grid of two inputs, others at base'],
 } as const satisfies Record<string, readonly [string, string]>
@@ -56,8 +58,12 @@ export type TermKey = keyof typeof GLOSSARY
 /** The definition of a term, for a title="" elsewhere. */
 export const def = (k: TermKey) => GLOSSARY[k][1]
 
+/** A term in the right half of the screen opens its definition leftwards, so the box stays on screen. */
+export const edge = (e: FocusEvent<HTMLElement>) =>
+  e.currentTarget.toggleAttribute('data-end', e.currentTarget.getBoundingClientRect().left > window.innerWidth / 2)
+
 /** A labelled term: the standard abbreviation, its definition on hover and on focus. */
 export function T({ k, children }: { k: TermKey; children?: ReactNode }) {
   const d = GLOSSARY[k][1]
-  return <abbr className="gt" title={d} data-def={d} tabIndex={0}>{children ?? GLOSSARY[k][0]}</abbr>
+  return <abbr className="gt" title={d} data-def={d} tabIndex={0} onFocus={edge}>{children ?? GLOSSARY[k][0]}</abbr>
 }

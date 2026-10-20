@@ -3,7 +3,7 @@ import { useWidth } from './Ruler'
 import { More, Next, PageHead, Sev } from './Shell'
 import { useHref } from './route'
 import { forecastOf } from './Tracking'
-import { fmt, money, properName, shortYear, type ArNote, type Forensic, type Parsed, type Row, type Tracking } from './lib'
+import { fmt, money, properName, fy, type ArNote, type Forensic, type Parsed, type Row, type Tracking } from './lib'
 
 /** Financials: what the company reported, before any forecast. Everything here derives from the parsed history
  * (parsed.hist, parsed.ratios) and the forensic radar's lit flags; nothing is computed on the server for it. */
@@ -11,7 +11,7 @@ import { fmt, money, properName, shortYear, type ArNote, type Forensic, type Par
 type S = (number | null)[]
 const fin = (x: number | null | undefined): x is number => x != null && Number.isFinite(x)
 const pc = (x: number | null | undefined) => fmt(x, 'pct')
-const xx = (x: number | null | undefined) => (fin(x) ? `${x.toFixed(2)}×` : '–')
+const xx = (x: number | null | undefined) => (fin(x) ? `${x.toFixed(2)}x` : '–')
 /** Compound growth over the last k years; null when either end is missing or not positive. */
 export const cagrOf = (v: S, k: number) => {
   const n = v.length, a = v[n - 1 - k], b = v[n - 1]
@@ -82,7 +82,7 @@ function Plot({ years, lines, kind, show, refLine, label, neg, marks }: {
         {marks?.map((v, i) => fin(v) && <g key={`f${i}`} className="fc">
           <line className="fc-halo" x1={x(i) - band * 0.42} x2={x(i) + band * 0.42} y1={y(v)} y2={y(v)} />
           <line className="fc-mark" x1={x(i) - band * 0.42} x2={x(i) + band * 0.42} y1={y(v)} y2={y(v)} /></g>)}
-        {years.map((yr, i) => ((n - 1 - i) % every ? null : <text key={yr} className="tx" x={x(i)} y={H - 5} textAnchor="middle">{shortYear(yr)}</text>))}
+        {years.map((yr, i) => ((n - 1 - i) % every ? null : <text key={yr} className="tx" x={x(i)} y={H - 5} textAnchor="middle">{fy(yr)}</text>))}
       </svg>}
       {lines.length > 1 && <p className="key2" aria-hidden="true">{lines.map(l => <span key={l.name}><i className={`k-${l.cls ?? 'ink'}`} />{l.name}</span>)}</p>}
     </div>
@@ -94,7 +94,7 @@ export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { p
   const f = series(parsed)
   const { hist, years, n, col, revenue, pat, cfo, margin, long } = f
   const short = properName(parsed.company.name).replace(/\s+(ltd\.?|limited)$/i, '').trim()
-  const last = years[n - 1]
+  const last = fy(years[n - 1]), first = fy(years[0]) // display labels (FY26)
   const ratios = parsed.ratios
   const dso = ratios.map(r => r.dso ?? null)
   const nc = hist.map(netCash)
@@ -139,7 +139,7 @@ export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { p
       says: <>FCF = CFO − capex.{payout5 != null && payout5 > 0 ? <> 5-year dividends ÷ FCF: {pc(payout5)}.</> : null}</>,
       chart: <Plot years={years} kind="bars" neg lines={[{ v: fcf, name: 'FCF' }, { v: dividend, cls: 'out', name: 'Dividends' }]} show={money} label="FCF and dividends by year, Rs cr" /> },
     { id: 'receivables', title: 'Debtor days', big: fin(dsoNow) ? `${Math.round(dsoNow)} days` : '–', to: st(BS, 'receivables'), table: 'Balance sheet', lit: dsoLit,
-      says: <>Receivables ÷ revenue × 365{fin(dsoThen) && fin(dsoNow) ? <>: {Math.round(dsoThen)} in {years[n - 4]}, {Math.round(dsoNow)} in {last}</> : null}.{dsoLit ? ' Flagged by a forensic rule.' : ''}</>,
+      says: <>Receivables ÷ revenue × 365{fin(dsoThen) && fin(dsoNow) ? <>: {Math.round(dsoThen)} in {fy(years[n - 4])}, {Math.round(dsoNow)} in {last}</> : null}.{dsoLit ? ' Flagged by a forensic rule.' : ''}</>,
       chart: <Plot years={years} kind="lines" lines={[{ v: dso, cls: dsoLit && dsoLit.severity !== 'low' ? 'flag' : undefined }]} show={x => String(Math.round(x))} refLine={med(dso)} label="Debtor days by year" /> },
     { id: 'netcash', title: nc[n - 1] != null && nc[n - 1]! < 0 ? 'Net debt' : 'Net cash', big: `Rs ${money(nc[n - 1])} cr`, to: st(BS, 'cash'), table: 'Balance sheet', lit: debtLit,
       says: <>Cash + investments − borrowings{hist.some(h => h.lease) ? ' incl. leases' : ''}. {ncN ? (pos === ncN ? 'Net cash in every year.' : pos === 0 ? 'Net debt in every year.' : `Net cash in ${pos} of ${ncN} years.`) : ''}</>,
@@ -154,12 +154,12 @@ export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { p
     ['PAT margin', hist.map(h => div(h.pat, h.revenue)), pc, st(PL, 'pat')],
     ['ROCE', roce, pc, st(RT, 'roce')],
     ['ROE', roe, pc, st(RT, 'roe')],
-    ['CFO/PAT', hist.map(h => (fin(h.pat) && h.pat > 0 ? div(h.cfo, h.pat) : null)), x => x.toFixed(2) + '×', st(CF, 'cfo')],
+    ['CFO/PAT', hist.map(h => (fin(h.pat) && h.pat > 0 ? div(h.cfo, h.pat) : null)), x => x.toFixed(2) + 'x', st(CF, 'cfo')],
     ['Debtor days', dso, x => String(Math.round(x)), st(BS, 'receivables'), !!dsoLit],
-    ['Asset turnover', col('asset_turnover'), x => x.toFixed(2) + '×', st(RT, 'asset_turnover')],
+    ['Asset turnover', col('asset_turnover'), x => x.toFixed(2) + 'x', st(RT, 'asset_turnover')],
     ['Dividend payout', ratios.map(r => r.payout ?? null), pc, st(PL, 'dividend')],
-    ['Net debt/EBITDA', col('nd_ebitda'), x => x.toFixed(1) + '×', st(RT, 'nd_ebitda')],
-    ['Interest cover', col('int_cover'), x => x.toFixed(0) + '×', st(RT, 'int_cover')],
+    ['Net debt/EBITDA', col('nd_ebitda'), x => x.toFixed(1) + 'x', st(RT, 'nd_ebitda')],
+    ['Interest cover', col('int_cover'), x => x.toFixed(0) + 'x', st(RT, 'int_cover')],
   ]
 
   const shown = cards.filter((c, i) => i < 6 || c.lit), more = cards.filter((c, i) => i >= 6 && !c.lit)
@@ -168,7 +168,7 @@ export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { p
       <header><h3 id={`fh-${c.id}`}>{c.title}</h3><span className="big">{c.big}</span></header>
       <p className="says">{c.says}</p>
       {c.chart}
-      <footer><span>{c.lit ? <><Sev level={c.lit.severity} /> {c.lit.fact}</> : `${years[0]}–${last}`}</span>
+      <footer><span>{c.lit ? <><Sev level={c.lit.severity} /> {c.lit.fact}</> : `${first}–${last.slice(-2)}`}</span>
         <a className="go" href={c.to}>{c.table} table</a></footer>
     </article>
   )
@@ -176,13 +176,13 @@ export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { p
   const r3 = parsed.cagrs?.['3'] ?? []
   const slowest = r3.length > 2 && g3 != null && r3.every(c => c.value >= r3[r3.length - 1].value - 1e-9)
   const story = g3 == null ? <>Too few positive years to compute revenue CAGR.</>
-    : <>3-year revenue CAGR {pc(g3)}{slowest ? `, the slowest 3-year run since ${years[0]}` : g != null && long > 3 ? ` vs ${pc(g)} over ${long} years (${g3 < g - 0.01 ? 'decelerating' : g3 > g + 0.01 ? 'accelerating' : 'steady'})` : ''}.
+    : <>3-year revenue CAGR {pc(g3)}{slowest ? `, the slowest 3-year run since ${first}` : g != null && long > 3 ? ` vs ${pc(g)} over ${long} years (${g3 < g - 0.01 ? 'decelerating' : g3 > g + 0.01 ? 'accelerating' : 'steady'})` : ''}.
       {mx.length > 0 && <> {last} EBITDA margin {pc(margin[n - 1])} (range {pc(Math.min(...mx))}–{pc(Math.max(...mx))}).</>}</>
 
   return (
     <>
       <PageHead label="Data · Financials" title="Financials"
-        purpose={<>{n}-year reported fundamentals for {short} ({years[0]}–{last.slice(-2)}), before any forecast. Each chart links to its
+        purpose={<>{n}-year reported fundamentals for {short} ({first}–{last.slice(-2)}), before any forecast. Each chart links to its
           statement line.</>}
         answer={story} />
 

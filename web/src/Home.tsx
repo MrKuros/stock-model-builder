@@ -3,7 +3,8 @@ import { Confirm, Menu, Scale, ScaleHead, ScaleKey, Verdict, latestOf, slugOf } 
 import { pathOf, placed } from './route'
 import { api, clock, fmt, properName, rs, gap, verdict, type ModelSummary, type VerdictKind, type WatchList } from './lib'
 import { ago, streamFetch } from './Fetch'
-import { month } from './Statements'
+import { qfy } from './lib'
+import { T } from './Term'
 import { Prices, Spark, WatchSection } from './Watch'
 import AddPage, { type BuildApi, type OnAdd } from './Add'
 
@@ -69,7 +70,7 @@ export default function Home({ models, error, build, onAdd, onWatch, watch, setW
       <p className="label">Get started</p>
       <h1 id="page-h" tabIndex={-1} className="h1">Add your first company</h1>
       <p className="purpose">Enter a listed company’s name or NSE symbol. The app reads its NSE filings and, in about a minute, builds a
-        three-statement model with DCF fair value vs CMP, forensic checks and an editable forecast. Analysis, not a recommendation.</p>
+        three-statement model with <T k="dcf" /> fair value vs <T k="cmp" />, forensic checks and an editable forecast. Analysis, not a recommendation.</p>
       <AddPage first models={models} build={build} onAdd={onAdd} onWatch={onWatch} watchMsg={watchMsg} />
     </main>
   )
@@ -98,7 +99,7 @@ export default function Home({ models, error, build, onAdd, onWatch, watch, setW
       <div className="home-head">
         <div>
           <h1 id="page-h" tabIndex={-1} className="h1">Coverage</h1>
-          <p className="purpose">CMP against DCF fair value (bear–base–bull) for each company modelled, with reverse-DCF implied growth,
+          <p className="purpose"><T k="cmp" /> against <T k="dcf" /> fair value (<T k="fv" />, bear–base–bull) for each company modelled, with reverse-DCF implied growth,
             red flags and latest results. Analysis, not a recommendation.</p>
         </div>
         <a className="primary big" href="/add">+ Add company</a>
@@ -171,7 +172,7 @@ function Row({ m, hist, versions, onDelete }: { m: ModelSummary; hist?: Paramete
       </div>
       <div className="c-look">
         <a href={pathOf(slug, 'risks')} className={signs ? 'warn' : undefined}>{m.flags == null ? 'Red flags' : signs ? `${signs} red flag${signs > 1 ? 's' : ''}` : 'No red flags'}</a>
-        {m.results_to && <span>Results to {month(m.results_to)}{m.new_results?.length ? <b> · new results</b> : null}</span>}
+        {m.results_to && <span>Results to {qfy(m.results_to)}{m.new_results?.length ? <b> · new results</b> : null}</span>}
       </div>
       <Menu label={`More for ${m.company}`} items={[
         { label: 'Open', href: pathOf(slug, 'summary') },

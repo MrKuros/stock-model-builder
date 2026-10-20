@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { money, shortYear } from './lib'
+import { money, fy } from './lib'
 
 const H = 300, M = { top: 28, right: 8, bottom: 30, left: 76 }
 
@@ -101,7 +101,7 @@ export default function Chart({ title, years, values, nHist, others = [] }: Prop
           </text>
         ))}
         {years.map((yr, i) => ((years.length - 1 - i) % every ? null : (
-          <text key={yr} className={i >= nHist ? 'year proj' : 'year'} x={x(i)} y={H - 10} textAnchor="middle">{shortYear(yr)}</text>
+          <text key={yr} className={i >= nHist ? 'year proj' : 'year'} x={x(i)} y={H - 10} textAnchor="middle">{fy(yr)}</text>
         )))}
       </svg>
       {others.length > 0 && (

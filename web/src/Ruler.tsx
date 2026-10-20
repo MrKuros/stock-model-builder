@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { fmt, money, rs, type Cagr } from './lib'
+import { fmt, fy, money, noNegZero, rs, type Cagr } from './lib'
 
 /** The element's width in CSS px, so SVGs draw at 1:1 and text stays 11px at any width. */
 export function useWidth<T extends HTMLElement>(initial = 640) {
@@ -112,7 +112,7 @@ export default function Ruler({ price, bear, base, bull, scale, ours, implied, b
           return <g className="r-gap draw">
             <rect x={a} y={AX - 18} width={b - a} height={18} fill="url(#hatch-mkt)" />
             <line x1={a} x2={b} y1={AX - 18} y2={AX - 18} />
-            {b - a > 90 && <text x={(a + b) / 2} y={AX - 23} textAnchor="middle">Rs {rs(gap)} {above ? 'above bull' : 'below bear'}</text>}
+            {b - a > 160 && <text x={(a + b) / 2} y={AX - 23} textAnchor="middle">CMP Rs {rs(gap)} {above ? 'above bull FV' : 'below bear FV'}</text>}
           </g>
         })()}
         {bear != null && <g className="r-pin"><text x={pinX.bear} y={AX - 50} textAnchor={tight ? 'end' : 'middle'}><tspan className="r-pk">BEAR</tspan><tspan x={pinX.bear} dy="13">{rs(bear)}</tspan></text></g>}
@@ -129,12 +129,12 @@ export default function Ruler({ price, bear, base, bull, scale, ours, implied, b
             <rect x={Math.max(P, x(v5))} y={GX - 7} width={w - P - Math.max(P, x(v5))} height={7} fill="url(#hatch-flag)" />
             {!narrow && (() => {
               const end = price != null && x(price) > x(v5) + 160 && x(price) < w - P - 4 ? x(price) - 8 : w - P
-              return end - x(v5) > 150 && <text x={end} y={GX - 11} textAnchor="end">above best 5-yr CAGR since {since}</text>
+              return end - x(v5) > 150 && <text x={end} y={GX - 11} textAnchor="end">above best 5-yr CAGR since {fy(since)}</text>
             })()}
           </g>}
           {gt.map(([g, v]) => <g key={g}>
             <line className="r-tick" x1={x(v)} x2={x(v)} y1={GX} y2={GX + 6} />
-            <text className="r-num" x={x(v)} y={GX + 18} textAnchor="middle">{Math.round(g * 100)}%</text>
+            <text className="r-num" x={x(v)} y={GX + 18} textAnchor="middle">{noNegZero(String(Math.round(g * 100))).replace('-', '−')}%</text>
           </g>)}
           <path className="r-ours" d={`M${x(base)} ${GX - 6}l6 6-6 6-6-6z`} />
           <text className="r-ours-t" x={clampLabel(x(base), 9)} y={GX + 38} textAnchor="middle">Base {pc(ours)}</text>

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Chart from './Chart'
-import { growth, month } from './Statements'
+import { growth } from './Statements'
+import { fy, qfy } from './lib'
 import DraftPanel, { failing, latest, path, useDraft } from './Draft'
 import { Checks, useAi } from './Sources'
 import { Confirm, Next, PageHead, Src, Stepper } from './Shell'
@@ -69,7 +70,7 @@ export function perStep(k: string, impact: Impact[] | undefined, kind: Kind): st
   const unit = kind === 'pct' ? 0.01 : 10
   const s = ((d.up - d.down) / (2 * d.step)) * unit
   if (Math.abs(s) < 0.5) return '< Rs 0.5/share per step'
-  return `${s < 0 ? '−' : '+'}Rs ${Math.abs(s) >= 10 ? money(Math.round(Math.abs(s))) : rs(Math.abs(s))} /share per ${kind === 'pct' ? '1 pp' : '10 days'}`
+  return `${s < 0 ? '−' : '+'}Rs ${Math.abs(s) >= 10 ? money(Math.round(Math.abs(s))) : rs(Math.abs(s))}/share per ${kind === 'pct' ? '1 pp' : '10 days'}`
 }
 
 interface Props {
@@ -330,8 +331,8 @@ function Track({ label, kind, value, rule, known, need, onChange }: {
             if (e.key in m) { e.preventDefault(); onChange(snap(m[e.key])) }
           }}><span>{fmt(value, kind)}</span></span>
       </div>
-      {known.length > 0 && <p className="small muted t-cap">Range {known[0][1]}–{known[known.length - 1][1].slice(-2)}: {fmt(band![0], kind)} to {fmt(band![1], kind)}.
-        Last 3: {known.slice(-3).map(([x, y]) => `${y} ${fmt(x, kind)}`).join(' · ')}. Drag, type, or ← →.</p>}
+      {known.length > 0 && <p className="small muted t-cap">Range {fy(known[0][1])}–{known[known.length - 1][1].slice(-2)}: {fmt(band![0], kind)} to {fmt(band![1], kind)}.
+        Last 3: {known.slice(-3).map(([x, y]) => `${fy(y)} ${fmt(x, kind)}`).join(' · ')}. Drag, type, or ← →.</p>}
     </div>
   )
 }
@@ -364,7 +365,7 @@ function Linked({ k, parsed }: { k: string; parsed: Parsed }) {
   const odd = parsed.oneoffs.find(o => o.metric === k && recent.includes(o.year))
   const lit = (parsed.rule_checks ?? []).find(c => c.id === k && (c.status === 'red' || c.status === 'amber'))
   if (!odd && !lit) return null
-  return <p className="small linked">{odd ? <>{odd.year} is an outlier ({odd.note.replace(/^./, c => c.toLowerCase())}); the default may include it.{' '}
+  return <p className="small linked">{odd ? <>{fy(odd.year)} is an outlier ({odd.note.replace(/^./, c => c.toLowerCase())}); the default may include it.{' '}
     <a href={href('risks', 'unusual')}>Details</a></>
     : <>{inputName(k)} flagged: {lit!.fact.replace(/^./, c => c.toLowerCase())}. <a href={href('risks', 'signs')}>Details</a></>}</p>
 }
@@ -425,7 +426,7 @@ function Produces({ parsed, projection, active, n, borrowed }: { parsed: Parsed;
   return (
     <section className="f-tier" aria-labelledby="proj-h" id="projection">
       <h2 id="proj-h">Forecast output</h2>
-      <p className="why">{histYears[0]}–{histYears[nHist - 1]} reported in ink; {projYears.length ? `${projYears[0]}–${projYears[n - 1]}` : 'the forecast'} in blue ({NAMES[active]}).</p>
+      <p className="why">{fy(histYears[0])}–{histYears[nHist - 1].slice(-2)} reported in black; {projYears.length ? `${fy(projYears[0])}–${projYears[n - 1].slice(-3)}` : 'the forecast'} in blue ({NAMES[active]} case).</p>
       {proj && <Readout hist={hist} proj={proj} histYear={histYears[nHist - 1]} projYear={projYears[n - 1]} n={n} moved={parsed.sources?.moved_out ?? null}
         ttm={parsed.ttm && Date.parse(parsed.ttm.end) > Date.parse(company.dates[nHist - 1]) ? parsed.ttm : null} />}
       {proj && <Compare all={projection!.scenarios} active={active} projYear={projYears[n - 1]} />}
@@ -466,7 +467,7 @@ function Readout({ hist, proj, histYear, projYear, n, ttm, moved }: {
       {cagr != null && <>, <P>{fmt(cagr, 'pct')}</P> CAGR</>}. PAT margin <span className="num">{fmt(margin(last), 'pct')}</span> →{' '}
       <P>{fmt(margin(end), 'pct')}</P>. Cumulative {n}-year FCF{' '}
       <P>{fcf < 0 ? '(' : ''}Rs {money(Math.abs(fcf))} cr{fcf < 0 ? ')' : ''}</P>; ending net {netCash >= 0 ? 'cash' : 'debt'} <P>Rs {money(Math.abs(netCash))} cr</P>.
-      {ttmGrowth != null && <> TTM to {month(ttm!.end)}: revenue <span className="num">Rs {money(ttm!.values.sales)} cr</span>,{' '}
+      {ttmGrowth != null && <> TTM to {qfy(ttm!.end)}: revenue <span className="num">Rs {money(ttm!.values.sales)} cr</span>,{' '}
         {ttmGrowth >= 0 ? '+' : '−'}{fmt(Math.abs(ttmGrowth), 'pct')} vs {histYear}.</>}
     </p>
   )

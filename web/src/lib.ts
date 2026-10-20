@@ -371,14 +371,20 @@ export function money(v: number | null | undefined): string {
 
 export function fmt(v: number | null | undefined, kind: LineKind): string {
   if (v == null || !Number.isFinite(v)) return '–'
-  if (kind === 'x') return `${noNegZero(v.toFixed(1))}x`
-  if (kind === 'pct') return `${noNegZero((v * 100).toFixed(1))}%`
+  if (kind === 'x') return `${noNegZero(v.toFixed(1)).replace('-', '−')}x` // a typographic minus, as in the text
+  if (kind === 'pct') return `${noNegZero((v * 100).toFixed(1)).replace('-', '−')}%`
   if (kind === 'days') return `${Math.round(v)}`
   return money(v)
 }
 
-/** "FY2027E" -> "FY27E" for tight axes */
-export const shortYear = (y: string) => y.replace(/^FY\d\d(\d\d)/, 'FY$1')
+/** Broker year notation, anywhere in a string: "FY2027E" -> "FY27E", "FY2018–23" -> "FY18–23". Display only: the engine's
+ * labels stay long (Excel parity, document keys). */
+export const fy = (y: string) => y.replace(/\bFY20(\d\d)/g, 'FY$1')
+/** A quarter-end date as an Indian fiscal quarter: "2026-09-30" -> "Q2FY27" (April–March year). */
+export const qfy = (iso: string) => {
+  const d = new Date(iso), m = d.getMonth()
+  return `Q${[4, 4, 4, 1, 1, 1, 2, 2, 2, 3, 3, 3][m]}FY${String((m > 2 ? d.getFullYear() + 1 : d.getFullYear()) % 100).padStart(2, '0')}`
+}
 
 /** "-0.0" -> "0.0": tiny negatives shouldn't show a sign */
 export const noNegZero = (s: string) => (/^-0(\.0+)?$/.test(s) ? s.slice(1) : s)
@@ -399,6 +405,13 @@ export function gap(price: number | null | undefined, value: number | null | und
   if (price == null || value == null || !(price > 0) || !(value > 0)) return null // zero or below is no value
   const g = value / price - 1
   return `${noNegZero((Math.abs(g) * 100).toFixed(0))}% ${g >= 0 ? 'upside' : 'downside'}`
+}
+
+/** Market cap and EV at CMP, Rs cr (EV = market cap + borrowings incl. leases − cash − investments); null without CMP or shares. */
+export function capOf(v: Valuation | null | undefined): { mcap: number; ev: number } | null {
+  if (!v || v.price == null || v.shares == null) return null
+  const mcap = v.price * v.shares
+  return { mcap, ev: mcap + v.borrowings - v.cash - v.investments }
 }
 
 export type VerdictKind = 'cheap' | 'range' | 'dear' | 'fix' | 'none'

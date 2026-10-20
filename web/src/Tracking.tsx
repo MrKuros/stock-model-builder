@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useHref } from './route'
 import { AiOffNote, useAi } from './Sources'
 import {
-  NAMES, SCENARIOS, api, fmt, money, postJson, rs, when,
+  NAMES, SCENARIOS, api, fmt, fy, money, postJson, rs, when,
   type ModelDoc, type Projection, type Scenario, type ThesisNote, type Tracking, type TrackProposal,
 } from './lib'
 
@@ -65,7 +65,7 @@ export function TrackProposals({ t, setDoc }: { t: Tracking; setDoc: SetDoc }) {
   const [done, setDone] = useState<string | null>(null)
   const odd = t.proposals.filter(p => p.proposed == null), props = t.proposals.filter(p => p.proposed != null)
   const unusual = odd.length > 0 && <p className="small-note">{odd.map(p => `${p.label}: actual ${show(p.key, p.actual)} vs forecast ${show(p.key, p.forecast)}`).join('; ')};
-    {' '}{odd[0].year} is an outlier year for {odd.length > 1 ? 'these drivers' : 'this driver'}, so no default change is proposed. Exclude it under <a href={href('risks', 'unusual')}>Outlier years</a>.</p>
+    {' '}{fy(odd[0].year)} is an outlier year for {odd.length > 1 ? 'these drivers' : 'this driver'}, so no default change is proposed. Exclude it under <a href={href('risks', 'unusual')}>Outlier years</a>.</p>
   if (!props.length) return <>{done && <p className="small-note" role="status">{done}</p>}{unusual}</>
   return (
     <div className="src-upgrade trk-props" role="group" aria-label="Drivers the new results suggest revising">
@@ -73,8 +73,8 @@ export function TrackProposals({ t, setDoc }: { t: Tracking; setDoc: SetDoc }) {
       <ul>
         {props.map(p => (
           <li key={p.key}>
-            <p className="small">{p.label}: {p.year} actual <span className="num">{show(p.key, p.actual)}</span> vs forecast
-              {' '}<span className="pencil-num">{show(p.key, p.forecast)}</span>. Updated 3-year default incl. {p.year}:{' '}
+            <p className="small">{p.label}: {fy(p.year)} actual <span className="num">{show(p.key, p.actual)}</span> vs forecast
+              {' '}<span className="pencil-num">{show(p.key, p.forecast)}</span>. Updated 3-year default incl. {fy(p.year)}:{' '}
               <span className="pencil-num">{show(p.key, p.proposed!)}</span>.</p>
             <div className="prop-actions">
               <button type="button" onClick={() => { accept(setDoc, p); setDone(`${p.label}: base now ${show(p.key, p.proposed!)}; bear and bull shifted by the same step.`) }}>
@@ -102,7 +102,7 @@ export function Changed({ doc, setDoc, projection, full, answerOnly }: { doc: Mo
   const rev = year.lines.find(l => l.key === 'revenue'), pat = year.lines.find(l => l.key === 'pat')
   const fresh = unreviewed(doc, t)
   const vs = (e: number | null) => (e == null ? '' : `${(Math.abs(e) * 100).toFixed(1)}% ${e >= 0 ? 'ahead of' : 'below'}`)
-  const head = rev ? `${year.year} revenue ${vs(rev.err)} forecast` : `${year.year} results reported`
+  const head = rev ? `${fy(year.year)} revenue ${vs(rev.err)} forecast` : `${fy(year.year)} results reported`
   if (answerOnly) return <>New results: {head}{pat ? `; PAT ${vs(pat.err)} forecast` : ''}.</>
   if (!fresh && !full) return (
     <p className="trk-line"><span className="label">Latest results</span> {head}{pat ? `; PAT ${vs(pat.err)} forecast` : ''}.{' '}
@@ -112,7 +112,7 @@ export function Changed({ doc, setDoc, projection, full, answerOnly }: { doc: Mo
   const newFlags = now.flags.filter(f => !was.flags.some(x => x.id === f.id)), gone = was.flags.filter(f => !now.flags.some(x => x.id === f.id))
   return (
     <section className="provenance trk" id="changed" aria-labelledby="changed-h" tabIndex={-1}>
-      <h2 id="changed-h">Actual vs forecast: {year.year}{t.was.made_at ? <span className="cnt">forecast of {when(t.was.made_at)}</span> : null}</h2>
+      <h2 id="changed-h">Actual vs forecast: {fy(year.year)}{t.was.made_at ? <span className="cnt">forecast of {when(t.was.made_at)}</span> : null}</h2>
       <div className="scroll" tabIndex={0} role="region" aria-label={`${year.year}: forecast against reported`}>
         <table className="mini-t">
           <thead><tr><th scope="col">Rs cr</th><th scope="col" className="r">Forecast</th><th scope="col" className="r">Actual</th><th scope="col" className="r">Variance</th></tr></thead>
@@ -180,8 +180,8 @@ export function Accuracy({ doc, setDoc, projection }: { doc: ModelDoc; setDoc: S
   const n = t.records.filter(r => r.years.length).length
   return (
     <section aria-labelledby="trk-h">
-      <h2 id="trk-h">Variance by driver <span className="cnt">{s.year.year} · forecast saved {s.rec.made_at ? when(s.rec.made_at) : 'before the results'}</span></h2>
-      <p className="small">Blue: {s.year.year} forecast before reporting; black: filed actual. Hit tolerance: 2 pp for revenue growth, 1 pp for
+      <h2 id="trk-h">Variance by driver <span className="cnt">{fy(s.year.year)} · forecast saved {s.rec.made_at ? when(s.rec.made_at) : 'before the results'}</span></h2>
+      <p className="small">Blue: {fy(s.year.year)} forecast before reporting; black: filed actual. Hit tolerance: 2 pp for revenue growth, 1 pp for
         margins and % of revenue items, 10 days for working-capital days. Hit rate {n === 1 ? 'for this forecast' : `across ${n} saved forecasts and every reported year each covered`}.</p>
       <div className="tw" tabIndex={0} role="region" aria-labelledby="trk-h">
         <table className="mini-t trk-t">
@@ -197,7 +197,7 @@ export function Accuracy({ doc, setDoc, projection }: { doc: ModelDoc; setDoc: S
       </div>
       <TrackProposals t={t} setDoc={setDoc} />
       {!t.proposals.length && <p className="small-note">No revisions: {s.year.drivers.every(d => d.hit) ? 'all drivers within tolerance.'
-        : `the updated default incl. ${s.year.year} doesn’t move the ${NAMES.base.toLowerCase()} case toward the actual, or it was kept.`}</p>}
+        : `the updated default incl. ${fy(s.year.year)} doesn’t move the ${NAMES.base.toLowerCase()} case toward the actual, or it was kept.`}</p>}
       {(doc.track?.length ?? 0) > 1 && <p className="small-note">Saved forecasts: {doc.track!.map(r => `before ${r.new_years.join(', ')}${r.made_at ? ` (${when(r.made_at)})` : ''}`).join('; ')}.</p>}
     </section>
   )

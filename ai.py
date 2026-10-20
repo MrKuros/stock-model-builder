@@ -981,7 +981,7 @@ def thesis_prompt(name, facts, cites):
             "- If there are trk_ and was_ facts, new results came in since the earlier forecast: make one thesis point the "
             "variance (actual vs forecast, and fair value or implied growth before and now), and point what_to_watch at "
             "the next results.\n"
-            "- Rank risks by the rule checks: Red, then Amber, then the rest. Mention the auditor only if the opinion is "
+            "- Rank risks by the rule checks: High, then Medium, then Low severity. Mention the auditor only if the opinion is "
             "modified or the auditor changed.\n"
             '- "refs" lists the fact keys or citation ids behind the point, at least one each; every number in a point '
             "must come from its own refs (CMP and the fair values excepted).\n"

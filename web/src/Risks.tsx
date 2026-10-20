@@ -3,8 +3,9 @@ import { Explain, FlagExplain, useAi } from './Sources'
 import type { Upgrade } from './Model'
 import { More, Next, PageHead, Sev } from './Shell'
 import { useHref } from './route'
+import { T } from './Term'
 import {
-  SEV_WORD, fmt, isAnnual, properName, sevCounts, shortYear, type Forensic, type ModelDoc, type OneOff, type OneOffNote, type Parsed, type Proposal,
+  SEV_WORD, fmt, isAnnual, properName, sevCounts, fy, type Forensic, type ModelDoc, type OneOff, type OneOffNote, type Parsed, type Proposal,
   type Row, type Severity,
 } from './lib'
 
@@ -14,19 +15,16 @@ export const bySeverity = (fs: Forensic[]) => [...fs].sort((a, b) => ORDER.index
 const cap = (t: string) => t[0].toUpperCase() + t.slice(1)
 const lit = (f: Forensic) => f.severity === 'high' || f.severity === 'medium' || f.severity === 'low'
 
-/** The checks in one line: "No high-severity flags; 2 medium, 9 clear, 4 need the annual report." From sevCounts only,
+/** The checks in one line: "15 checks: 0 high, 0 medium, 2 low, 9 clear, 4 not tested (need AR)." From sevCounts only,
  * like every count in the app. */
 export function riskWords(fs: Forensic[] | null | undefined): string {
   const c = sevCounts(fs)
   if (!fs?.length) return 'Forensic checks haven’t run on this model yet.'
-  const first = c.high ? `${c.high} high-severity red flag${c.high > 1 ? 's' : ''}` : 'No high-severity red flags'
   // the annual report unlocks only the checks that need it; the rest wait for more years
   const ar = fs.filter(f => f.severity === 'not_checked' && f.needs).length, short = c.not_checked - ar
-  const rest = [
-    c.medium ? `${c.medium} medium` : '', c.low ? `${c.low} low` : '', c.ok ? `${c.ok} clear` : '',
-    ar ? `${ar} need${ar === 1 ? 's' : ''} the annual report` : '', short ? `${short} lack${short === 1 ? 's' : ''} enough years` : '',
-  ].filter(Boolean)
-  return `${first} of ${fs.length} checks${rest.length ? `; ${rest.join(', ')}` : ''}.`
+  const why = [ar ? `${ar} need AR` : '', short ? `${short} short history` : ''].filter(Boolean)
+  const nt = c.not_checked ? `, ${c.not_checked} not tested (${why.length > 1 ? why.join(', ') : why[0].replace(/^\d+ /, '')})` : ''
+  return `${fs.length} checks: ${c.high} high, ${c.medium} medium, ${c.low} low, ${c.ok} clear${nt}.`
 }
 
 /** Each rule: its title when flagged, why it matters, and its name in the passed list. */
@@ -47,7 +45,12 @@ const PLAIN: Record<string, { title: string; why: string; gloss: string }> = {
   pledge: { title: 'Promoter pledge', why: 'Lenders can sell pledged shares in a falling market, adding pressure on the price.', gloss: 'Promoter pledge %' },
   auditor: { title: 'Audit qualification or auditor change', why: 'A modified opinion or abrupt auditor change can signal disagreement over the accounts.', gloss: 'Auditor’s opinion and auditor change' },
 }
-const plain = (f: Forensic) => PLAIN[f.key] ?? { title: f.title, why: '', gloss: f.title }
+const plain = (f: Forensic) => {
+  const p = PLAIN[f.key] ?? { title: f.title, why: '', gloss: f.title }
+  // the other-income rule trips on its share of PBT or on a swing off trend (exceptional items): title it by the leg that fired
+  return f.key === 'other_income' && lit(f) && !(f.value != null && f.threshold != null && f.value > f.threshold)
+    ? { ...p, title: 'Other income off trend (exceptionals)', why: 'Other income includes exceptional items; a swing off its median distorts reported PAT growth.' } : p
+}
 /** Where a rule's numbers are in the statements, and the forecast input it links to. */
 const NUMBERS: Record<string, [sub: string, row: string]> = {
   cash: ['cash-flow', 'cfo'], cash5: ['cash-flow', 'cfo'], dso: ['balance-sheet', 'receivables'], dio: ['balance-sheet', 'inventory'],
@@ -63,12 +66,12 @@ function seriesOf(key: string, hist: Row[], ratios: Row[]): { v: (number | null)
   const pct = (x: number) => fmt(x, 'pct')
   switch (key) {
     case 'dso': case 'dio': return { v: ratios.map(r => r[key] ?? null), show: x => `${Math.round(x)} days` }
-    case 'cash': case 'cash5': return { v: hist.map(h => (h.pat && h.pat > 0 ? div(h.cfo, h.pat) : null)), show: x => `${x.toFixed(2)}×` }
+    case 'cash': case 'cash5': return { v: hist.map(h => (h.pat && h.pat > 0 ? div(h.cfo, h.pat) : null)), show: x => `${x.toFixed(2)}x` }
     case 'cwip': return { v: hist.map(h => div(h.cwip, h.net_block)), show: pct }
     case 'other_income': return { v: hist.map(h => div(h.other_income, h.revenue)), show: pct }
     case 'tax': return { v: hist.map(h => div(h.tax, h.pbt)), show: pct }
-    case 'debt': return { v: hist.map(h => h.nd_ebitda ?? null), show: x => `${x.toFixed(1)}×` }
-    case 'cover': return { v: hist.map(h => h.int_cover ?? null), show: x => `${x.toFixed(0)}×` }
+    case 'debt': return { v: hist.map(h => h.nd_ebitda ?? null), show: x => `${x.toFixed(1)}x` }
+    case 'cover': return { v: hist.map(h => h.int_cover ?? null), show: x => `${x.toFixed(0)}x` }
   }
   return null
 }
@@ -85,7 +88,7 @@ function MiniBars({ years, v, show, flagged, sev, title }: { years: string[]; v:
         {v.map((x, i) => x == null ? null : <rect key={i} x={i * bw + bw * 0.15} width={bw * 0.7} y={Math.min(y(x), y(0))}
           height={Math.max(1, Math.abs(y(x) - y(0)))} className={flagged.includes(years[i]) ? `on ${sev}` : undefined} />)}
       </svg>
-      <figcaption className="small dim"><span>{shortYear(years[0])}</span><span>{shortYear(years[years.length - 1])}</span></figcaption>
+      <figcaption className="small dim"><span>{fy(years[0])}</span><span>{fy(years[years.length - 1])}</span></figcaption>
     </figure>
   )
 }
@@ -131,10 +134,10 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
       <li key={f.key} id={`a-${f.key}`} tabIndex={-1} className={`risk-card s-${f.severity}`} aria-labelledby={`rk-${f.key}`}>
         <div className="rk-main">
           <p className="rk-head"><Sev level={f.severity} /> <b id={`rk-${f.key}`}>{p.title}</b></p>
-          <p className="rk-fact serif">{f.detail}</p>
+          <p className="rk-fact serif">{fy(f.detail)}</p>
           {p.why && <p className="rk-why"><b>Why it matters:</b> {p.why}</p>}
           <details className="rk-rule"><summary>Rule and threshold</summary>
-            <p className="small">{f.rule}.{f.years.length > 0 && <> Years: {f.years.join(', ')}.</>} Reading: <span className="num">{f.fact}</span>.</p>
+            <p className="small">{f.rule}.{f.years.length > 0 && <> Years: {f.years.map(fy).join(', ')}.</>} Reading: <span className="num">{fy(f.fact)}</span>.</p>
             {f.parts && <MParts f={f} />}
           </details>
           <div className="rk-act">
@@ -152,8 +155,9 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
   return (
     <>
       <PageHead label="Analysis" title="Risks & forensics"
-        purpose={<>Fifteen fixed forensic rules on {short}’s reported financials (cash conversion, working capital, leverage, Beneish
-          M-score, disclosures). AI can explain a flag from the annual report; it never changes a number.</>}
+        purpose={<>Fifteen fixed forensic rules on {short}’s reported financials: cash conversion (<T k="cfo_pat" />), working capital,
+          <T k="cwip" />, other income vs <T k="pbt" />, leverage, <T k="mscore" />, disclosures. AI can explain a flag from the annual report;
+          it never changes a number.</>}
         answer={riskWords(parsed.forensic)} />
 
       <nav className="sev-chips" aria-label="Forensic checks by severity">
@@ -186,7 +190,7 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
       </section>}
 
       {passed.length > 0 && <div id="passed" tabIndex={-1}><More title={<span><b>Clear</b> · {passed.map(f => plain(f).gloss).slice(0, 4).join(', ')}{passed.length > 4 ? '…' : ''}</span>} n={passed.length}>
-        <ul className="passed">{passed.map(f => <li key={f.key} id={`a-${f.key}`} tabIndex={-1}><Sev level="ok" /> <span>{plain(f).gloss}</span> <span className="num dim">{f.fact}</span></li>)}</ul>
+        <ul className="passed">{passed.map(f => <li key={f.key} id={`a-${f.key}`} tabIndex={-1}><Sev level="ok" /> <span>{plain(f).gloss}</span> <span className="num dim">{fy(f.fact)}</span></li>)}</ul>
       </More></div>}
 
       <section className="blk" id="unusual" tabIndex={-1} aria-labelledby="odd-h">
@@ -197,7 +201,7 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
           const out = doc.excluded_years.includes(year), inRules = used.includes(year)
           return (
             <li key={year}>
-              <h3>{items.map(o => o.note).join('. ')}</h3>
+              <h3>{fy(items.map(o => o.note).join('. '))}</h3>
               <p className="small">In rule defaults: <b>{out ? 'no, excluded' : inRules ? 'yes' : 'no, outside the 3-year window'}</b>.</p>
               {/* an older year changes no rule figure, so it gets no button; one you left out can still go back */}
               {(inRules || out) && <div className="rk-act">

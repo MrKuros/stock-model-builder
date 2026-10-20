@@ -13,12 +13,11 @@ import { BottomBar, CHECK, Confirm, DL, Next, PageHead, PhoneTop, Rail, Scale, S
 import { ago, pendingMerge, streamFetch } from './Fetch'
 import { Accuracy, Changed, latestScored, unreviewed } from './Tracking'
 import { path } from './Draft'
-import { month } from './Statements'
 import { HrefCtx, PAGES, REPORTED, STATEMENTS, pathOf, placed, type Href, type Page, type Route } from './route'
 import type { SaveState } from './App'
 import { T } from './Term'
 import {
-  NAMES, api, clock, defaultPaths, flat, fmt, gap, groupKeys, isAnnual, postJson, rs, seed, sevCounts, verdict, when, SCENARIOS,
+  NAMES, api, capOf, clock, fy, money, qfy, defaultPaths, flat, fmt, gap, groupKeys, isAnnual, postJson, rs, seed, sevCounts, verdict, when, SCENARIOS,
   type Company, type Kind, type Filing, type ModelDoc, type ModelSummary, type Parsed, type Projection, type Proposal, type Scenario,
 } from './lib'
 
@@ -202,7 +201,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
       const at = clock(new Date().toISOString())
       if (p && a?.doc) {
         onResults({ ...p, company: a.doc.company }, a.doc)
-        setChk({ state: 'done', msg: <>New results: {a.years.length ? a.years.join(', ') : `${month(a.quarter!)} quarter`}. Assumptions unchanged. <a href={href('tracking')}>Results tracking</a></> })
+        setChk({ state: 'done', msg: <>New results: {a.years.length ? a.years.map(fy).join(', ') : qfy(a.quarter!)}. Assumptions unchanged. <a href={href('tracking')}>Results tracking</a></> })
       } else {
         onCompany(null, c)
         setChk({ state: 'done', msg: `Checked ${at}: nothing new${Date.now() - new Date(r.at).getTime() > 60_000 ? ` (CMP from ${clock(r.at)}; NSE is polled at most every 15 minutes)` : ''}.` })
@@ -255,6 +254,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const pos = (x: number | null | undefined) => (x != null && x > 0 ? x : null) // zero or below is no value: the bar says so
   const values = { bear: pos(v?.scenarios.bear.per_share), base: pos(v?.scenarios.base.per_share), bull: pos(v?.scenarios.bull.per_share) }
   const mine = values[doc.active]
+  const cap = capOf(v)
   const short = sym ?? shortName(company.name)
   const hasQuarters = !!company.quarters?.dates.length
   const tracking = proj?.tracking
@@ -273,7 +273,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const railNotes: Partial<Record<Page, RailNote>> = {
     valuation: { text: vd.kind === 'none' ? 'no CMP' : vd.word, tone: vd.kind === 'fix' ? 'warn' : undefined },
     ...(sev.signs ? { risks: { text: String(sev.signs), tone: 'warn' } } : {}),
-    tracking: fresh ? { text: 'New', tone: 'new' } : { text: lastQ ? month(lastQ) : histYears[nHist - 1] },
+    tracking: fresh ? { text: 'New', tone: 'new' } : { text: lastQ ? qfy(lastQ) : fy(histYears[nHist - 1]) },
     peers: { text: doc.peers?.approved_at ? `${doc.peers.chosen.length} peers` : 'not set' },
     ...(yours ? { forecast: { text: `${yours} edited` } } : {}),
     note: { text: doc.note ? when(doc.note.written_at).replace(/ \d{4}$/, '') : ai && !ai.available ? 'AI off' : 'not written' },
@@ -320,7 +320,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
   const checkButton = (cls = 'btn') => chk.state === 'running'
     ? <span className="chk-run" role="status">Checking NSE… <button type="button" className="link" onClick={stopCheck}>Stop</button></span>
     : <button type="button" className={cls} onClick={check} aria-disabled={!sym || undefined}
-        title={sym ? `Fetches CMP and any results filed since ${lastQ ? month(lastQ) : histYears[nHist - 1]}` : 'Added from an Excel export: no NSE symbol to check'}>
+        title={sym ? `Fetches CMP and any results filed since ${lastQ ? qfy(lastQ) : fy(histYears[nHist - 1])}` : 'Added from an Excel export: no NSE symbol to check'}>
         {CHECK}<span>Check for new results</span></button>
   let page: ReactNode
   switch (route.page) {
@@ -351,7 +351,7 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
       page = <>
         <PageHead label="Analysis · Results tracking" title="Results tracking" purpose="Reported results vs this model’s forecast: variance by line and driver, forecast hit rate, and the effect on fair value."
           answer={scored ? <Changed doc={doc} setDoc={setDoc} projection={proj} answerOnly />
-            : <>No new results since the model was built{since ? ` (${when(since).replace(/ \d{4}$/, '')})` : ''}. Latest filed: {lastQ ? `${month(lastQ)} quarter` : histYears[nHist - 1]}.</>} />
+            : <>No new results since the model was built{since ? ` (${when(since).replace(/ \d{4}$/, '')})` : ''}. Latest filed: {lastQ ? qfy(lastQ) : fy(histYears[nHist - 1])}.</>} />
         {scored
           ? <><Changed doc={doc} setDoc={setDoc} projection={proj} full />
               <section className="blk" id="by-input" tabIndex={-1}><Accuracy doc={doc} setDoc={setDoc} projection={proj} /></section>
@@ -375,10 +375,12 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
       {price != null
         ? <span className="bf"><span className="bl"><T k="cmp" /></span> <b className="num mkt">Rs {rs(price)}</b> <span className="bs">({priceSrc})</span></span>
         : <a className="bf" href={href('valuation', 'v-price')}>No CMP: enter one</a>}
+      {cap && <><span className="bf"><span className="bl"><T k="mcap">Mcap</T></span> <b className="num">{money(cap.mcap)}</b></span>
+        <span className="bf"><span className="bl"><T k="ev" /></span> <b className="num">{money(cap.ev)}</b> <span className="bs">Rs cr</span></span></>}
       <span className={`bf${yours ? ' you' : ''}`} title={yours ? `Includes ${yours} edited driver${yours > 1 ? 's' : ''}` : undefined}>
         <span className="bl">{NAMES[doc.active]} <T k="fv" /></span>{' '}
         {mine != null ? <b className="num ours">Rs {rs(mine)}</b> : <b>{proj ? 'n/a' : '…'}</b>}</span>
-      <Verdict price={price} values={{ ...values, base: mine }} />
+      <Verdict price={price} values={{ ...values, base: mine }} to={NAMES[doc.active].toLowerCase()} />
     </>
   )
   const controls = (where: 'bar' | 'sheet') => <Controls where={where} doc={doc} setDoc={setDoc} inert={inert} check={checkButton(where === 'sheet' ? 'btn wide' : 'btn')}

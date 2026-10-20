@@ -1,8 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { ago, streamFetch } from './Fetch'
 import { Checks, useAi } from './Sources'
+import { T, type TermKey } from './Term'
 import {
-  api, fmt, money, when, postJson, type ModelDoc, type Parsed, type PeerCandidate, type PeerProposal, type PeerRow, type PeersDoc,
+  api, fmt, fy, money, when, postJson, type ModelDoc, type Parsed, type PeerCandidate, type PeerProposal, type PeerRow, type PeersDoc,
   type PeerTable, type Projection,
 } from './lib'
 
@@ -253,12 +254,12 @@ function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; sho
     <div className="table-wrap peer-wrap" tabIndex={0} role="region" aria-labelledby="peer-cap">
       <table className="peer-table">
         <caption id="peer-cap" className="visually-hidden">Relative valuation: metrics, peer median and the company’s rank</caption>
-        <thead><tr><th scope="col">Company</th><th scope="col">Year</th>{cols.map(([k, label, , , dir]) => <th key={k} scope="col">{label}{dir && <span className="col-dir">{dir}</span>}</th>)}</tr></thead>
+        <thead><tr><th scope="col">Company</th><th scope="col">Year</th>{cols.map(([k, label, , , dir]) => <th key={k} scope="col">{TERM[k] ? <T k={TERM[k]}>{label}</T> : label}{dir && <span className="col-dir">{dir}</span>}</th>)}</tr></thead>
         <tbody>
-          <tr className="is-own"><th scope="row">{t.own.name} <span className="sr">(this company)</span></th><td>{t.own.year}</td>
+          <tr className="is-own"><th scope="row">{t.own.name} <span className="sr">(this company)</span></th><td>{t.own.year ? fy(t.own.year) : ''}</td>
             {cols.map(([k, , kind]) => <td key={k}>{cell(t.own.metrics?.[k], kind)}</td>)}</tr>
           {t.peers.filter(r => p.chosen.includes(r.symbol ?? '')).map(r => r.metrics
-            ? <tr key={r.symbol}><th scope="row" title={r.source ?? undefined}>{r.name} <span className="tag">{r.symbol}</span></th><td>{r.year}</td>
+            ? <tr key={r.symbol}><th scope="row" title={r.source ?? undefined}>{r.name} <span className="tag">{r.symbol}</span></th><td>{r.year ? fy(r.year) : ''}</td>
               {cols.map(([k, , kind]) => <td key={k}>{cell(r.metrics?.[k], kind)}</td>)}</tr>
             : <tr key={r.symbol} className="is-miss"><th scope="row">{r.name && r.name !== r.symbol ? <>{r.name} <span className="tag">{r.symbol}</span></> : r.symbol}</th>
               <td colSpan={cols.length + 1} className="peer-err">Couldn’t read: {r.error} <button type="button" className="link" disabled={reading} onClick={() => retry(r.symbol!)}>Try again</button></td></tr>)}
@@ -277,6 +278,8 @@ function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; sho
   </>
 }
 
+/** Columns whose header carries a glossary definition. */
+const TERM: Record<string, TermKey> = { mcap: 'mcap', pe: 'pe', ev_ebitda: 'ev_ebitda', pb: 'pb', roce: 'roce', cash_conv: 'cfo_pat', ebitda_margin: 'ebitda_margin' }
 const PLAIN: Record<string, [string, string]> = {
   mcap: ['Mcap, Rs cr', '↑ larger'], pe: ['P/E', '↓ cheaper'],
   ev_ebitda: ['EV/EBITDA', '↓ cheaper'], pb: ['P/B', '↓ cheaper'],
