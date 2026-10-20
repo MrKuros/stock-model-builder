@@ -15,7 +15,7 @@ interface Run { kind: 'find' | 'read'; steps: { text: string; detail?: string }[
 const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`
 const cell = (v: number | null | undefined, kind: 'num' | 'pct' | 'x') => fmt(v, kind)
 
-/** Valuation → Against peers: find candidates (rules), let the AI pick (a proposal, checked by rules) or tick them
+/** Peers: find candidates (rules), let the AI pick (a proposal, checked by rules) or tick them
  * yourself, approve the set, then read each peer's numbers (rules, row by row, Stop keeps what's in). */
 export function PeersSection({ parsed, doc, setDoc, projection, short }: {
   parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null; short: string
@@ -120,22 +120,22 @@ export function PeersSection({ parsed, doc, setDoc, projection, short }: {
   return (
     <section className="blk" id="peers" aria-labelledby="peers-h">
       <div className="strip-head">
-        <h2 id="peers-h" tabIndex={-1} ref={head}>{choosing ? (p.approved_at ? 'Change peers' : 'Pick peers') : 'The peer table'}</h2>
+        <h2 id="peers-h" tabIndex={-1} ref={head}>{choosing ? (p.approved_at ? 'Change peer set' : 'Choose peers') : 'Relative valuation'}</h2>
         {!choosing && !run && <span className="peer-acts">
-          <button type="button" className="link small" onClick={() => read(p.chosen)}>Update prices and results</button>
-          <button type="button" className="link small" onClick={() => { setTicked(p.chosen); setEditing(true) }}>Change peers</button>
+          <button type="button" className="link small" onClick={() => read(p.chosen)}>Refresh prices and financials</button>
+          <button type="button" className="link small" onClick={() => { setTicked(p.chosen); setEditing(true) }}>Change peer set</button>
         </span>}
       </div>
       {choosing
         ? <Pick {...{ p, own, ai, typed, setTyped, find, pick, picking, ticked, toggle, approve, addHand, editing, run: !!run && !run.stopped }}
             cancel={() => { setEditing(false); setTicked(p.chosen) }} />
         : <>
-          <p className="why">{short} against {p.chosen.length} listed {p.chosen.length === 1 ? 'company' : 'companies'} in its line of business, each on its last
-            reported year. Rank 1 = best: largest, fastest growing, highest margins, returns and cash conversion, least debt, cheapest.</p>
+          <p className="why">{short} vs {p.chosen.length} listed peer{p.chosen.length === 1 ? '' : 's'}, each on its last reported year. Rank 1 = best: largest,
+            fastest growing, highest margins, ROCE and cash conversion, lowest leverage, lowest multiple.</p>
           <Why p={p} />
           {steps}{msgs}
           {t ? <Table t={t} p={p} short={short} reading={run?.kind === 'read' && !run.stopped} retry={s => read([s])} />
-            : (!run || run.stopped) && <p className="val-empty">No peer numbers yet. <button type="button" className="link" onClick={() => read(p.chosen)}>Read them from NSE</button></p>}
+            : (!run || run.stopped) && <p className="val-empty">No peer financials yet. <button type="button" className="link" onClick={() => read(p.chosen)}>Read from NSE</button></p>}
         </>}
       {choosing && <>{steps}{msgs}</>}
     </section>
@@ -156,22 +156,22 @@ function Pick({ p, own, ai, typed, setTyped, find, pick, picking, ticked, toggle
   const cands = p.candidates
   return <>
     {/* the page answer above already says how peers are picked: here only what is compared, once candidates exist */}
-    {cands.length > 0 && <p className="why">Compared on size, growth, margins, returns, debt and P/E, EV/EBITDA, P/B at today’s prices. Candidates
-      come from the same NSE sector, closest in size.</p>}
+    {cands.length > 0 && <p className="why">Compared on P/E, EV/EBITDA, P/B at CMP, plus market cap, revenue CAGR, margins, ROCE and leverage.
+      Candidates: same NSE sector, closest in market cap.</p>}
     {!cands.length && (own
-      ? <div className="empty-state"><p className="small muted">Start by listing same-sector companies on NSE.</p>
+      ? <div className="empty-state"><p className="small muted">Shortlist same-sector companies on NSE.</p>
           <p className="next-act"><button type="button" className="primary" disabled={run} onClick={() => find(own)}>Find peers on NSE</button>
             {aiOff && <button type="button" className="btn" disabled>Let AI pick (AI off)</button>}</p></div>
       : <form className="peer-sym" onSubmit={e => { e.preventDefault(); if (SYMBOL.test(sym)) find(sym) }}>
-        <label htmlFor={`${id}-sym`}>This model came from a file, so it doesn’t know its NSE symbol. Type it to find peers:</label>
+        <label htmlFor={`${id}-sym`}>No NSE symbol (built from a file). Enter it to find peers:</label>
         <span className="add-row"><input id={`${id}-sym`} type="text" value={typed} onChange={e => setTyped(e.target.value)} placeholder="e.g. TCS" spellCheck={false} autoComplete="off"
           aria-invalid={sym !== '' && !SYMBOL.test(sym)} />
         <button type="submit" className="primary" disabled={run || !SYMBOL.test(sym)}>Find peers</button></span>
       </form>)}
     {cands.length > 0 && <>
-      {aiOff && cands.some(c => !c.hand) && <p className="peer-off">AI picking is off on this computer, so {ticked.length
-        ? 'the closest companies in the same industry are ticked for you. Untick any that don’t fit, tick others'
-        : 'tick the peers that fit'}. The list is NSE’s {cands[0]?.sector ?? 'same-sector'} companies: the same industry first, then the closest in size.</p>}
+      {aiOff && cands.some(c => !c.hand) && <p className="peer-off">AI selection is off, so {ticked.length
+        ? 'same-industry companies are pre-ticked; adjust as needed'
+        : 'tick the peers that fit'}. List: NSE {cands[0]?.sector ?? 'same-sector'} companies, same industry first, then closest in market cap.</p>}
       {aiOff && <p><button type="button" className="btn" disabled>Let AI pick (AI off)</button></p>}
       {!aiOff && !p.proposal && own && <p><button type="button" className="primary" disabled={picking || run} onClick={pick}>
         {picking ? 'AI is picking…' : <>Let AI pick the closest <span className="ai-tag">AI</span></>}</button>{' '}
@@ -194,7 +194,7 @@ function Pick({ p, own, ai, typed, setTyped, find, pick, picking, ticked, toggle
           return <li key={c.symbol} className={ticked.includes(c.symbol) ? 'on' : undefined}>
             <label><input type="checkbox" checked={ticked.includes(c.symbol)} onChange={() => toggle(c.symbol)} />
               <span><b>{c.name}</b> <span className="tag">{c.symbol}</span>
-                <span className="small muted"> {c.why}{c.mcap ? ` · market cap Rs ${money(c.mcap)} cr` : ''}</span>
+                <span className="small muted"> {c.why}{c.mcap ? ` · mcap Rs ${money(c.mcap)} cr` : ''}</span>
                 {k?.pass && <span className="peer-why"><span className="tag ai">AI</span> {k.reason}</span>}</span></label>
           </li>
         })}</ul>
@@ -252,7 +252,7 @@ function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; sho
   return <>
     <div className="table-wrap peer-wrap" tabIndex={0} role="region" aria-labelledby="peer-cap">
       <table className="peer-table">
-        <caption id="peer-cap" className="visually-hidden">The company against its peers: measures, the peers’ median and the company’s rank</caption>
+        <caption id="peer-cap" className="visually-hidden">Relative valuation: metrics, peer median and the company’s rank</caption>
         <thead><tr><th scope="col">Company</th><th scope="col">Year</th>{cols.map(([k, label, , , dir]) => <th key={k} scope="col">{label}{dir && <span className="col-dir">{dir}</span>}</th>)}</tr></thead>
         <tbody>
           <tr className="is-own"><th scope="row">{t.own.name} <span className="sr">(this company)</span></th><td>{t.own.year}</td>
@@ -270,20 +270,20 @@ function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; sho
         </tbody>
       </table>
     </div>
-    <p className="small-note">Numbers from each company’s NSE results filings, read by rules; older years come from an Excel export of
-      that company when you have one (hover a name to see where each year came from). Market cap and multiples at NSE prices read {ago(at)}; {short} at the price in this model.
-      Growth is revenue CAGR; ROCE = EBIT / average capital employed; cash conversion = cash from operations / net profit over 3 years; EV = market cap +
-      borrowings − cash − investments. Blank: not enough years, or a negative base. Leases count as debt only where the source includes them.</p>
+    <p className="small-note">Financials from each company’s NSE results filings (XBRL, by rules); older years from an Excel export of
+      that company when available (hover a name for sources). Market cap and multiples at NSE prices {ago(at)}; {short} at this model’s CMP.
+      Growth: revenue CAGR. ROCE = EBIT ÷ average capital employed. Cash conversion = CFO ÷ PAT, 3 years. EV = market cap + borrowings − cash −
+      investments. Blank: insufficient years or a negative base. Leases count as debt only where the source includes them.</p>
   </>
 }
 
 const PLAIN: Record<string, [string, string]> = {
-  mcap: ['Size: market cap, Rs cr', 'higher is bigger'], pe: ['Price ÷ earnings (P/E)', 'lower is cheaper'],
-  ev_ebitda: ['Company value ÷ operating profit (EV/EBITDA)', 'lower is cheaper'], pb: ['Price ÷ book value (P/B)', 'lower is cheaper'],
-  revenue: ['Sales, Rs cr', 'higher is bigger'], g3: ['Sales growth, 3 years', 'higher is faster'], g5: ['Sales growth, 5 years', 'higher is faster'],
-  ebitda_margin: ['Operating margin (EBITDA)', 'higher is better'], net_margin: ['Net margin', 'higher is better'],
-  roce: ['Return on capital (ROCE)', 'higher is better'], cash_conv: ['Cash conversion, 3 years', 'cash from operations ÷ profit; higher is better'],
-  nd_ebitda: ['Net debt ÷ operating profit', 'lower is safer'],
+  mcap: ['Mcap, Rs cr', '↑ larger'], pe: ['P/E', '↓ cheaper'],
+  ev_ebitda: ['EV/EBITDA', '↓ cheaper'], pb: ['P/B', '↓ cheaper'],
+  revenue: ['Revenue, Rs cr', '↑ larger'], g3: ['Revenue CAGR 3Y', '↑ faster'], g5: ['Revenue CAGR 5Y', '↑ faster'],
+  ebitda_margin: ['EBITDA margin', '↑ better'], net_margin: ['PAT margin', '↑ better'],
+  roce: ['ROCE', '↑ better'], cash_conv: ['CFO/PAT 3Y', '↑ better'],
+  nd_ebitda: ['Net debt/EBITDA', '↓ safer'],
 }
 
 /** Why these peers: when and how the set was approved, then the reason per pick (the AI's, with its basis, or yours). */
@@ -292,23 +292,23 @@ function Why({ p }: { p: PeersDoc }) {
   const name = (s: string) => p.candidates.find(c => c.symbol === s)?.name ?? p.rows.find(r => r.symbol === s)?.name ?? s
   const aiN = p.chosen.filter(s => by.get(s)?.pass).length
   return <details className="fold">
-    <summary><span><b>Why these peers</b> · approved {p.approved_at ? when(p.approved_at).replace(/ \d{4}$/, '') : ''}: {aiN ? `${aiN} picked by AI and checked by rules, ` : ''}{p.chosen.length - aiN} ticked by you{p.candidates[0]?.sector ? `; NSE’s ${p.candidates[0].sector} companies` : ''}</span></summary>
+    <summary><span><b>Why these peers</b> · approved {p.approved_at ? when(p.approved_at).replace(/ \d{4}$/, '') : ''}: {aiN ? `${aiN} AI-picked and rule-checked, ` : ''}{p.chosen.length - aiN} chosen manually{p.candidates[0]?.sector ? `; NSE’s ${p.candidates[0].sector} companies` : ''}</span></summary>
     <ul className="peer-rej">{p.chosen.map(s => {
       const k = by.get(s)
       return <li key={s}><b>{name(s)}</b> ({s}): {k?.pass ? <><span className="tag ai">AI</span> {k.reason}</>
         : p.candidates.find(c => c.symbol === s)?.hand ? 'Added by you.' : `Ticked by you. ${p.candidates.find(c => c.symbol === s)?.why ?? ''}`}</li>
     })}</ul>
-    {p.proposal && <p className="small-note">The AI chose from the companies rules found on NSE; every pick was checked (on the list, not this
-      company, NSE data there, basis stated, one plain line) and you approved the set. Basis: {p.proposal.basis === 'segments' ? 'the annual report’s segments and NSE’s classification' : 'NSE’s industry classification only'}.</p>}
+    {p.proposal && <p className="small-note">AI chose from the rule-based NSE shortlist; each pick was checked (on the list, not this
+      company, NSE data available, basis stated, one line) and the set approved by you. Basis: {p.proposal.basis === 'segments' ? 'the annual report’s segments and NSE’s classification' : 'NSE’s industry classification only'}.</p>}
   </details>
 }
 
-/** "Against 4 peers, TCS ranks 2nd of 5 on ROCE (...), ... and 3rd cheapest of 5 on P/E (...)." */
+/** "Relative to 4 peers, TCS ranks 2nd of 5 on ROCE (...), ... and 3rd lowest of 5 on P/E (...)." */
 export function peerWords(t: PeerTable, read: number, short: string) {
   const bit = (k: string, what: string, kind: 'pct' | 'x', cheap = false) => t.rank[k] == null || t.median[k] == null ? null
-    : `${cheap && t.rank[k] === 1 ? 'the cheapest' : `${ordinal(t.rank[k]!)}${cheap ? ' cheapest' : ''}`} of ${t.of[k]} on ${what} (${fmt(t.own.metrics?.[k], kind)} against a median ${fmt(t.median[k], kind)})`
-  const parts = [bit('roce', 'return on capital (ROCE)', 'pct'), bit('g3', '3-year growth', 'pct'), bit('pe', 'price to earnings (P/E)', 'x', true)].filter(Boolean) as string[]
-  return `Against ${read} peer${read > 1 ? 's' : ''}, ${short} ranks ${parts.length
-    ? parts.join(parts.length > 2 ? ', ' : ' and ').replace(/, (?=[^,]*$)/, ' and ') : 'on too few measures to say'}.`
+    : `${cheap && t.rank[k] === 1 ? 'lowest' : `${ordinal(t.rank[k]!)}${cheap ? ' lowest' : ''}`} of ${t.of[k]} on ${what} (${fmt(t.own.metrics?.[k], kind)} vs median ${fmt(t.median[k], kind)})`
+  const parts = [bit('roce', 'ROCE', 'pct'), bit('g3', '3-year revenue CAGR', 'pct'), bit('pe', 'P/E', 'x', true)].filter(Boolean) as string[]
+  return `Relative to ${read} peer${read > 1 ? 's' : ''}, ${short} ranks ${parts.length
+    ? parts.join(parts.length > 2 ? ', ' : ' and ').replace(/, (?=[^,]*$)/, ' and ') : 'on too few metrics to say'}.`
 }
 

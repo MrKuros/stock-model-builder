@@ -1079,12 +1079,12 @@ def valuation_check(co, projs, ex):
     b = model.valuation(burn, co["hist"], None, ex["base"], co["market"], dict(ex, bear=dict(ex["bear"], capex_pct=0.4)))
     assert burn["bear"][-1]["fcff"] < 0 and b["error"] is None and b["scenarios"]["base"]["error"] is None, b["error"]
     bb = b["scenarios"]["bear"]
-    assert "spends more cash than it brings in" in bb["error"] and bb["per_share"] is None and bb["grid"] == [[None] * 5] * 5, bb["error"]
+    assert "FCFF of Rs" in bb["error"] and "no fair value" in bb["error"] and bb["per_share"] is None and bb["grid"] == [[None] * 5] * 5, bb["error"]
     assert bb["implied_growth"] is None and b["scenarios"]["base"]["per_share"] == v["scenarios"]["base"]["per_share"]
     # ... and says why in plain words, with fixes that do give a value when typed as the last year's input
-    assert "takes 40.0% of sales" in bb["error"] and "Any one of these stops the cash burn" in bb["error"], bb["error"]
-    assert "(" not in bb["error"].split("free cash flow of")[1][:12] and "Rs −" in bb["error"], bb["error"]  # −235, not (235)
-    for key, pat in (("capex_pct", r"capex of at most ([\d.]+)%"), ("ebitda_margin", r"operating margin of at least ([\d.]+)%")):
+    assert "capex is 40.0% of sales" in bb["error"] and "Any one of these turns FCFF positive" in bb["error"], bb["error"]
+    assert "(" not in bb["error"].split("FCFF of")[1][:12] and "Rs −" in bb["error"], bb["error"]  # −235, not (235)
+    for key, pat in (("capex_pct", r"capex of at most ([\d.]+)%"), ("ebitda_margin", r"EBITDA margin of at least ([\d.]+)%")):
         x = float(re.search(pat, bb["error"]).group(1)) / 100
         assert abs(bb["fix"][key] - x) < 5e-4, (key, bb["fix"], x)  # the same figure, as a number for one-click use
         fixed = dict(ex["bear"], capex_pct=0.4)
@@ -2531,8 +2531,8 @@ def pages_check(server, root):
 
     app.mount("/", server.AppPages(directory=dist, html=True))
     c = TestClient(app)
-    pages = ("summary", "value", "priced-in", "risks", "changes", "peers", "forecast", "note", "business",
-             "statements/quarters", "documents", "versions", "overview", "valuation")  # old addresses redirect in the app
+    pages = ("summary", "valuation", "reverse-dcf", "risks", "tracking", "peers", "forecast", "note", "financials",
+             "statements/quarters", "documents", "versions", "overview", "value", "priced-in", "changes", "business")  # old addresses redirect in the app
     for path in ("/", "/add", "/c/tcs/overview", "/c/tcs/statements/profit-and-loss?v=2026-10-17",
                  "/c/tcs/value?v=2026-10-17-1451", "/c/jsw-steel-ltd/checks", *(f"/c/tcs/{p}" for p in pages)):
         r = c.get(path)
@@ -3286,7 +3286,7 @@ def watch_check(server, data):
         # refresh: only the stale or missing quote is asked for (NEWCO's is minutes old), then a history point each
         n = len(calls)
         ev = [json.loads(x) for x in client.post("/api/watch/prices").text.splitlines()]
-        assert [e["step"] for e in ev if "step" in e] == ["Checking today’s prices on NSE: TESTIND (1 of 1)…"], ev
+        assert [e["step"] for e in ev if "step" in e] == ["Fetching prices from NSE: TESTIND (1 of 1)…"], ev
         assert ev[-1] == {"done": True, "checked": 1, "missed": 0, "stopped": False, "left": 0} and len(calls) == n + 1, ev
         r1 = row()
         assert r1["price"] == 1650 and r1["price_saved"] == saved and r1["price_live"], r1

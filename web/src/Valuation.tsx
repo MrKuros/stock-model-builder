@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { niceTicks } from './Chart'
-import { Bridge, RulerSection, avg, grow, grew, last3Of, subjectOf, verdictWords } from './Note'
+import { Bridge, RulerSection, avg, baseCagr, last3Of, subjectOf, verdictWords } from './Note'
 import { Next, PageHead } from './Shell'
 import { useHref } from './route'
+import { T, def } from './Term'
 import {
   NAMES, copyBase, dec2, drifted, fmt, gap, money, noNegZero, verdict, type Cagr, type ModelDoc, type Multiple, type Parsed, type Projection,
   type Scenario, type ValInputs, type Valuation,
@@ -61,15 +62,15 @@ function Field({ id, label, term, unit, value, fallback, nullable, onCommit }: {
 
 interface Props { parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null }
 
-/** "No value yet" with the fix right there: the page's answer when a case can't be valued. */
+/** "No fair value" with the fix right there: the page's answer when a scenario can't be valued. */
 function NoValue({ parsed, projection }: { parsed: Parsed; projection: Projection | null }) {
   const href = useHref()
   const { answer, fix } = verdictWords(parsed, projection)
   return <>{answer}{fix && <> <a className="primary" href={href(fix.page, fix.anchor)}>{fix.label}</a></>}</>
 }
 
-/** Is it cheap?: today's price against our three values and how sure that is (both grids), other yardsticks, where
- * the value comes from, then the discount-rate settings and the bridge, folded. */
+/** Valuation: CMP against bear/base/bull fair value, sensitivity (both grids), multiples, TV share, then the WACC
+ * inputs and the EV-to-equity bridge, folded. */
 export default function ValuationPage({ parsed, doc, setDoc, projection }: Props) {
   const href = useHref()
   const { company, years: histYears } = parsed
@@ -86,21 +87,23 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
   const price = v?.price ?? null
   const sa = v?.scenarios[active], shown = sa?.per_share ?? null
   const name = subjectOf(company)
-  const our = `our ${NAMES[active].toLowerCase()} value`
+  const our = `${NAMES[active].toLowerCase()}-case fair value`
   const values = v ? { bear: v.scenarios.bear.per_share, base: shown, bull: v.scenarios.bull.per_share } : null
   const k = verdict(price, values).kind
   const P = price != null ? <span className="num mkt">Rs {rs(price)}</span> : null
   const V = shown != null ? <span className="num ours">Rs {rs(shown)}</span> : null
-  const answer: ReactNode = !v ? 'Working out the value…'
-    // the case you're on, not the central one: its own reason and the way to fix it
+  const pe = sa?.multiples?.price_next.pe
+  const at = <>CMP {P}{pe != null && proj ? <> ({pe.toFixed(1)}x {proj.years[0]} P/E)</> : null}</>
+  const answer: ReactNode = !v ? 'Running the DCF…'
+    // the scenario you're on, not the base: its own reason and the way to fix it
     : (shown == null || shown <= 0) && active !== 'base' && !v.error && v.shares != null
-      ? <>Our {NAMES[active].toLowerCase()} case has no value yet: {(sa?.error ?? 'its inputs gave an error.').replace(/^./, c => c.toLowerCase())}{' '}
+      ? <>No {NAMES[active].toLowerCase()}-case fair value: {(sa?.error ?? 'its inputs gave an error.').replace(/^./, c => c.toLowerCase())}{' '}
         <a className="primary" href={href('forecast', 'capex_pct')}>Fix the forecast</a></>
     : shown == null || shown <= 0 ? <NoValue parsed={parsed} projection={projection} />
-    : price == null ? <>{our.replace(/^./, c => c.toUpperCase())} is {V} a share. There’s no share price to compare it with: type one under How we value it.</>
-    : k === 'dear' ? <><b>No.</b> At {P} the price is above all three of our values: {gap(price, shown)} to {our} of {V}.</>
-    : k === 'cheap' ? <><b>Yes.</b> At {P} the price is below even our cautious value: {gap(price, shown)} to {our} of {V}.</>
-    : <><b>Somewhere in between.</b> At {P} the price sits inside our range: {gap(price, shown)} to {our} of {V}.</>
+    : price == null ? <>{our.replace(/^./, c => c.toUpperCase())} {V}/share. No CMP: enter one under DCF inputs.</>
+    : k === 'dear' ? <>{at} is above all three fair values: {gap(price, shown)} to {our} of {V}.</>
+    : k === 'cheap' ? <>{at} is below all three fair values: {gap(price, shown)} to {our} of {V}.</>
+    : <>{at} is within the bear–bull range: {gap(price, shown)} to {our} of {V}.</>
   const grids = v && v.steps && sa?.per_share != null && v.shares != null
   const cells = grids ? [...sa!.grid.flat(), ...sa!.grid_gm.flat()].filter((x): x is number => x != null) : []
   const peerMed = doc.peers?.approved_at ? proj?.peers?.median ?? null : null
@@ -109,104 +112,103 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
 
   return (
     <>
-      <PageHead label="Answers · Is it cheap?" title={`Is ${name} cheap?`}
-        purpose={<>Today’s price against what our forecast says one share is worth, and how sure that is. To see what the price itself
-          assumes, open <a href={href('priced-in')}>What does the price assume?</a></>}
+      <PageHead label="Analysis · Valuation" title="Valuation"
+        purpose={<><T k="dcf" /> (<T k="fcff" /> at <T k="wacc" />, Gordon-growth <T k="tv" />): fair value per share by scenario, sensitivity, and
+          multiples. For what CMP implies, see <a href={href('reverse-dcf')}>Reverse DCF</a>.</>}
         answer={answer} />
-      {parsed.share_gap && shown != null && shown > 0 && <p className="guard">Shares are up {fmt(parsed.share_gap.gap, 'pct')} since the last balance
-        sheet (an IPO or QIP?). The cash that raised isn’t in net debt yet, so this value per share reads low.{' '}
-        <a href={href('documents', 'data')}>See the data note</a></p>}
+      {parsed.share_gap && shown != null && shown > 0 && <p className="guard">Share count up {fmt(parsed.share_gap.gap, 'pct')} since the last balance
+        sheet (IPO/QIP?). The proceeds aren’t in net debt yet, so fair value per share is understated.{' '}
+        <a href={href('documents', 'data')}>Data note</a></p>}
 
       {v && !v.error && shown != null && v.shares != null && <>
         <section className="pane v-line" aria-labelledby="line-h">
-          <h2 id="line-h">Price against our three values <span className="cnt">Rs a share</span></h2>
+          <h2 id="line-h">CMP vs fair value <span className="cnt">Rs/share</span></h2>
           <Ruler v={v} active={active} />
-          {drifted(doc.scenarios) && <p className="small muted">Cautious and hopeful no longer sit at central ± 3 points of sales growth and ± 1.5 points of
-            margin (one of the cases was edited). <button type="button" className="link" onClick={() => copyBase(setDoc, doc.scenarios)}>Copy central to both</button></p>}
+          {drifted(doc.scenarios) && <p className="small muted">Bear and bull no longer sit at base ∓/±3 pp revenue growth and ∓/±1.5 pp EBITDA
+            margin (a scenario was edited). <button type="button" className="link" onClick={() => copyBase(setDoc, doc.scenarios)}>Re-seed from base</button></p>}
         </section>
 
         <section className="blk" id="sure" aria-labelledby="sure-h">
-          <h2 id="sure-h">How sure are we?</h2>
-          {proj && <p className="why">{DEFINE(proj.years[n - 1])}</p>}
-          {grids && price != null
-            ? <p className="answer s">We tried {cells.length} combinations of the four numbers we’re least sure of around {our};{' '}
-                <b>{cells.filter(x => x >= price).length} of {cells.length} are at or above today’s price.</b></p>
-            : <p className="why">No share price, so nothing to compare the combinations with.</p>}
+          <h2 id="sure-h">Sensitivity</h2>
+                    {grids && price != null
+            ? <p className="answer s"><b>{cells.filter(x => x >= price).length} of {cells.length}</b> sensitivity cells are at or above CMP
+                (WACC × TG and revenue growth × EBITDA margin, around {our}).</p>
+            : <p className="why">No CMP to compare the grid with.</p>}
           {grids && <div className="sens-grids">
-            <Grid id="sens-wacc" title="Discount rate × long-run growth" rowsName="Discount rate" colsName="long-run growth"
+            <Grid id="sens-wacc" title="WACC × terminal growth" rowsName="WACC" colsName="TG"
               grid={sa!.grid} rows={v.steps!.wacc.map(d => fmt(v.wacc + d, 'pct'))} cols={v.steps!.g.map(d => fmt(v.g + d, 'pct'))} price={price} />
-            <Grid id="sens-gm" title="Sales growth × operating margin" rowsName="Sales growth, points from ours" colsName="operating margin, points from ours"
+            <Grid id="sens-gm" title="Revenue growth × EBITDA margin" rowsName="Growth Δpp" colsName="Margin Δpp"
               grid={sa!.grid_gm} rows={v.steps!.growth.map(pp)} cols={v.steps!.margin.map(pp)} price={price} />
           </div>}
-          {grids && price != null && <p className="small muted grid-key"><span className="gk hit">▲ Rs</span> at or above today’s price ·{' '}
-            <span className="gk">Rs</span> below it · the deeper the shade, the further from the price · the boxed cell is ours</p>}
+          {grids && price != null && <p className="small muted grid-key"><span className="gk hit">▲ Rs</span> ≥ CMP ·{' '}
+            <span className="gk">Rs</span> &lt; CMP · shade deepens with distance from CMP · boxed: current inputs</p>}
         </section>
 
         {m && <section className="blk" id="yardsticks" aria-labelledby="yard-h">
-          <h2 id="yard-h">Other yardsticks</h2>
+          <h2 id="yard-h">Multiples</h2>
           <div className="table-wrap yard-wrap" tabIndex={0} role="region" aria-labelledby="yard-h">
             <table className="yard">
-              <thead><tr><th scope="col"><span className="sr">Measure</span></th><th scope="col">At the price, {asOf}</th><th scope="col">At {our}</th><th scope="col">Peer median</th></tr></thead>
-              <tbody>{MULTS.map(([key, label]) => (
-                <tr key={key}><th scope="row">{label}</th><td className="num mkt">{fmt(m.price_last[key], 'x')}</td><td className="num ours">{fmt(m.value_last[key], 'x')}</td>
+              <thead><tr><th scope="col"><span className="sr">Multiple</span></th><th scope="col">At CMP, {asOf}</th><th scope="col">At {NAMES[active].toLowerCase()} FV</th><th scope="col">Peer median</th></tr></thead>
+              <tbody>{MULTS.map(([key]) => (
+                <tr key={key}><th scope="row"><T k={key} /></th><td className="num mkt">{fmt(m.price_last[key], 'x')}</td><td className="num ours">{fmt(m.value_last[key], 'x')}</td>
                   <td className="num">{peerMed ? fmt(peerMed[key], 'x') : '–'}</td></tr>))}</tbody>
             </table>
           </div>
           <p className="small">{peerMed && m.price_last.pe != null && peerMed.pe != null
-            ? <>On earnings {name} looks {m.price_last.pe < peerMed.pe ? 'cheaper than' : 'dearer than'} its peers; on our cash-flow model it {k === 'dear' ? 'looks costly' : k === 'cheap' ? 'looks cheap' : 'sits inside our range'}. </>
-            : <>No peers picked yet, so there’s no peer median. </>}
-            <a className="go" href={href('peers')}>{peerMed ? 'Compare with peers' : 'Pick peers'}</a></p>
-          {v.multiples && next && <details className="fold"><summary>{name}’s own multiples over the years</summary>
+            ? <>{name} trades at a {m.price_last.pe < peerMed.pe ? 'discount' : 'premium'} to the peer median on P/E ({fmt(m.price_last.pe, 'x')} vs {fmt(peerMed.pe, 'x')}); on DCF, CMP is {k === 'dear' ? 'above the bull case' : k === 'cheap' ? 'below the bear case' : 'within the bear–bull range'}. </>
+            : <>No peer set yet, so no peer median. </>}
+            <a className="go" href={href('peers')}>{peerMed ? 'Peers' : 'Choose peers'}</a></p>
+          {v.multiples && next && <details className="fold"><summary>Historical multiples (own range)</summary>
             <Multiples v={v} active={active} asOf={asOf} next={next} /></details>}
         </section>}
 
         {tv != null && tv >= 0 && tv <= 1 && <section className="blk" aria-labelledby="from-h">
-          <h2 id="from-h">Where the value comes from</h2>
-          <p className="why">{tv > 0.6 ? 'Most of the value sits in the years after our forecast, so the long-run growth and discount rate matter a lot.'
-            : 'Most of the value comes from the forecast years themselves.'}</p>
-          <div className="two-bar" role="img" aria-label={`Next ${n} years ${Math.round((1 - tv) * 100)}%, after ${proj!.years[n - 1]} ${Math.round(tv * 100)}%`}>
-            <span style={{ width: `${(1 - tv) * 100}%` }}>Next {n} years {Math.round((1 - tv) * 100)}%</span>
-            <span>After {proj!.years[n - 1].replace(/E$/, '')} {Math.round(tv * 100)}%</span>
+          <h2 id="from-h">Explicit period vs terminal value</h2>
+          <p className="why">{tv > 0.6 ? <>Terminal value is {Math.round(tv * 100)}% of EV: fair value is highly sensitive to WACC and terminal growth.</>
+            : <>Terminal value is {Math.round(tv * 100)}% of EV; most value sits in the explicit forecast.</>}</p>
+          <div className="two-bar" role="img" aria-label={`PV of FCFF ${proj!.years[0]}–${proj!.years[n - 1]} ${Math.round((1 - tv) * 100)}%, PV of TV ${Math.round(tv * 100)}%`}>
+            <span style={{ width: `${(1 - tv) * 100}%` }}>PV of FCFF, {n}Y {Math.round((1 - tv) * 100)}%</span>
+            <span>PV of TV {Math.round(tv * 100)}%</span>
           </div>
         </section>}
       </>}
 
       <details className="fold blk" id="how">
-        <summary><span><b>How we value it (8 settings)</b>{v && <> · discount rate {fmt(v.wacc, 'pct')} · long-run growth {fmt(v.g, 'pct')}{edited ? ' · you changed some' : ' · the app’s defaults'}</>}</span></summary>
-        <p className="why">The same settings apply to all three cases. A box showing a grey number uses it until you type your own.
-          {edited && <> <button type="button" className="link" onClick={() => onChange(() => defaults)}>Reset all to the defaults</button></>}</p>
-        <div className="wacc" role="group" aria-label="Discount rate and long-run growth settings">
-          <Field id="v-rf" label="Risk-free rate" term="10-year government bond yield" unit="%" value={inputs.rf} onCommit={x => x != null && set('rf')(x)} />
-          <Field id="v-erp" label="Extra return for owning shares" term="Equity risk premium, over the bond yield" unit="%" value={inputs.erp} onCommit={x => x != null && set('erp')(x)} />
-          <Field id="v-beta" label="How much the stock swings (beta)" term="1 = average; the app’s default, not measured for this stock" unit="" value={inputs.beta} onCommit={x => x != null && set('beta')(x)} />
-          <Field id="v-kd" label="Cost of borrowing" term="Interest rate on its debt, before tax" unit="%" value={inputs.kd} nullable fallback={pct(v?.kd)} onCommit={set('kd')} />
-          <Field id="v-g" label="Long-run growth (terminal)" term="Growth a year forever after the forecast" unit="%" value={inputs.g} onCommit={x => x != null && set('g')(x)} />
-          <Field id="v-wacc" label="Use my own discount rate (override)" term="Blank = built from the four above" unit="%" value={inputs.wacc_override} nullable fallback={pct(buildUp)}
+        <summary><span><b>DCF inputs (8)</b>{v && <> · WACC {fmt(v.wacc, 'pct')} · TG {fmt(v.g, 'pct')}{edited ? ' · edited' : ' · defaults'}</>}</span></summary>
+        <p className="why">Common to all three scenarios. A grey placeholder is the fallback used until you enter a value.
+          {edited && <> <button type="button" className="link" onClick={() => onChange(() => defaults)}>Reset to defaults</button></>}</p>
+        <div className="wacc" role="group" aria-label="WACC and terminal growth inputs">
+          <Field id="v-rf" label="Risk-free rate (Rf)" term={def('rf')} unit="%" value={inputs.rf} onCommit={x => x != null && set('rf')(x)} />
+          <Field id="v-erp" label="Equity risk premium (ERP)" term={def('erp')} unit="%" value={inputs.erp} onCommit={x => x != null && set('erp')(x)} />
+          <Field id="v-beta" label="Beta" term={def('beta')} unit="" value={inputs.beta} onCommit={x => x != null && set('beta')(x)} />
+          <Field id="v-kd" label="Cost of debt (Kd, pre-tax)" term="Blank = base-case interest rate" unit="%" value={inputs.kd} nullable fallback={pct(v?.kd)} onCommit={set('kd')} />
+          <Field id="v-g" label="Terminal growth (TG)" term="FCFF growth in perpetuity after the explicit period" unit="%" value={inputs.g} onCommit={x => x != null && set('g')(x)} />
+          <Field id="v-wacc" label="WACC override" term="Blank = CAPM build-up" unit="%" value={inputs.wacc_override} nullable fallback={pct(buildUp)}
             onCommit={set('wacc_override')} />
-          <Field id="v-price" label="Share price" term={company.source?.symbol
-            ? `From NSE, ${new Date(company.source.price_at ?? company.source.fetched_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}; type today’s`
-            : 'From the export; type today’s'} unit="Rs" value={inputs.price} nullable
+          <Field id="v-price" label="CMP" term={company.source?.symbol
+            ? `NSE, ${new Date(company.source.price_at ?? company.source.fetched_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}; enter to override`
+            : 'From the export; enter to override'} unit="Rs" value={inputs.price} nullable
             fallback={market?.price != null ? String(market.price) : 'none'} onCommit={set('price')} />
-          <Field id="v-shares" label="Shares" term="Number of shares, in crore" unit="cr" value={inputs.shares} nullable
+          <Field id="v-shares" label="Shares outstanding" term="Crore" unit="cr" value={inputs.shares} nullable
             fallback={market?.shares != null ? dec2(market.shares).replace(/,/g, '') : 'none'} onCommit={set('shares')} />
         </div>
         <label className="vcheck">
           <input type="checkbox" checked={inputs.mid_year} onChange={e => onChange(p => ({ ...p, mid_year: e.target.checked }))} />
-          Cash arrives through the year, not at its end (mid-year)
+          Mid-year discounting convention
         </label>
         {v && <p className="wacc-sum small">
-          Shareholders want {fmt(v.ke, 'pct')} ({fmt(inputs.rf, 'pct')} + {inputs.beta} × {fmt(inputs.erp, 'pct')}); debt costs {fmt(v.kd_after_tax, 'pct')} after {fmt(v.tax, 'pct')} tax;
-          weighted {fmt(v.we, 'pct')} equity ({v.price && v.shares ? 'at market value' : 'at book value'}), {fmt(1 - v.we, 'pct')} debt.{' '}
-          <b>Discount rate <span className="num ours">{fmt(v.wacc, 'pct')}</span></b>{inputs.wacc_override != null && <> (yours; the build-up gives {fmt(buildUp, 'pct')})</>}.
+          <T k="ke" /> {fmt(v.ke, 'pct')} ({fmt(inputs.rf, 'pct')} + {inputs.beta} × {fmt(inputs.erp, 'pct')}); post-tax Kd {fmt(v.kd_after_tax, 'pct')} at {fmt(v.tax, 'pct')} tax;
+          weights {fmt(v.we, 'pct')} equity ({v.price && v.shares ? 'market value' : 'book value'}), {fmt(1 - v.we, 'pct')} debt.{' '}
+          <b>WACC <span className="num ours">{fmt(v.wacc, 'pct')}</span></b>{inputs.wacc_override != null && <> (override; build-up {fmt(buildUp, 'pct')})</>}.
         </p>}
         {v?.error && <p className="val-error" role="alert">{v.error}</p>}
       </details>
 
       {v && !v.error && v.shares != null && <details className="fold" id="bridge">
-        <summary><span><b>From company value to share value</b> · the three cases, and the central value built up</span></summary>
-        <div className="table-wrap" tabIndex={0} role="region" aria-label="By case: company value to equity to per share">
+        <summary><span><b>EV to equity bridge</b> · by scenario, and the base-case build-up</span></summary>
+        <div className="table-wrap" tabIndex={0} role="region" aria-label="By scenario: EV to equity value to per share">
           <table className="val-table">
-            <thead><tr><th scope="col">Rs crore</th><th scope="col">Company value (EV)</th><th scope="col">Shareholders’ value</th><th scope="col">Per share (Rs)</th><th scope="col">Against the price</th></tr></thead>
+            <thead><tr><th scope="col">Rs cr</th><th scope="col">EV</th><th scope="col">Equity value</th><th scope="col">FV/share (Rs)</th><th scope="col">Upside/(downside)</th></tr></thead>
             <tbody>{ORDER.map(s => {
               const x = v.scenarios[s]
               return <tr key={s} className={s === active ? 'is-active' : undefined}><th scope="row">{NAMES[s]}</th><td>{money(x.ev)}</td><td>{money(x.equity)}</td>
@@ -215,22 +217,20 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
           </table>
         </div>
         {v.scenarios.base.per_share != null && proj && <Bridge v={v} value={v.scenarios.base.per_share} price={price} years={proj.years} />}
-        <p className="small muted">Shareholders’ value = company value − borrowings{v.lease ? ' and lease liabilities' : ''} Rs {money(v.borrowings)} cr + cash Rs {money(v.cash)} cr +
-          investments Rs {money(v.investments)} cr ({asOf}){v.nci > 0 && <> − minority holders’ {fmt(v.nci, 'pct')} share of profit</>}. After the forecast: the last year’s free cash
-          flow growing {fmt(v.g, 'pct')} a year forever. Free cash flow = operating profit after tax + depreciation − capex − change in working capital.</p>
+        <p className="small muted">Equity value = EV − borrowings{v.lease ? ' incl. lease liabilities' : ''} Rs {money(v.borrowings)} cr + cash Rs {money(v.cash)} cr +
+          investments Rs {money(v.investments)} cr ({asOf}){v.nci > 0 && <> − minority interest ({fmt(v.nci, 'pct')} of PAT)</>}. TV: final-year FCFF growing at
+          {' '}{fmt(v.g, 'pct')} in perpetuity. FCFF = EBIT × (1 − t) + D&A − capex − Δ working capital.</p>
       </details>}
 
-      <Next lead="Disagree with the value? Change the sales growth or margin and watch it move."><a className="btn" href={href('forecast')}>Change the forecast</a></Next>
+      <Next lead="Fair value moves with revenue growth and EBITDA margin; edit the drivers in Forecast."><a className="btn" href={href('forecast')}>Forecast</a></Next>
     </>
   )
 }
 
-/** The two settings every grid and table here leans on, in one plain line. */
-const DEFINE = (last: string, n?: number) => `Discount rate = the yearly return you’d want for the risk of owning this business; long-run growth = how fast its cash grows each year after ${n ? `the ${n} forecast years` : last.replace(/E$/, '')}, forever.`
 
-const pp = (d: number) => (d === 0 ? 'ours' : `${d > 0 ? '+' : '−'}${Math.abs(d * 100)}`)
+const pp = (d: number) => (d === 0 ? 'base' : `${d > 0 ? '+' : '−'}${Math.abs(d * 100)}`)
 
-/** A 5 × 5 grid: cells at or above the price get ▲ and an outline; the cell we use is boxed and labelled "ours". */
+/** A 5 × 5 grid: cells at or above CMP get ▲ and an outline; the current cell is boxed and labelled "base". */
 function Grid({ id, title, rowsName, colsName, grid, rows, cols, price }: {
   id: string; title: string; rowsName: string; colsName: string; grid: (number | null)[][]; rows: string[]; cols: string[]; price: number | null
 }) {
@@ -239,8 +239,8 @@ function Grid({ id, title, rowsName, colsName, grid, rows, cols, price }: {
   const up = price == null ? 0 : all.filter(x => x >= price).length
   return (
     <figure className="grid-f">
-      <figcaption id={id}><b>{title}</b>{price != null && <span className="small"> {up} of {all.length} at or above today’s price.</span>}
-        <span className="small muted"> Value a share, Rs.</span></figcaption>
+      <figcaption id={id}><b>{title}</b>{price != null && <span className="small"> {up}/{all.length} ≥ CMP.</span>}
+        <span className="small muted"> FV/share, Rs.</span></figcaption>
       <div className="table-wrap sens-wrap" tabIndex={0} role="region" aria-labelledby={id}>
         <table className="sens-table">
           <thead><tr><th scope="col" className="g-corner">{rowsName} ↓<br />{colsName} →</th>{cols.map(c => <th scope="col" key={c}>{c}</th>)}</tr></thead>
@@ -253,8 +253,8 @@ function Grid({ id, title, rowsName, colsName, grid, rows, cols, price }: {
                 const style = val == null || price == null ? undefined : { background: `color-mix(in srgb, var(${hit ? '--ours-soft' : '--market-soft'}) ${Math.round(45 + g * 55)}%, var(--panel))` }
                 return <td key={i} className={`${cur ? 'is-current' : ''}${hit ? ' hit' : ''}`} style={style}>
                   {hit && <span aria-hidden="true">▲ </span>}{val == null ? '–' : rs(val)}
-                  {cur && <span className="ours-tag" aria-hidden="true">ours</span>}{cur && <span className="sr"> (ours)</span>}
-                  {hit && <span className="sr"> (at or above the price)</span>}
+                  {cur && <span className="ours-tag" aria-hidden="true">now</span>}{cur && <span className="sr"> (current inputs)</span>}
+                  {hit && <span className="sr"> (at or above CMP)</span>}
                 </td>
               })}
             </tr>
@@ -265,46 +265,45 @@ function Grid({ id, title, rowsName, colsName, grid, rows, cols, price }: {
   )
 }
 
-/** What does the price assume?: the reverse view only. The ruler, then one table: each input one step either way and
- * the level at which the price would be fair. */
+/** Reverse DCF: the implied view only. The ruler, then one table: each driver one step either way and the break-even
+ * level at which base-case fair value equals CMP. */
 export function PricedIn({ parsed, doc, projection }: Props) {
   const href = useHref()
   const v = projection?.valuation ?? null
   const sv = v?.scenarios.base, value = sv?.per_share ?? null, price = v?.price ?? null
-  const name = subjectOf(parsed.company)
   const best = (cs: Cagr[] = []) => (cs.length ? cs.reduce((a, b) => (b.value > a.value ? b : a)) : null)
   const b5 = best(parsed.cagrs?.['5'])
   const implied = sv?.implied_growth ?? null, l3 = last3Of(parsed)
   const P = price != null ? <span className="num mkt">Rs {rs(price)}</span> : null
-  const answer: ReactNode = !v ? 'Working out the value…'
+  const ours = baseCagr(parsed, projection)
+  const answer: ReactNode = !v ? 'Running the DCF…'
     : value == null || value <= 0 ? <NoValue parsed={parsed} projection={projection} />
-    : price == null ? <>There’s no share price, so there’s nothing to work backwards from.</>
-    : implied == null ? <>No steady sales growth between −30% and +80% a year gets our central value to {P}.</>
-    : implied < 0 ? <>The price assumes sales {grow(implied)} a year.{l3 != null && <> {name} {grew(l3)} a year over the last three.</>}</>
-    : <>Sales growth of {fmt(implied, 'pct')} a year for {doc.n} years, with everything else as in our forecast.
-      {b5 && <> {name}’s best five years were {fmt(b5.value, 'pct')} ({b5.from}–{b5.to.slice(-2)}).</>}</>
+    : price == null ? <>No CMP, so nothing to solve for.</>
+    : implied == null ? <>No flat revenue growth between −30% and +80% reconciles base-case FV to {P}.</>
+    : <>CMP {P} implies {fmt(implied, 'pct')} revenue CAGR over {doc.n} years (other drivers at base){ours != null ? <> vs {fmt(ours, 'pct')} in our base case</> : null}.
+      {l3 != null && <> Last 3 years: {fmt(l3, 'pct')}.</>}{b5 && <> Best 5-year CAGR: {fmt(b5.value, 'pct')} ({b5.from}–{b5.to.slice(-2)}).</>}</>
   return (
     <>
-      <PageHead label="Answers · What does the price assume?" title="What does the price assume?"
-        purpose={<>Works backwards from today’s price{P && <> of {P}</>}: what the business would have to do for it to be fair. Our own value and how sure it is are
-          on <a href={href('value')}>Is it cheap?</a></>}
+      <PageHead label="Analysis · Reverse DCF" title="Reverse DCF"
+        purpose={<>Implied expectations: the driver levels at which base-case fair value equals CMP{P && <> of {P}</>}. Fair value and sensitivity are
+          on <a href={href('valuation')}>Valuation</a>.</>}
         answer={answer} />
       {v && value != null && value > 0 && <>
         <RulerSection parsed={parsed} doc={doc} projection={projection} />
         {price != null && v.note && <Moves parsed={parsed} doc={doc} v={v} value={value} price={price} />}
       </>}
-      <Next lead="Think one of these is reachable?"><a className="btn" href={href('forecast', 'growth')}>Change it in the forecast</a></Next>
+      <Next lead="Test an implied level against the base case."><a className="btn" href={href('forecast', 'growth')}>Forecast</a></Next>
     </>
   )
 }
 
 const MOVES: Record<string, [string, string]> = {
-  growth: ['Sales growth', 'a year'], ebitda_margin: ['Operating margin', 'of sales'], wacc: ['Discount rate', 'a year'], g: ['Long-run growth', 'after the forecast'],
+  growth: ['Revenue growth', 'YoY'], ebitda_margin: ['EBITDA margin', ''], wacc: ['WACC', ''], g: ['Terminal growth', ''],
 }
-const stepWords = (s: number) => `${+(s * 100).toFixed(1)} point${s === 0.01 ? '' : 's'}`
+const stepWords = (s: number) => `${+(s * 100).toFixed(1)} pp`
 
-/** What moves the value: each input one step lower and higher (one shared scale, centred on our value), and the level
- * at which the price would be fair, tagged against the company's own record. */
+/** Driver sensitivity: each driver one step lower and higher (one shared scale, centred on base FV), and the break-even
+ * level at which FV equals CMP, tagged against the company's own record. */
 function Moves({ parsed, doc, v, value, price }: { parsed: Parsed; doc: ModelDoc; v: Valuation; value: number; price: number }) {
   const href = useHref()
   const be = v.note!.breakevens
@@ -322,50 +321,50 @@ function Moves({ parsed, doc, v, value, price }: { parsed: Parsed; doc: ModelDoc
   const x = (n: number) => 50 + ((n - value) / w) * 50
   const tag = (k: string, need: number | null): ReactNode => {
     if (need == null) return null
-    if (k === 'wacc' || k === 'g') return <span className="tg judge">a judgement call</span>
+    if (k === 'wacc' || k === 'g') return <span className="tg judge">judgemental</span>
     const rec = k === 'growth' ? b5?.value : bestM?.[0]
-    return rec != null && need > rec ? <span className="tg never" title={k === 'growth' && b5 ? `Best five years: ${fmt(b5.value, 'pct')} (${b5.from}–${b5.to.slice(-2)})` : bestM ? `Best year: ${fmt(bestM[0], 'pct')} (${bestM[1]})` : undefined}>never done</span>
-      : <span className="tg ok">within its record</span>
+    return rec != null && need > rec ? <span className="tg never" title={k === 'growth' && b5 ? `Best 5-year CAGR: ${fmt(b5.value, 'pct')} (${b5.from}–${b5.to.slice(-2)})` : bestM ? `Best year: ${fmt(bestM[0], 'pct')} (${bestM[1]})` : undefined}>above track record</span>
+      : <span className="tg ok">within track record</span>
   }
-  const tryIt = (k: string) => (k === 'wacc' || k === 'g' ? href('value', 'how') : href('forecast', k))
+  const tryIt = (k: string) => (k === 'wacc' || k === 'g' ? href('valuation', 'how') : href('forecast', k))
   return (
     <section className="blk" aria-labelledby="moves-h" id="moves">
-      <h2 id="moves-h">What moves the value</h2>
-      <p className="why">Each input moved one step lower and higher, the rest of our central case left alone. The bar is centred on our value of{' '}
-        <span className="num ours">Rs {rs(value)}</span>; blue raises the value, grey lowers it. The last column is where that input would have to be for{' '}
-        <span className="num mkt">Rs {rs(price)}</span> to be fair. {DEFINE('', doc.n)}</p>
+      <h2 id="moves-h">Break-even drivers</h2>
+      <p className="why">Each driver flexed one step either way, others at base. Bars centre on base-case FV{' '}
+        <span className="num ours">Rs {rs(value)}</span> (blue: higher, grey: lower). Break-even: the flat level at which FV equals CMP{' '}
+        <span className="num mkt">Rs {rs(price)}</span>.</p>
       <div className="table-wrap moves-wrap">
         <table className="moves">
-          <thead><tr><th scope="col">Input · ours · step</th><th scope="col">Value if the input is one step lower</th><th scope="col"><span className="sr">Bar</span></th>
-            <th scope="col">Value if one step higher</th><th scope="col">For the price to be fair</th><th scope="col"><span className="sr">Try it</span></th></tr></thead>
+          <thead><tr><th scope="col">Driver · base · step</th><th scope="col">FV at −1 step</th><th scope="col"><span className="sr">Bar</span></th>
+            <th scope="col">FV at +1 step</th><th scope="col">Break-even</th><th scope="col"><span className="sr">Edit</span></th></tr></thead>
           <tbody>{rows.map(d => {
             const b = be[d.key as keyof typeof be], need = b?.value ?? null
             const ends = [d.down, d.up].filter((y): y is number => y != null)
             const l = Math.min(...ends), r = Math.max(...ends)
             return <tr key={d.key}>
-              <th scope="row"><b>{MOVES[d.key][0]}</b><span className="small muted">{fmt(ours(d.key), 'pct')} {MOVES[d.key][1]} · step ±{stepWords(d.step)}</span></th>
-              <td data-label="One step lower" className="num">{d.down == null ? 'no value' : `Rs ${rs(d.down)}`}</td>
+              <th scope="row"><b>{MOVES[d.key][0]}</b><span className="small muted">{fmt(ours(d.key), 'pct')}{MOVES[d.key][1] && ` ${MOVES[d.key][1]}`} · step ±{stepWords(d.step)}</span></th>
+              <td data-label="FV at −1 step" className="num">{d.down == null ? 'n/a' : `Rs ${rs(d.down)}`}</td>
               <td className="mv-bar" aria-hidden="true"><span className="mv-track">
                 {l < value && <i className="lo" style={{ left: `${x(l)}%`, width: `${x(value) - x(l)}%` }} />}
                 {r > value && <i className="hi" style={{ left: `${x(value)}%`, width: `${x(r) - x(value)}%` }} />}
                 <i className="mid" /></span></td>
-              <td data-label="One step higher" className="num">{d.up == null ? 'no value' : `Rs ${rs(d.up)}`}</td>
-              <td data-label="For the price to be fair">{need != null ? <><span className="num">{fmt(need, 'pct')}</span> {tag(d.key, need)}</>
-                : <span className="tg none">no level{b?.range ? ` in ${fmt(b.range[0], 'pct')} to ${fmt(b.range[1], 'pct')}` : ''} gets there</span>}</td>
-              <td><a className="go" href={tryIt(d.key)}>Try it{d.key === 'wacc' || d.key === 'g' ? '' : ' in the forecast'}</a></td>
+              <td data-label="FV at +1 step" className="num">{d.up == null ? 'n/a' : `Rs ${rs(d.up)}`}</td>
+              <td data-label="Break-even">{need != null ? <><span className="num">{fmt(need, 'pct')}</span> {tag(d.key, need)}</>
+                : <span className="tg none">none{b?.range ? ` in ${fmt(b.range[0], 'pct')} to ${fmt(b.range[1], 'pct')}` : ''}</span>}</td>
+              <td><a className="go" href={tryIt(d.key)}>{d.key === 'wacc' || d.key === 'g' ? 'DCF inputs' : 'Forecast'}</a></td>
             </tr>
           })}</tbody>
         </table>
       </div>
-      <p className="small muted">A lower discount rate raises the value, so its bar runs the other way round. Payout, other income and interest don’t move a
-        cash-flow value, so they aren’t here.</p>
+      <p className="small muted">WACC is inversely related to FV, so its bar runs the other way. Payout, other income and interest don’t enter FCFF, so they
+        aren’t shown.</p>
     </section>
   )
 }
 
-const PAD = 12, ROW = 17, CH = 7.5 // label row height; width of one 12px mono character (7.2) plus the halo
+const PAD = 12, ROW = 17, CH = 8.2 // label row height; width of one 12px mono character (7.2) plus the halo
 
-/** One axis: today's price in ink, each scenario's value per share in pencil, labels stacked so they never collide. */
+/** One axis: CMP in ink, each scenario's fair value in pencil, labels stacked so they never collide. */
 function Ruler({ v, active }: { v: Valuation; active: Scenario }) {
   const box = useRef<HTMLDivElement>(null)
   const [w, setW] = useState(600)
@@ -376,7 +375,7 @@ function Ruler({ v, active }: { v: Valuation; active: Scenario }) {
   }, [])
 
   const marks = [
-    ...(v.price != null ? [{ key: 'price', ink: true, value: v.price, text: `Price Rs ${rs(v.price)}` }] : []),
+    ...(v.price != null ? [{ key: 'price', ink: true, value: v.price, text: `CMP Rs ${rs(v.price)}` }] : []),
     ...ORDER.flatMap(s => {
       const x = v.scenarios[s]
       return x.per_share == null ? [] : [{
@@ -412,7 +411,7 @@ function Ruler({ v, active }: { v: Valuation; active: Scenario }) {
   return (
     <div className="ruler" ref={box}>
       <svg width={w} height={H} role="img"
-        aria-label={`Value per share: ${marks.map(m => m.text).join(', ')}`}>
+        aria-label={`Fair value per share: ${marks.map(m => m.text).join(', ')}`}>
         <line className="ruler-axis" x1={PAD} x2={w - PAD} y1={axis} y2={axis} />
         {ticks.map(t => (
           <g key={t}>
@@ -439,12 +438,12 @@ function Ruler({ v, active }: { v: Valuation; active: Scenario }) {
 }
 
 const MULTS: [Multiple, string, string][] = [
-  ['pe', 'Price ÷ earnings (P/E)', 'market cap / net profit'],
-  ['ev_ebitda', 'Company value ÷ operating profit (EV/EBITDA)', 'enterprise value / EBITDA'],
-  ['pb', 'Price ÷ book value (P/B)', 'market cap / book equity'],
+  ['pe', 'P/E', def('pe')],
+  ['ev_ebitda', 'EV/EBITDA', def('ev_ebitda')],
+  ['pb', 'P/B', def('pb')],
 ]
 
-/** Today's price and the active scenario's value as P/E, EV/EBITDA and P/B, against the company's own history. */
+/** CMP and the active scenario's fair value as P/E, EV/EBITDA and P/B, against the company's own history. */
 function Multiples({ v, active, asOf, next }: { v: Valuation; active: Scenario; asOf: string; next: string }) {
   const h = v.multiples!, m = v.scenarios[active].multiples!, ps = v.scenarios[active].per_share
   const years = h.hist.pe.length
@@ -466,21 +465,20 @@ function Multiples({ v, active, asOf, next }: { v: Valuation; active: Scenario; 
     <div className="mult">
             <p className="muted small">
         {priced
-          ? <>The company’s own multiples at each of its {years} reported year ends set the reference. ▲ / ▼ marks a
-            multiple above the historical high or below the low.</>
-          : <>No year-end share prices for past years, so there is nothing to compare with.</>}{' '}
-        EV = market cap + borrowings − cash − investments. Blank where the value or the earnings are zero or negative.
+          ? <>Reference: own multiples at {years} reported year-ends. ▲ / ▼: above the historical high / below the low.</>
+          : <>No historical year-end prices, so no own range.</>}{' '}
+        EV = market cap + borrowings − cash − investments. Blank where the denominator or value is ≤ 0.
       </p>
       <div className="table-wrap" tabIndex={0} role="region" aria-labelledby="mult-cap">
         <table className="mult-table">
-          <caption id="mult-cap" className="visually-hidden">Multiples: history, today’s price and the {NAMES[active].toLowerCase()} value per share</caption>
+          <caption id="mult-cap" className="visually-hidden">Multiples: history, at CMP and at {NAMES[active].toLowerCase()}-case fair value</caption>
           <thead>
             <tr>
               <td rowSpan={2} />
               <th scope="colgroup" colSpan={2}>History</th>
-              <th scope="colgroup" colSpan={2}>Price{v.price != null && <> Rs {rs(v.price)}</>}</th>
+              <th scope="colgroup" colSpan={2}>CMP{v.price != null && <> Rs {rs(v.price)}</>}</th>
               <th scope="colgroup" colSpan={2} className="ours">
-                {NAMES[active]} value{ps != null && <> Rs {rs(ps)}</>}
+                {NAMES[active]} FV{ps != null && <> Rs {rs(ps)}</>}
               </th>
             </tr>
             <tr>
@@ -492,7 +490,7 @@ function Multiples({ v, active, asOf, next }: { v: Valuation; active: Scenario; 
           <tbody>
             {MULTS.map(([k, name, what]) => (
               <tr key={k}>
-                <th scope="row" title={what}>{name}</th>
+                <th scope="row"><abbr className="gt" title={what} data-def={what} tabIndex={0}>{name}</abbr></th>
                 <td>{x(h.median[k])}</td>
                 <td>{h.min[k] == null ? '–' : `${x(h.min[k])}–${x(h.max[k])}`}</td>
                 {cell(k, m.price_last[k], false)}{cell(k, m.price_next[k], false)}

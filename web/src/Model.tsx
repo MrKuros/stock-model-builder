@@ -11,37 +11,37 @@ import {
   type Kind, type ModelDoc, type MovedOut, type Parsed, type Path, type Paths, type Projection, type Proposal, type Row, type Scenario, type Sources, type Ttm,
 } from './lib'
 
-/** Each input in plain words first, the term in brackets; the line under it says what it is a share of. */
+/** Each driver's standard label, and a terse definition under it. */
 export const PLAIN: Record<string, [string, string]> = {
-  growth: ['Sales growth', 'a year, every forecast year'],
-  ebitda_margin: ['Operating margin (EBITDA)', 'operating profit as a share of sales'],
-  capex_pct: ['Capital spending (capex)', 'spend on new plant and equipment, % of sales'],
-  tax_rate: ['Tax rate', '% of profit before tax'],
-  payout: ['Share of profit paid out (payout)', 'paid as dividends'],
-  dso: ['Days customers take to pay (receivable days)', 'days of sales waiting to be collected'],
-  dpo: ['Days we take to pay suppliers (payable days)', 'days of sales owed to suppliers'],
-  dio: ['Days of stock held (inventory days)', 'days of sales sitting as stock'],
-  cogs_pct: ['Cost of goods (COGS)', 'materials and purchases, % of sales'],
-  dep_pct: ['Wear and tear (depreciation)', '% of last year’s plant written off'],
-  int_rate: ['Interest rate on borrowings', '% of last year’s debt and leases'],
-  oi_pct: ['Other income', 'treasury and non-operating income, % of sales'],
-  mi_pct: ['Minority and associates’ share', 'associates’ profit in, minority holders’ share out'],
-  oca_pct: ['Other current assets', 'advances and deposits, % of sales'],
-  ol_pct: ['Other liabilities', 'provisions and advances received, % of sales'],
-  debt_change: ['Planned borrowing change', 'Rs crore a year; shortfalls are borrowed anyway'],
+  growth: ['Revenue growth', 'YoY, each forecast year'],
+  ebitda_margin: ['EBITDA margin', 'EBITDA ÷ revenue'],
+  capex_pct: ['Capex % of sales', 'capital expenditure ÷ revenue'],
+  tax_rate: ['Tax rate', 'effective, % of PBT'],
+  payout: ['Dividend payout', '% of PAT'],
+  dso: ['Debtor days', 'receivables ÷ revenue × 365'],
+  dpo: ['Creditor days', 'payables ÷ COGS or revenue × 365'],
+  dio: ['Inventory days', 'inventory ÷ COGS or revenue × 365'],
+  cogs_pct: ['COGS % of sales', 'materials + purchases ± inventory change'],
+  dep_pct: ['Depreciation rate', '% of opening net block'],
+  int_rate: ['Interest rate', '% of opening debt incl. leases'],
+  oi_pct: ['Other income % of sales', 'treasury and non-operating income'],
+  mi_pct: ['Minority interest / associates', 'net share of PAT'],
+  oca_pct: ['Other current assets % of sales', 'advances, deposits'],
+  ol_pct: ['Other liabilities % of sales', 'provisions, advances received'],
+  debt_change: ['Net debt change', 'Rs cr a year; funding gaps are borrowed regardless'],
 }
 export const inputName = (k: string, fallback = k) => PLAIN[k]?.[0] ?? fallback
 const TOP = ['growth', 'ebitda_margin']
 const ALSO = ['capex_pct', 'tax_rate', 'payout', 'dso', 'dpo', 'dio']
 // how default_assumptions() gets each default (model.py); the arithmetic is the reported years shown beside it
 const RULE: Record<string, string> = {
-  growth: 'Revenue CAGR over the last 3 years (every year, exclusions ignored)',
-  oi_pct: 'Median of the last 3 years’ other income % revenue (drops a one-off)',
-  capex_pct: 'Median of the last 3 years’ capex % revenue',
-  debt_change: 'Held flat: no planned new borrowing',
-  tax_rate: '3-yr ratio of sums: tax ÷ profit before tax, kept between 0% and 50%',
-  payout: '3-yr ratio of sums: dividend ÷ net profit, kept between 0% and 100%',
-  mi_pct: '3-yr ratio of sums, kept between −50% and 50%',
+  growth: '3-yr revenue CAGR (all years; exclusions ignored)',
+  oi_pct: '3-yr median of other income % revenue (drops a one-off)',
+  capex_pct: '3-yr median of capex % revenue',
+  debt_change: 'Zero: no planned net borrowing',
+  tax_rate: '3-yr ratio of sums: tax ÷ PBT, bounded 0–50%',
+  payout: '3-yr ratio of sums: dividend ÷ PAT, bounded 0–100%',
+  mi_pct: '3-yr ratio of sums, bounded −50% to 50%',
 }
 const ruleOf = (k: string) => RULE[k] ?? '3-yr ratio of sums (each year weighted by its size)'
 // payout, other income, interest and minorities don't move a cash-flow-to-firm value (model.IMPACT)
@@ -54,22 +54,22 @@ export const lower = (s: string) => (/^[A-Z]{2}/.test(s) ? s : s.charAt(0).toLow
 /** A default the filings moved, offered to all three cases in one click: the case's value now, the new default. */
 export interface Upgrade { key: string; label: string; kind: Kind; from: number; to: number }
 const METRICS: [string, string, (r: Row) => number | null][] = [
-  ['revenue', 'Sales', r => r.revenue],
-  ['ebitda', 'Operating profit', r => r.ebitda],
-  ['pat', 'Net profit', r => r.pat],
-  ['fcf', 'Free cash flow', r => r.fcf],
-  ['net_cash', 'Net cash', r => (r.cash ?? 0) + (r.investments ?? 0) - (r.borrowings ?? 0) - (r.lease ?? 0)],
+  ['revenue', 'Revenue', r => r.revenue],
+  ['ebitda', 'EBITDA', r => r.ebitda],
+  ['pat', 'PAT', r => r.pat],
+  ['fcf', 'FCF', r => r.fcf],
+  ['net_cash', 'Net cash/(debt)', r => (r.cash ?? 0) + (r.investments ?? 0) - (r.borrowings ?? 0) - (r.lease ?? 0)],
 ]
 
-/** "−Rs 87 per 1 point": the central value's slope from the one-step runs (model.drivers_impact), in the input's unit. */
+/** "−Rs 87 per 1 pp": the base fair value's slope from the one-step runs (model.drivers_impact), in the input's unit. */
 export function perStep(k: string, impact: Impact[] | undefined, kind: Kind): string | null {
-  if (NO_VALUE.has(k)) return 'doesn’t move the value'
+  if (NO_VALUE.has(k)) return 'no effect on FCFF'
   const d = impact?.find(x => x.key === k)
   if (!d || d.down == null || d.up == null) return null
   const unit = kind === 'pct' ? 0.01 : 10
   const s = ((d.up - d.down) / (2 * d.step)) * unit
-  if (Math.abs(s) < 0.5) return 'barely moves the value'
-  return `${s < 0 ? '−' : '+'}Rs ${Math.abs(s) >= 10 ? money(Math.round(Math.abs(s))) : rs(Math.abs(s))} per ${kind === 'pct' ? '1 point' : '10 days'}`
+  if (Math.abs(s) < 0.5) return '< Rs 0.5/share per step'
+  return `${s < 0 ? '−' : '+'}Rs ${Math.abs(s) >= 10 ? money(Math.round(Math.abs(s))) : rs(Math.abs(s))} /share per ${kind === 'pct' ? '1 pp' : '10 days'}`
 }
 
 interface Props {
@@ -77,7 +77,7 @@ interface Props {
   anchor: string; upgrades: Upgrade[]; onApply: () => void; onKeep: () => void
 }
 
-/** Our forecast: the inputs in three tiers, each row opening in place with its editor; the AI suggestions; the
+/** Forecast: the drivers in three tiers, each row opening in place with its editor; the AI suggestions; the
  * projection the inputs produce. */
 export default function ModelView({ parsed, doc, setDoc, projection, anchor, upgrades, onApply, onKeep }: Props) {
   const href = useHref()
@@ -126,9 +126,9 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
   /** The source in words: yours (yellow), from an approved AI suggestion (yellow, cited), or the rule (blue). */
   const srcWords = (k: string): ReactNode => {
     const s = srcOf(k), p = propOf(s), kind = kindOf(k)
-    if (p) return <Src kind="you">You set this · from {docOf(p)} p. {p.source.page}</Src>
-    if (s === 'manual' || (s !== 'history' && isYou(k))) return <Src kind="you">You set this · rule said {path(seeded[active][k], kind)}</Src>
-    return <Src kind="rule">Rule: {k === 'debt_change' ? 'no new borrowing' : k === 'growth' ? 'last 3 years’ growth' : 'last 3 years'}</Src>
+    if (p) return <Src kind="you">Edited · from {docOf(p)} p. {p.source.page}</Src>
+    if (s === 'manual' || (s !== 'history' && isYou(k))) return <Src kind="you">Edited · default {path(seeded[active][k], kind)}</Src>
+    return <Src kind="rule">Default: {k === 'debt_change' ? 'zero' : k === 'growth' ? '3-yr CAGR' : '3-yr history'}</Src>
   }
   const impact = v?.note?.impact
   const be = v?.note?.breakevens ?? {}
@@ -164,32 +164,32 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
 
   return (
     <>
-      <PageHead label="Work on it · Our forecast" title="Our forecast"
-        purpose={<>The assumptions behind our value. Rules set each one from {name}’s own last three years; change any of them and the
-          value updates as you type. Recalculating never calls AI.</>}
+      <PageHead label="Model · Forecast" title="Forecast"
+        purpose={<>Three-statement forecast drivers. Defaults are rule-based from {name}’s last three reported years; edits re-run the
+          model and DCF instantly. Recalculation never calls AI.</>}
         answer={v && (v.scenarios[active].per_share ?? 0) > 0
-          ? <>With these inputs one share is worth <span className="num ours">Rs {rs(v.scenarios[active].per_share!)}</span> in the {NAMES[active].toLowerCase()} case.
-            {ownCount ? <> {ownCount === 1 ? 'One number is' : `${ownCount} numbers are`} yours; the rest come from the rules.</> : <> Every number comes from the rules.</>}</>
-          : <>These inputs don’t give a value yet{v?.scenarios[active].error ? `: ${v.scenarios[active].error.replace(/^./, c => c.toLowerCase())}` : '.'}</>} />
+          ? <>{NAMES[active]}-case fair value <span className="num ours">Rs {rs(v.scenarios[active].per_share!)}</span>/share.
+            {ownCount ? <> {ownCount} driver{ownCount === 1 ? '' : 's'} edited; the rest at rule defaults.</> : <> All drivers at rule defaults.</>}</>
+          : <>No fair value with these drivers{v?.scenarios[active].error ? `: ${v.scenarios[active].error.replace(/^./, c => c.toLowerCase())}` : '.'}</>} />
 
       <div className="f-tool">
-        <p>Editing the <b>{NAMES[active]}</b> case <span className="small muted">(change it in the bar at the top)</span></p>
+        <p>Editing the <b>{NAMES[active]}</b> scenario <span className="small muted">(switch in the top bar)</span></p>
         <button type="button" className="btn" aria-expanded={suggest} aria-controls="draft" onClick={() => setSuggest(s => !s)}>
           Suggest from documents <span className="ai-tag">AI</span></button>
       </div>
       <p className="status-line" aria-live="polite">
-        {proj && offIdx < 0 && <span className="ok">Balance sheet balances in every forecast year</span>}
-        {offIdx >= 0 && roundingOnly && <span className="ok">Balance sheet balances ({projYears[0]} cash is off by Rs {money(off)} cr from rounding in the reported figures)</span>}
+        {proj && offIdx < 0 && <span className="ok">Balance sheet balances in all forecast years</span>}
+        {offIdx >= 0 && roundingOnly && <span className="ok">Balance sheet balances ({projYears[0]} cash off by Rs {money(off)} cr: rounding in reported figures)</span>}
       </p>
-      {offIdx >= 0 && !roundingOnly && <div className="notice-bar bad inline" role="alert">The balance sheet doesn’t balance in {projYears[offIdx]} by Rs {money(off)} crore.
-        Usually an input far outside its record causes it; reset the last one you changed.</div>}
+      {offIdx >= 0 && !roundingOnly && <div className="notice-bar bad inline" role="alert">Balance sheet out by Rs {money(off)} cr in {projYears[offIdx]}.
+        Usually a driver far outside its history; reset the last edit.</div>}
 
       {upgrades.length > 0 && (
         <div className="banner" role="status">
-          <p>The rules’ figures moved after the filings or approved notes changed:{' '}
+          <p>Rule defaults moved after filings or approved notes changed:{' '}
             {upgrades.map((u, i) => <span key={u.key}>{i > 0 && '; '}{lower(inputName(u.key, u.label))} {fmt(u.from, u.kind)} → <b className="num">{fmt(u.to, u.kind)}</b></span>)}.
-            Your inputs haven’t changed.</p>
-          <div className="banner-act"><button type="button" className="btn" onClick={onApply}>Use the new figures</button>
+            Assumptions unchanged.</p>
+          <div className="banner-act"><button type="button" className="btn" onClick={onApply}>Use new defaults</button>
             <button type="button" className="link" onClick={onKeep}>Keep mine</button></div>
         </div>
       )}
@@ -197,36 +197,36 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
       {suggest && <div id="draft"><DraftPanel parsed={parsed} doc={doc} d={draft} ai={ai} href={href('documents', 'add')} /></div>}
 
       <section className="f-tier" aria-labelledby="t1-h" id="inputs">
-        <h2 id="t1-h">The two that move the value most</h2>
-        <p className="why">Sales growth and operating margin move the value more than anything else you can set here.</p>
+        <h2 id="t1-h">Key value drivers</h2>
+        <p className="why">Revenue growth and EBITDA margin carry most of the fair-value sensitivity.</p>
         <ul className="drows big">{TOP.filter(shown).map(k => row(k, true))}</ul>
       </section>
       <section className="f-tier" aria-labelledby="t2-h">
-        <h2 id="t2-h">Also used <span className="cnt">{also.length}</span></h2>
+        <h2 id="t2-h">Other drivers <span className="cnt">{also.length}</span></h2>
         <ul className="drows">{also.map(k => row(k))}</ul>
       </section>
       <details className="fold f-more" open={rest.includes(open ?? '') || undefined}>
-        <summary><span><b>Accounting details ({rest.length})</b> · {rest.map(k => lower(inputName(k))).join(', ')}: all set by the rules unless you change them</span></summary>
+        <summary><span><b>Balance-sheet and other items ({rest.length})</b> · {rest.map(k => inputName(k)).join(', ')}</span></summary>
         <ul className="drows">{rest.map(k => row(k))}</ul>
       </details>
       <details className="fold f-more">
-        <summary><span><b>Copy or reset the cases</b> · cautious and hopeful start from central: sales growth ± 3 points, margin ± 1.5 points</span></summary>
+        <summary><span><b>Copy or reset scenarios</b> · bear/bull = base ∓/±3 pp revenue growth, ∓/±1.5 pp EBITDA margin</span></summary>
         <div className="next-act">
-          <button type="button" className="btn" onClick={() => copyBase(setDoc, scenarios)}>Copy central to cautious and hopeful</button>
-          <button type="button" className="btn" onClick={() => setResetAsk(true)}>Reset {NAMES[active].toLowerCase()} to the rules’ figures</button>
+          <button type="button" className="btn" onClick={() => copyBase(setDoc, scenarios)}>Re-seed bear and bull from base</button>
+          <button type="button" className="btn" onClick={() => setResetAsk(true)}>Reset {NAMES[active].toLowerCase()} to rule defaults</button>
         </div>
       </details>
-      <Confirm open={resetAsk} title={`Reset the ${NAMES[active].toLowerCase()} case to the rules’ figures?`}
-        body={<>Every input in this case goes back to what the rules set{ownCount ? <>, including the {ownCount} you set</> : null}. You can Undo it straight after.</>}
-        yes="Reset to the rules" onYes={resetActive} onClose={() => setResetAsk(false)} />
+      <Confirm open={resetAsk} title={`Reset the ${NAMES[active].toLowerCase()} case to rule defaults?`}
+        body={<>Every driver in this scenario reverts to its rule default{ownCount ? <>, including {ownCount} edited</> : null}. Undo is available straight after.</>}
+        yes="Reset to defaults" onYes={resetActive} onClose={() => setResetAsk(false)} />
 
       <Produces parsed={parsed} projection={projection} active={active} n={n} borrowed={borrowed} />
-      <Next lead="See every line the forecast produces, year by year."><a className="btn" href={href('statements')}>See the full statements</a></Next>
+      <Next lead="Full projected P&L, balance sheet and cash flow."><a className="btn" href={href('statements')}>Statements</a></Next>
     </>
   )
 }
 
-/** One input: closed, a row (name, history, value and its source, effect on the value); open, the editor in place. */
+/** One driver: closed, a row (name, history, value and its source, FV sensitivity); open, the editor in place. */
 function DriverRow({ k, big, kind, open, onToggle, value, rule, you, src, history, years, effect, need, burn, name, onChange, onReset, children }: {
   k: string; big: boolean; kind: Kind; open: boolean; onToggle: () => void; value: Path; rule: Path; you: boolean; src: ReactNode
   history: (number | null)[]; years: string[]; effect: string | null; need: number | null; burn: number | null; name: string
@@ -238,9 +238,9 @@ function DriverRow({ k, big, kind, open, onToggle, value, rule, you, src, histor
   const known = history.map((x, i) => [x, years[i]] as const).filter((p): p is readonly [number, string] => p[0] != null && Number.isFinite(p[0]))
   const hi = known.length ? known.reduce((m, p) => (p[0] > m[0] ? p : m)) : null
   const lo = known.length ? known.reduce((m, p) => (p[0] < m[0] ? p : m)) : null
-  const what = lower(label.replace(/ \(.*\)$/, ''))
-  const guard = hi && value.start > hi[0] + 1e-9 ? <><b>Higher than any year on record.</b> {name}’s highest {what} was {fmt(hi[0], kind)} in {hi[1]}. Fine if you have a reason; the research note will mention it.</>
-    : lo && value.start < lo[0] - 1e-9 ? <><b>Lower than any year on record.</b> {name}’s lowest {what} was {fmt(lo[0], kind)} in {lo[1]}.</> : null
+  const what = lower(label)
+  const guard = hi && value.start > hi[0] + 1e-9 ? <><b>Above historical high.</b> {name}’s peak {what}: {fmt(hi[0], kind)} ({hi[1]}). The research note will flag it.</>
+    : lo && value.start < lo[0] - 1e-9 ? <><b>Below historical low.</b> {name}’s trough {what}: {fmt(lo[0], kind)} ({lo[1]}).</> : null
   const id = `in-${k}`
   return (
     <li className={`drow${open ? ' open' : ''}${big ? ' big' : ''}`} id={`a-${k}`}>
@@ -263,25 +263,25 @@ function DriverRow({ k, big, kind, open, onToggle, value, rule, you, src, histor
               </span>
             : <Stepper id={id} label={label} kind={kind} value={value.start} you={you} onChange={x => onChange({ start: x, end: null })} />}
           <span className="small">{changed
-            ? <><Src kind="you">You set this</Src> Rule said {path(rule, kind)} · <button type="button" className="link" onClick={onReset}>Reset to {path(rule, kind)}</button></>
-            : <>This is the rule’s figure.</>}</span>
+            ? <><Src kind="you">Edited</Src> Default {path(rule, kind)} · <button type="button" className="link" onClick={onReset}>Reset to {path(rule, kind)}</button></>
+            : <>Rule default.</>}</span>
         </div>
         <Track label={label} kind={kind} value={value.start} rule={rule.start} known={known} need={need} onChange={x => onChange({ start: x, end: value.end })} />
         {guard && <p className="guard">{guard}</p>}
-        {burn != null && <p className="guard"><b>This case has no value yet:</b> in the last forecast year the business spends more cash
-          than it brings in. {label.replace(/ \(.*\)$/, '')} of at {k === 'capex_pct' ? 'most' : 'least'} {fmt(burn, kind)} that year stops the burn.{' '}
-          <button type="button" className="btn" onClick={() => onChange({ start: value.start, end: burn })}>Set the last forecast year to {fmt(burn, kind)}</button></p>}
+        {burn != null && <p className="guard"><b>No fair value:</b> terminal-year FCFF is negative. {label} {k === 'capex_pct' ? '≤' : '≥'} {fmt(burn, kind)}
+          in the final year turns it positive.{' '}
+          <button type="button" className="btn" onClick={() => onChange({ start: value.start, end: burn })}>Set final year to {fmt(burn, kind)}</button></p>}
         <label className="small grad-q"><input type="checkbox" checked={gradual}
           onChange={e => onChange(e.target.checked ? { start: rule.start, end: value.start } : { start: value.end ?? value.start, end: null })} />
-          {' '}Change it gradually: move from the rule’s {fmt(rule.start, kind)} in the first forecast year to {fmt(value.end ?? value.start, kind)} by the last, instead of all at once</label>
+          {' '}Fade linearly: {fmt(rule.start, kind)} (default) in the first forecast year to {fmt(value.end ?? value.start, kind)} in the last</label>
         {children}
       </div>}
     </li>
   )
 }
 
-/** The drag track: the record band, each reported year as a dot (stacked where they'd overlap), what the price needs
- * as a dashed line, and the knob (a slider: arrow keys, Shift for bigger steps, Home for the rule). */
+/** The drag track: the historical range band, each reported year as a dot (stacked where they'd overlap), the
+ * reverse-DCF break-even as a dashed line, and the knob (a slider: arrow keys, Shift for bigger steps, Home for the rule). */
 function Track({ label, kind, value, rule, known, need, onChange }: {
   label: string; kind: Kind; value: number; rule: number; known: (readonly [number, string])[]; need: number | null; onChange: (v: number) => void
 }) {
@@ -320,7 +320,7 @@ function Track({ label, kind, value, rule, known, need, onChange }: {
         <i className="t-ax" />
         {band && <i className="t-band" style={{ left: `${at(band[0])}%`, width: `${Math.max(0.5, at(band[1]) - at(band[0]))}%` }} />}
         {dots.map(d => <i key={d.y} className={`t-dot${d.last ? ' last' : ''}`} style={{ left: `${d.p}%`, top: `calc(50% - 4px - ${d.row * 9}px)` }} title={`${d.y}: ${fmt(d.x, kind)}`} />)}
-        {need != null && <i className="t-need" style={{ left: `${at(clip(need))}%` }}><span>Price needs {fmt(need, kind)}</span></i>}
+        {need != null && <i className="t-need" style={{ left: `${at(clip(need))}%` }}><span>Implied {fmt(need, kind)}</span></i>}
         <span className="t-knob" role="slider" tabIndex={0} aria-label={`${label}, drag or use the arrow keys`} style={{ left: `${at(value)}%` }}
           aria-valuemin={+((l) * (kind === 'pct' ? 100 : 1)).toFixed(1)} aria-valuemax={+((h) * (kind === 'pct' ? 100 : 1)).toFixed(1)}
           aria-valuenow={+(value * (kind === 'pct' ? 100 : 1)).toFixed(1)} aria-valuetext={fmt(value, kind)}
@@ -330,43 +330,43 @@ function Track({ label, kind, value, rule, known, need, onChange }: {
             if (e.key in m) { e.preventDefault(); onChange(snap(m[e.key])) }
           }}><span>{fmt(value, kind)}</span></span>
       </div>
-      {known.length > 0 && <p className="small muted t-cap">Dots: {known[0][1]}–{known[known.length - 1][1].slice(-2)}, {fmt(band![0], kind)} to {fmt(band![1], kind)} (the band).
-        Last three: {known.slice(-3).map(([x, y]) => `${y} ${fmt(x, kind)}`).join(' · ')}. Drag, type, or use ← →.</p>}
+      {known.length > 0 && <p className="small muted t-cap">Range {known[0][1]}–{known[known.length - 1][1].slice(-2)}: {fmt(band![0], kind)} to {fmt(band![1], kind)}.
+        Last 3: {known.slice(-3).map(([x, y]) => `${y} ${fmt(x, kind)}`).join(' · ')}. Drag, type, or ← →.</p>}
     </div>
   )
 }
 
-/** "How the rule got 26.7%": the rule and the year-by-year arithmetic. */
+/** "Default 26.7%: method": the rule and the year-by-year arithmetic. */
 function RuleFold({ k, kind, rule, active, parsed, doc }: { k: string; kind: Kind; rule: Path; active: Scenario; parsed: Parsed; doc: ModelDoc }) {
   const { years: histYears, ratios, sources } = parsed
   const hist = parsed.hist ?? parsed.company.hist
   const used = histYears.filter(y => !doc.excluded_years.includes(y)).slice(-3) // mirrors default_assumptions(years=3)
   return (
     <details className="sub-fold">
-      <summary>How the rule got {path(rule, kind)}</summary>
+      <summary>Default {path(rule, kind)}: method</summary>
       <p className="small">{sources?.drivers[k] ?? ruleOf(k)}.</p>
       {k !== 'debt_change' && <p className="arith num">
         {(k === 'growth' ? histYears.slice(-4) : used).map(y => {
           const i = histYears.indexOf(y)
           return <span key={y}>{y} {k === 'growth' ? money(hist[i].revenue) : fmt(ratios[i][k], kind)}</span>
         })}
-        <span className="ours">= {fmt(rule.start, kind)}{active !== 'base' && SHIFT[k] ? ` (${NAMES[active].toLowerCase()}: central ${active === 'bull' ? '+' : '−'} ${+(SHIFT[k] * 100).toFixed(2)} points)` : ''}{rule.end != null ? `, easing to ${fmt(rule.end, kind)} by the last year (a fast grower)` : ''}</span>
+        <span className="ours">= {fmt(rule.start, kind)}{active !== 'base' && SHIFT[k] ? ` (${NAMES[active].toLowerCase()}: base ${active === 'bull' ? '+' : '−'} ${+(SHIFT[k] * 100).toFixed(2)} pp)` : ''}{rule.end != null ? `, fading to ${fmt(rule.end, kind)} by the final year (high-growth fade)` : ''}</span>
       </p>}
-      <p className="small dim">{k === 'growth' ? 'Sales, Rs crore' : 'Each year as reported'}{doc.excluded_years.length ? `; left out: ${doc.excluded_years.join(', ')}` : ''}.</p>
+      <p className="small dim">{k === 'growth' ? 'Revenue, Rs cr' : 'As reported'}{doc.excluded_years.length ? `; excluded: ${doc.excluded_years.join(', ')}` : ''}.</p>
     </details>
   )
 }
 
-/** "Receivable days are a warning sign: see why", when a rule lit on this input. */
+/** "Debtor days flagged: details", when a rule flagged this driver. */
 function Linked({ k, parsed }: { k: string; parsed: Parsed }) {
   const href = useHref()
   const recent = parsed.years.slice(-3)
   const odd = parsed.oneoffs.find(o => o.metric === k && recent.includes(o.year))
   const lit = (parsed.rule_checks ?? []).find(c => c.id === k && (c.status === 'red' || c.status === 'amber'))
   if (!odd && !lit) return null
-  return <p className="small linked">{odd ? <>{odd.year} stands out for this input ({odd.note.replace(/^./, c => c.toLowerCase())}); the rule’s figure may carry it.{' '}
-    <a href={href('risks', 'unusual')}>See why</a></>
-    : <>{inputName(k)} is a warning sign: {lit!.fact.replace(/^./, c => c.toLowerCase())}. <a href={href('risks', 'signs')}>See why</a></>}</p>
+  return <p className="small linked">{odd ? <>{odd.year} is an outlier ({odd.note.replace(/^./, c => c.toLowerCase())}); the default may include it.{' '}
+    <a href={href('risks', 'unusual')}>Details</a></>
+    : <>{inputName(k)} flagged: {lit!.fact.replace(/^./, c => c.toLowerCase())}. <a href={href('risks', 'signs')}>Details</a></>}</p>
 }
 
 /** An AI suggestion waiting for this input: purple until you Use it. */
@@ -379,7 +379,7 @@ function Pending({ k, doc, kind, active, busy, docOf, current, onUse, onKeep }: 
   const v = p.value as Record<Scenario, Path>, bad = failing(p)
   return (
     <div className="ai-sug">
-      <p><Src kind="ai">AI suggests</Src> <b className="num">{path(v[active], kind)}</b> <span className="small muted">({NAMES[active].toLowerCase()} case) from {docOf(p)} p. {p.source.page}</span></p>
+      <p><Src kind="ai">AI suggests</Src> <b className="num">{path(v[active], kind)}</b> <span className="small muted">({NAMES[active]}) from {docOf(p)} p. {p.source.page}</span></p>
       {p.source.quote && <blockquote className="prop-quote serif">“{p.source.quote}”</blockquote>}
       <Checks checks={p.checks} />
       <div className="next-act">
@@ -409,7 +409,7 @@ function Spark({ hist, used }: { hist: (number | null)[]; used: { start: number;
   )
 }
 
-/** What the forecast produces: the sentence, the three cases' last year, and the chart tabs. */
+/** Forecast output: the summary line, the three scenarios' final year, and the chart tabs. */
 function Produces({ parsed, projection, active, n, borrowed }: { parsed: Parsed; projection: Projection | null; active: Scenario; n: number; borrowed: number }) {
   const { company, years: histYears } = parsed
   const hist = parsed.hist ?? company.hist
@@ -424,13 +424,13 @@ function Produces({ parsed, projection, active, n, borrowed }: { parsed: Parsed;
   const rows = proj ? [...hist, ...proj] : hist
   return (
     <section className="f-tier" aria-labelledby="proj-h" id="projection">
-      <h2 id="proj-h">What the forecast produces</h2>
-      <p className="why">{histYears[0]}–{histYears[nHist - 1]} reported in ink; {projYears.length ? `${projYears[0]}–${projYears[n - 1]}` : 'the forecast'} in blue ({NAMES[active].toLowerCase()} case).</p>
+      <h2 id="proj-h">Forecast output</h2>
+      <p className="why">{histYears[0]}–{histYears[nHist - 1]} reported in ink; {projYears.length ? `${projYears[0]}–${projYears[n - 1]}` : 'the forecast'} in blue ({NAMES[active]}).</p>
       {proj && <Readout hist={hist} proj={proj} histYear={histYears[nHist - 1]} projYear={projYears[n - 1]} n={n} moved={parsed.sources?.moved_out ?? null}
         ttm={parsed.ttm && Date.parse(parsed.ttm.end) > Date.parse(company.dates[nHist - 1]) ? parsed.ttm : null} />}
       {proj && <Compare all={projection!.scenarios} active={active} projYear={projYears[n - 1]} />}
-      {borrowed >= 0.5 && <p className="guard">Cash would run out, so the model borrows <b>Rs {money(borrowed)} cr</b> over {n} years
-        to cover it. Lower capital spending or payout, or set the planned borrowing change yourself.</p>}
+      {borrowed >= 0.5 && <p className="guard">Funding gap: the model draws <b>Rs {money(borrowed)} cr</b> of debt over {n} years
+        to keep cash positive. Lower capex or payout, or set net debt change.</p>}
       <div className="chart-card">
         <div className="tabs" role="tablist" aria-label="Chart">
           {METRICS.map(([k, label]) => (
@@ -462,12 +462,12 @@ function Readout({ hist, proj, histYear, projYear, n, ttm, moved }: {
   const ttmGrowth = growth(ttm?.values.sales, last.revenue ?? 0) // against what was reported
   return (
     <p className="readout">
-      Sales go from <span className="num">Rs {money(r0)} cr</span> in {histYear}{out > 0 && <> (after Rs {money(out)} cr that left the group: {moved!.reason || 'a business that left'})</>} to <P>Rs {money(r1)} cr</P> in {projYear}
-      {cagr != null && <>, <P>{fmt(cagr, 'pct')}</P> a year</>}. Net margin moves from <span className="num">{fmt(margin(last), 'pct')}</span> to{' '}
-      <P>{fmt(margin(end), 'pct')}</P>. Over {n} years the business {fcf >= 0 ? 'generates' : 'burns'}{' '}
-      <P>Rs {money(Math.abs(fcf))} cr</P> of free cash and ends with <P>Rs {money(Math.abs(netCash))} cr</P> net {netCash >= 0 ? 'cash' : 'debt'}.
-      {ttmGrowth != null && <> In the twelve months to {month(ttm!.end)}, sales were <span className="num">Rs {money(ttm!.values.sales)} cr</span>,{' '}
-        {fmt(Math.abs(ttmGrowth), 'pct')} {ttmGrowth >= 0 ? 'above' : 'below'} {histYear}.</>}
+      Revenue <span className="num">Rs {money(r0)} cr</span> ({histYear}{out > 0 && <>, after Rs {money(out)} cr moved out: {moved!.reason || 'divested business'}</>}) to <P>Rs {money(r1)} cr</P> ({projYear})
+      {cagr != null && <>, <P>{fmt(cagr, 'pct')}</P> CAGR</>}. PAT margin <span className="num">{fmt(margin(last), 'pct')}</span> →{' '}
+      <P>{fmt(margin(end), 'pct')}</P>. Cumulative {n}-year FCF{' '}
+      <P>{fcf < 0 ? '(' : ''}Rs {money(Math.abs(fcf))} cr{fcf < 0 ? ')' : ''}</P>; ending net {netCash >= 0 ? 'cash' : 'debt'} <P>Rs {money(Math.abs(netCash))} cr</P>.
+      {ttmGrowth != null && <> TTM to {month(ttm!.end)}: revenue <span className="num">Rs {money(ttm!.values.sales)} cr</span>,{' '}
+        {ttmGrowth >= 0 ? '+' : '−'}{fmt(Math.abs(ttmGrowth), 'pct')} vs {histYear}.</>}
     </p>
   )
 }
@@ -476,9 +476,9 @@ function Compare({ all, active, projYear }: { all: Projection['scenarios']; acti
   const order: Scenario[] = ['bear', 'base', 'bull']
   const list = (k: string) => order.map((s, i) => {
     const v = money(all[s][all[s].length - 1][k])
-    return <span key={s}>{i > 0 && ' · '}{NAMES[s].toLowerCase()} {s === active ? <b className="num ours">{v}</b> : <span className="num">{v}</span>}</span>
+    return <span key={s}>{i > 0 && ' · '}{NAMES[s]} {s === active ? <b className="num ours">{v}</b> : <span className="num">{v}</span>}</span>
   })
-  return <p className="compare">In {projYear}, sales: {list('revenue')} cr. Net profit: {list('pat')} cr.</p>
+  return <p className="compare">{projYear} revenue (Rs cr): {list('revenue')}. PAT: {list('pat')}.</p>
 }
 
 /** "Did a business leave the group?": revenue (and EBITDA) of a business sold, demerged or moved to a joint venture,
@@ -495,38 +495,38 @@ function MovedOutCard({ doc, setDoc, year, revenue, used }: {
   const [msg, setMsg] = useState('')
   const [opened] = useState(!!used) // open while in use when the page opens; your own toggling stays yours
   const r = Number(rev.replace(/,/g, '')), e = ebitda.trim() === '' ? null : Number(ebitda.replace(/,/g, ''))
-  const bad = !rev.trim() ? 'Type the revenue that left.' : !(r > 0 && r < revenue) ? `Revenue must be above 0 and below ${year}’s Rs ${money(revenue)} cr.`
-    : e != null && !(Number.isFinite(e) && Math.abs(e) <= r) ? 'Operating profit can’t be larger than that revenue.'
-    : !reason.trim() ? 'Say what happened (e.g. “Unit X moved into a JV from April”).' : null
+  const bad = !rev.trim() ? 'Enter the revenue moved out.' : !(r > 0 && r < revenue) ? `Revenue must be above 0 and below ${year}’s Rs ${money(revenue)} cr.`
+    : e != null && !(Number.isFinite(e) && Math.abs(e) <= r) ? 'EBITDA can’t exceed that revenue.'
+    : !reason.trim() ? 'Enter a reason (e.g. “Unit X moved into a JV from April”).' : null
   const save = () => {
     if (bad) return setMsg(bad)
     setDoc(d => ({ ...d, notes: { ...d.notes, 'adj:moved_out': { year, revenue: r, ebitda: e, reason: reason.trim() } satisfies MovedOut } }))
-    setMsg(`Saved: the forecast now grows from ${year} sales less Rs ${money(r)} cr.`)
+    setMsg(`Saved: forecast base is ${year} revenue less Rs ${money(r)} cr.`)
   }
   const remove = () => {
     setDoc(d => { const { ['adj:moved_out']: _, ...notes } = d.notes; return { ...d, notes } })
     setRev(''); setEbitda(''); setReason('')
-    setMsg('Removed: the forecast grows from the full reported sales again.')
+    setMsg('Removed: forecast base is full reported revenue again.')
   }
   return (
     <details className="sub-fold moved" open={opened || undefined}>
-      <summary>Did a business leave the group?{used && <> <Src kind="you">In use</Src></>}</summary>
-      <p className="small">If a business was sold, demerged or moved into a joint venture, take its sales out of {year}, the year
-        the forecast grows from. Otherwise growth is applied to sales the company no longer has.</p>
-      {used && <p className="small"><b>In use:</b> Rs {money(used.revenue_out)} cr of sales and Rs {money(used.ebitda_out)} cr of
-        operating profit left out of {used.year} ({used.reason}).{used.from === 'annual report' && <> From an approved note: <a href={href('documents', 'reading')}>see its quote</a>.</>}</p>}
+      <summary>Divestment / deconsolidation adjustment{used && <> <Src kind="you">In use</Src></>}</summary>
+      <p className="small">For a business sold, demerged or moved to a JV: remove its revenue from the {year} base so growth isn’t
+        applied to revenue the group no longer consolidates.</p>
+      {used && <p className="small"><b>In use:</b> Rs {money(used.revenue_out)} cr revenue and Rs {money(used.ebitda_out)} cr
+        EBITDA removed from {used.year} ({used.reason}).{used.from === 'annual report' && <> From an approved note: <a href={href('documents', 'reading')}>see its quote</a>.</>}</p>}
       <div className="moved-f">
-        <label>Sales that left, Rs crore<input inputMode="decimal" value={rev} onChange={x => setRev(x.target.value)} /></label>
-        <label>Its operating profit (EBITDA), Rs crore <span className="dim">(optional: blank = at {year}’s margin)</span>
+        <label>Revenue moved out, Rs cr<input inputMode="decimal" value={rev} onChange={x => setRev(x.target.value)} /></label>
+        <label>Its EBITDA, Rs cr <span className="dim">(optional: blank = at {year} margin)</span>
           <input inputMode="decimal" value={ebitda} onChange={x => setEbitda(x.target.value)} /></label>
-        <label>What happened<input value={reason} maxLength={200} onChange={x => setReason(x.target.value)}
+        <label>Reason<input value={reason} maxLength={200} onChange={x => setReason(x.target.value)}
           placeholder="e.g. Steel unit moved into a JV from April" /></label>
       </div>
       <div className="next-act">
-        <button type="button" className="btn" onClick={save}>{mine ? 'Update' : 'Take it out of the base'}</button>
+        <button type="button" className="btn" onClick={save}>{mine ? 'Update' : 'Remove from base'}</button>
         {mine && <button type="button" className="link" onClick={remove}>Remove</button>}
       </div>
-      <p className="small dim" role="status">{msg || 'An AI reading of the annual report can propose this with a quote: Documents and sources → “Business moved out”.'}</p>
+      <p className="small dim" role="status">{msg || 'AI annual-report reading can propose this with a quote: Documents → “Business moved out”.'}</p>
     </details>
   )
 }

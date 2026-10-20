@@ -948,9 +948,10 @@ def thesis_prompt(name, facts, cites):
     """facts {key: text} (the app's numbers, written as shown); cites {id: {what, file, page, quote}} (approved quotes)."""
     f = "\n".join(f"- {k}: {t}" for k, t in facts.items())
     c = "\n".join(f'- {i}: {x["what"]} {x["file"]}, page {x["page"]}: "{x["quote"]}"' for i, x in cites.items())
-    return (f"You write the words of a short equity research note on {name}, an Indian listed company, for one reader "
-            "who reviews it. Every number is already computed by the app's rules; your job is to read them and judge "
-            "what matters: what the price assumes against what the business does, what the value hinges on, the risks.\n\n"
+    return (f"You write a short equity research note on {name}, an Indian listed company, in the register of a sell-side "
+            "or buy-side analyst. Every number is already computed by the app's rules; your job is to read them and judge "
+            "what matters: what CMP implies (reverse DCF) against the base case and track record, what fair value hinges "
+            "on, and the risks.\n\n"
             f"FACTS (computed by the app; key: text):\n{f}\n\n"
             "CITATIONS (quotes from documents, each already checked against its page; id: what, file, page, quote):\n"
             f"{c or '(none: no document has been read and approved)'}\n\n"
@@ -959,44 +960,41 @@ def thesis_prompt(name, facts, cites):
             "round it: 16.63% as 16.6% or 17%), or appear in a quote you cite. Don't work out new numbers: no "
             "differences, ratios, sums or averages of your own.\n"
             "- This is analysis, not a recommendation. Never write buy, sell, target price, price target, recommend, "
-            "accumulate, outperform or underperform. Say value range, priced for, upside or downside to our value.\n"
-            "- The page already shows the price, our value range and the growth the price needs. Don't spend a thesis "
+            "accumulate, outperform or underperform. Say fair-value range, implied growth, upside or downside to base-case fair value.\n"
+            "- The page already shows CMP, the fair-value range and the implied growth. Don't spend a thesis "
             "point restating them: each point makes one judgement an analyst would make (growth, margins, cash, the "
             "balance sheet, what the value hinges on) and backs it with the facts.\n"
-            "- Plain English, short sentences, no hype. Money in Rs crore with Indian grouping (1,64,177), as in the facts.\n"
-            "- The history starts at the first year in the facts. Compare the growth the price needs only with runs of the "
+            "- Concise, analytical, no hype. Use standard terms as the facts do: CMP, fair value, bear/base/bull case, "
+            "revenue growth, CAGR, YoY, EBITDA margin, PAT, FCFF, capex, ROCE, ROE, WACC, terminal growth, terminal value, "
+            "EV, net debt/(cash), P/E, EV/EBITDA, pp and bps. Money in Rs cr with Indian grouping (1,64,177), as in the facts.\n"
+            "- The history starts at the first year in the facts. Compare the implied growth only with runs of the "
             "same length, and never write never, always or ever: say since that year.\n"
             "- If a fact says the export folds exceptional items into other income, judge profit growth on EBITDA, EBIT or a "
             "cited figure before exceptional items, not on reported net profit.\n"
-            "- If the discount-rate fact says beta or the premium is the app default, say our value depends on that "
-            "choice, and don't call a discount-rate break-even within 3 points of ours far-fetched: the discount rate is "
-            "a judgement, not a result.\n"
-            "- Use the app's plain names, as the facts do: discount rate, long-run growth, sales growth, operating margin, "
-            "the cautious, central and hopeful cases, percentage points written out; beta only with its meaning (how much "
-            "the share swings with the market). Never write WACC, terminal value, enterprise value, pp, or bear, base "
-            "and bull.\n"
-            "- If the margin or growth the price needs lies inside the company's own history (the range and seen-before "
+            "- If the WACC fact says beta or the equity risk premium is the app default, say fair value depends on that "
+            "choice, and don't call a WACC break-even within 3 pp of the base far-fetched: WACC is a judgement, not a result.\n"
+            "- If the break-even margin or implied growth lies inside the company's own history (the range and seen-before "
             "facts), call it a bet on the cycle or a return to past results, not something the business has never done.\n"
             "- If a citation's description or quote mentions a sale, slump sale, demerger, transfer to a joint venture or "
-            "deconsolidation, say in words which business leaves the base from next year and that our base still includes it, "
+            "deconsolidation, say which business leaves the base from next year and that the base case still includes it, "
             "unless the moved_out fact says our base already leaves it out.\n"
-            "- If there are trk_ and was_ facts, new results came in since our earlier forecast: make one thesis point what "
-            "they changed (what came in against what we forecast, and our value or the growth the price needs before and "
-            "now), and point what_to_watch at the next results.\n"
+            "- If there are trk_ and was_ facts, new results came in since the earlier forecast: make one thesis point the "
+            "variance (actual vs forecast, and fair value or implied growth before and now), and point what_to_watch at "
+            "the next results.\n"
             "- Rank risks by the rule checks: Red, then Amber, then the rest. Mention the auditor only if the opinion is "
             "modified or the auditor changed.\n"
             '- "refs" lists the fact keys or citation ids behind the point, at least one each; every number in a point '
-            "must come from its own refs (the price and our values excepted).\n"
+            "must come from its own refs (CMP and the fair values excepted).\n"
             "- The three thesis points make three different judgements; never the same claim twice. Same for the risks.\n\n"
             "Answer as a JSON object:\n"
-            '{"headline": "one sentence under 160 characters: what the price assumes against what the business does",\n'
+            '{"headline": "one sentence under 160 characters: implied expectations vs the base case and track record",\n'
             ' "thesis": [exactly 3 of {"head": "a short claim under 90 characters", "text": "2 or 3 sentences under 650 '
             'characters", "refs": ["fact key or citation id"]}],\n'
-            ' "priced_in": "under 450 characters: what the price needs, against our central case",\n'
+            ' "priced_in": "under 450 characters: what CMP implies (reverse DCF, break-evens) vs the base case",\n'
             ' "risks": [1 to 4 of {"text": "under 350 characters", "refs": [...]}],\n'
-            ' "bull_trigger": "under 300 characters: what would lift our value toward or past the price",\n'
+            ' "bull_trigger": "under 300 characters: what would lift fair value toward or past CMP",\n'
             ' "bear_trigger": "under 300 characters: what would lower it",\n'
-            ' "what_to_watch": [1 to 4 strings under 200 characters: what to check in the next results or filings]}')
+            ' "what_to_watch": [1 to 4 strings under 200 characters: monitorables for the next results or filings]}')
 
 
 def _points(v, key, n):
@@ -1138,7 +1136,7 @@ def thesis_checks(v, facts, cites, texts):
           "No recommendation wording": "No buy, sell, target-price or recommend wording.",
           "No never or always": "No never, always or ever: the history starts at the export's first year.",
           "Length": "Every part is within its length limit."}
-    why = {"Numbers match": " (not in the point's own facts, the price and our values, or a quote it cites: add the fact "
+    why = {"Numbers match": " (not in the point's own facts, CMP and the fair values, or a quote it cites: add the fact "
                             "key to its refs)",
            "No never or always": " (the data starts at the export's first year; say since that year)"}
     out = [{"name": k, "pass": not xs, "detail": ok[k] if not xs else "; ".join(xs[:5]) + why.get(k, "") + "."}

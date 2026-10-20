@@ -21,7 +21,7 @@ interface Props {
   onReload: () => void // prices were refreshed, or the list failed: list again
 }
 
-const SORTS = { cheap: 'Cheapest first', flags: 'Most warning signs', changed: 'Recently changed', name: 'A–Z' } as const
+const SORTS = { cheap: 'Upside (FV ÷ CMP)', flags: 'Most red flags', changed: 'Recently changed', name: 'A–Z' } as const
 type Sort = keyof typeof SORTS
 type Chip = 'all' | VerdictKind | 'results' | 'draft'
 const PREFS = 'financial-model:coverage' // the sort and chip you last chose, this browser only
@@ -29,15 +29,15 @@ function pref<T extends string>(key: 'sort' | 'filter', ok: readonly T[], dflt: 
   try { const v = JSON.parse(localStorage.getItem(PREFS) ?? '{}')[key]; return ok.includes(v) ? v : dflt } catch { return dflt }
 }
 const CHIPS: [Chip, (n: number) => string][] = [
-  ['cheap', n => `${n} look${n === 1 ? 's' : ''} cheap`], ['range', n => `${n} inside our range`],
-  ['dear', n => `${n} look${n === 1 ? 's' : ''} expensive`], ['fix', n => `${n} need${n === 1 ? 's' : ''} a fix`],
+  ['cheap', n => `${n} below bear FV`], ['range', n => `${n} within FV range`],
+  ['dear', n => `${n} above bull FV`], ['fix', n => `${n} need${n === 1 ? 's' : ''} a fix`],
   ['results', n => `${n} new result${n === 1 ? '' : 's'}`], ['draft', n => `${n} not reviewed`],
 ]
 const kindOf = (m: ModelSummary) => verdict(m.price, m.values).kind
 const matches = (c: Chip, m: ModelSummary) => c === 'all' ? true : c === 'results' ? !!m.new_results?.length : c === 'draft' ? !m.reviewed_at : kindOf(m) === c
 
-/** Your companies: each company with today's price against our value on one shared scale, the Today chips, prices,
- * Check all, sort; the Watching list below. With no company yet it is the first-run screen. */
+/** Coverage: each company with CMP against fair value on one shared scale, the filter chips, prices, Check all,
+ * sort; the watchlist below. With no company yet it is the first-run screen. */
 export default function Home({ models, error, build, onAdd, onWatch, watch, setWatch, watchMsg, onDeleted, onChecked, onReload }: Props) {
   const [sort, setSort] = useState<Sort>(() => pref('sort', Object.keys(SORTS) as Sort[], 'cheap'))
   const [chip, setChip] = useState<Chip>(() => pref('filter', ['all', 'cheap', 'range', 'dear', 'fix', 'none', 'results', 'draft'], 'all'))
@@ -53,14 +53,14 @@ export default function Home({ models, error, build, onAdd, onWatch, watch, setW
 
   if (models == null && !error) return (
     <main id="main" className="page" tabIndex={-1}>
-      <h1 id="page-h" tabIndex={-1} className="h1">Your companies</h1>
-      <ul className="cov skel" aria-label="Loading your companies" aria-busy="true">{[0, 1, 2].map(i => <li key={i} className="cov-row"><i /><i /><i /></li>)}</ul>
+      <h1 id="page-h" tabIndex={-1} className="h1">Coverage</h1>
+      <ul className="cov skel" aria-label="Loading coverage" aria-busy="true">{[0, 1, 2].map(i => <li key={i} className="cov-row"><i /><i /><i /></li>)}</ul>
     </main>
   )
   if (error && !models?.length) return (
     <main id="main" className="page" tabIndex={-1}>
-      <h1 id="page-h" tabIndex={-1} className="h1">Your companies</h1>
-      <p className="notice-bar bad" role="alert">Couldn’t load your companies: {error.replace(/\.?$/, '.')} Your saved files are untouched.{' '}
+      <h1 id="page-h" tabIndex={-1} className="h1">Coverage</h1>
+      <p className="notice-bar bad" role="alert">Couldn’t load coverage: {error.replace(/\.?$/, '.')} Your saved files are untouched.{' '}
         <button type="button" className="link" onClick={onReload}>Try again</button></p>
     </main>
   )
@@ -68,8 +68,8 @@ export default function Home({ models, error, build, onAdd, onWatch, watch, setW
     <main id="main" className="page" tabIndex={-1}>
       <p className="label">Get started</p>
       <h1 id="page-h" tabIndex={-1} className="h1">Add your first company</h1>
-      <p className="purpose">Type a listed company’s name or NSE symbol. The app reads its filings from NSE and, in about a minute, gives you
-        what one share is worth by our model against today’s price, its warning signs and a forecast you can change. Analysis, not a recommendation.</p>
+      <p className="purpose">Enter a listed company’s name or NSE symbol. The app reads its NSE filings and, in about a minute, builds a
+        three-statement model with DCF fair value vs CMP, forensic checks and an editable forecast. Analysis, not a recommendation.</p>
       <AddPage first models={models} build={build} onAdd={onAdd} onWatch={onWatch} watchMsg={watchMsg} />
     </main>
   )
@@ -97,14 +97,14 @@ export default function Home({ models, error, build, onAdd, onWatch, watch, setW
     <main id="main" className="page" tabIndex={-1}>
       <div className="home-head">
         <div>
-          <h1 id="page-h" tabIndex={-1} className="h1">Your companies</h1>
-          <p className="purpose">Each company you follow, with today’s price against what our model says one share is worth. Open one to see the
-            answers, change the forecast or check the risks. Analysis, not a recommendation.</p>
+          <h1 id="page-h" tabIndex={-1} className="h1">Coverage</h1>
+          <p className="purpose">CMP against DCF fair value (bear–base–bull) for each company modelled, with reverse-DCF implied growth,
+            red flags and latest results. Analysis, not a recommendation.</p>
         </div>
-        <a className="primary big" href="/add">+ Add a company</a>
+        <a className="primary big" href="/add">+ Add company</a>
       </div>
 
-      <div className="chips" role="group" aria-label="Show">
+      <div className="chips" role="group" aria-label="Filter">
         <button type="button" className="chip-b" aria-pressed={chip === 'all'} onClick={() => setChip('all')}>All {latest.length}</button>
         {CHIPS.map(([c, words]) => {
           const k = count(c)
@@ -121,7 +121,7 @@ export default function Home({ models, error, build, onAdd, onWatch, watch, setW
             {Object.entries(SORTS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         </div>
         <ScaleKey />
-        <div className="cov-head" aria-hidden="true"><span>Company</span><ScaleHead /><span>Verdict</span><span>To look at</span></div>
+        <div className="cov-head" aria-hidden="true"><span>Company</span><ScaleHead /><span>CMP vs FV</span><span>Flags · results</span></div>
         {shown.length === 0
           ? <p className="pad-s">No company matches. <button type="button" className="link" onClick={() => setChip('all')}>Show all {latest.length}</button></p>
           : <ul className="cov">{shown.map(m => <Row key={m.id} m={m} hist={watch?.history[slugOf(m.id)]} versions={versionsOf(m).length} onDelete={() => setGone(m)} />)}</ul>}
@@ -131,23 +131,23 @@ export default function Home({ models, error, build, onAdd, onWatch, watch, setW
       <WatchSection list={watch} models={latest} onChange={setWatch} />
       {watchMsg && <p className="small" role="status">{watchMsg}</p>}
       <footer className="foot">
-        <p>Works for manufacturing, services and other non-financial companies; banks, NBFCs and insurers aren’t supported yet.
-          Models save themselves to the <code>models</code> folder next to the app. Numbers are computed by rules; recalculating never calls AI.</p>
+        <p>Non-financial companies only; banks, NBFCs and insurers aren’t supported yet.
+          Models autosave to the <code>models</code> folder next to the app. Numbers are rule-computed; recalculation never calls AI.</p>
       </footer>
       <Confirm open={!!gone} onClose={() => setGone(null)} onYes={() => gone && remove(gone)} yes="Delete"
         title={gone ? `Delete ${gone.company}?` : ''}
-        body={<p>Its inputs, research note, documents{n > 1 ? ` and ${n} saved versions` : ''} go too. This can’t be undone.</p>} />
+        body={<p>Its assumptions, research note, documents{n > 1 ? ` and ${n} versions` : ''} are deleted too. This can’t be undone.</p>} />
     </main>
   )
 }
 
-/** One company: name and state, the verdict, our value against today's price on the shared scale, what the price
- * assumes, warning signs and results. */
+/** One company: name and state, the verdict, fair value against CMP on the shared scale, implied growth, red flags
+ * and results. */
 function Row({ m, hist, versions, onDelete }: { m: ModelSummary; hist?: Parameters<typeof Spark>[0]['pts']; versions: number; onDelete: () => void }) {
   const slug = slugOf(m.id)
   const v = m.values
   const g = gap(m.price, v?.base)
-  const state = `${m.symbol ?? 'from an Excel export'} · ${m.reviewed_at ? 'reviewed' : 'not reviewed'}`
+  const state = `${m.symbol ?? 'Excel export'} · ${m.reviewed_at ? 'reviewed' : 'draft'}`
   const signs = m.flags ?? 0
   return (
     <li className="cov-row">
@@ -157,47 +157,46 @@ function Row({ m, hist, versions, onDelete }: { m: ModelSummary; hist?: Paramete
         {v?.base != null && <p className="c-say">{assumes(m)}</p>}
       </div>
       {v?.base == null
-        ? <div className="c-fix"><p className="c-say">No value yet: {m.why === 'final-year free cash flow is negative'
-            ? 'in the last forecast year the business spends more cash than it makes, so there’s nothing to value.'
-            : `${(m.why ?? 'open it to see why').replace(/\.$/, '')}.`}</p>
-            {m.why === 'final-year free cash flow is negative' || m.why?.startsWith('the shares come out worth nothing')
+        ? <div className="c-fix"><p className="c-say">No fair value: {m.why === 'final-year free cash flow is negative'
+            ? 'terminal-year FCFF is negative, so TV is undefined.'
+            : `${(m.why ?? 'open it for details').replace(/\.$/, '')}.`}</p>
+            {m.why === 'final-year free cash flow is negative' || m.why?.startsWith('equity value is negative')
               ? <a className="btn" href={pathOf(slug, 'forecast', '', null, 'capex_pct')}>Fix the forecast</a>
-              : <a className="btn" href={pathOf(slug, 'value', '', null, 'inputs')}>See why</a>}</div>
+              : <a className="btn" href={pathOf(slug, 'valuation', '', null, 'how')}>Details</a>}</div>
         : <div className="c-scale"><Scale price={m.price} bear={v.bear} base={v.base} bull={v.bull} /><Spark pts={hist} /></div>}
       <div className="c-vd">
         <Verdict price={m.price} values={v} words={false} />
-        {v?.base != null && <span className="c-num">Our value <b className="num ours">Rs {rs(v.base)}</b> · price <b className="num mkt">{m.price != null ? `Rs ${rs(m.price)}` : 'none'}</b>{g ? ` · ${g}` : ''}</span>}
+        {v?.base != null && <span className="c-num">Base FV <b className="num ours">Rs {rs(v.base)}</b> · CMP <b className="num mkt">{m.price != null ? `Rs ${rs(m.price)}` : 'none'}</b>{g ? ` · ${g}` : ''}</span>}
         <PriceNote m={m} />
       </div>
       <div className="c-look">
-        <a href={pathOf(slug, 'risks')} className={signs ? 'warn' : undefined}>{m.flags == null ? 'Warning signs' : signs ? `${signs} warning sign${signs > 1 ? 's' : ''}` : 'No warning signs'}</a>
-        {m.results_to && <span>Latest results up to {month(m.results_to)}{m.new_results?.length ? <b> · new results</b> : null}</span>}
+        <a href={pathOf(slug, 'risks')} className={signs ? 'warn' : undefined}>{m.flags == null ? 'Red flags' : signs ? `${signs} red flag${signs > 1 ? 's' : ''}` : 'No red flags'}</a>
+        {m.results_to && <span>Results to {month(m.results_to)}{m.new_results?.length ? <b> · new results</b> : null}</span>}
       </div>
       <Menu label={`More for ${m.company}`} items={[
         { label: 'Open', href: pathOf(slug, 'summary') },
-        { label: `Saved versions${versions > 1 ? ` (${versions})` : ''}`, href: pathOf(slug, 'versions') },
+        { label: `Versions${versions > 1 ? ` (${versions})` : ''}`, href: pathOf(slug, 'versions') },
         { label: `Delete ${m.company}…`, onClick: onDelete, danger: true },
       ]} />
     </li>
   )
 }
 
-/** "The price assumes sales grow 13.5% a year; our forecast has 5.8%." Negative growth is said as shrinking. */
+/** "Implied revenue growth 13.5% vs 5.8% base case." */
 function assumes(m: ModelSummary): ReactNode {
-  const ours = m.growth != null ? <>; our forecast has {words(m.growth)}</> : null
-  if (m.price == null) return 'No share price yet, so nothing to compare.'
-  if (m.implied == null) return <>No steady sales growth between −30% and +80% a year makes the price fair{ours}.</>
-  return <>The price assumes sales {m.implied < 0 ? <><b>shrink</b> <b className="num">{fmt(-m.implied, 'pct')}</b></> : <>grow <b className="num">{fmt(m.implied, 'pct')}</b></>} a year{ours}.</>
+  const ours = m.growth != null ? <> vs <span className="num">{fmt(m.growth, 'pct')}</span> base case</> : null
+  if (m.price == null) return 'No CMP yet.'
+  if (m.implied == null) return <>Implied growth outside −30% to +80%{ours}.</>
+  return <>Implied revenue growth <b className="num">{fmt(m.implied, 'pct')}</b>{ours}.</>
 }
-const words = (g: number) => g < 0 ? <>sales shrinking <span className="num">{fmt(-g, 'pct')}</span></> : <><span className="num">{fmt(g, 'pct')}</span></>
 
-/** Where the price came from when it isn't the one saved in the model. */
+/** Where CMP came from when it isn't the one saved in the model. */
 function PriceNote({ m }: { m: ModelSummary }) {
   if (!m.symbol) return null
-  if (!m.price_live) return <span className="small muted">Price saved with the model, {ago(m.price_at)}</span>
+  if (!m.price_live) return <span className="small muted">CMP as saved, {ago(m.price_at)}</span>
   const moved = m.price_saved && m.price != null ? m.price / m.price_saved - 1 : null
   return moved != null && Math.abs(moved) >= 0.005
-    ? <span className="small muted">Today’s price, {moved > 0 ? 'up' : 'down'} {fmt(Math.abs(moved), 'pct')} since the model was saved</span>
+    ? <span className="small muted">Live CMP, {moved > 0 ? '+' : '−'}{fmt(Math.abs(moved), 'pct')} since the model was saved</span>
     : null
 }
 
@@ -239,11 +238,11 @@ function CheckAll({ n, models, onSaved }: { n: number; models: ModelSummary[]; o
     <div className="check-all" aria-busy={running}>
       <button type="button" className="btn" onClick={run} disabled={running}>Check all for new results</button>
       <span className="small muted" role="status">{running ? <>Checking {Math.min(done + 1, n)} of {n}… <button type="button" className="link" onClick={() => { ctl.current?.abort(); setState('stopped') }}>Stop</button></>
-        : state === 'done' ? <>Checked {at}: {found.length ? <>new results for {found.map((r, i) => <span key={r.id}>{i ? ', ' : ''}<a href={pathOf(slugOf(r.id), 'changes')}>{r.company}</a></span>)}</> : 'nothing new'}{failed.length
+        : state === 'done' ? <>Checked {at}: {found.length ? <>new results for {found.map((r, i) => <span key={r.id}>{i ? ', ' : ''}<a href={pathOf(slugOf(r.id), 'tracking')}>{r.company}</a></span>)}</> : 'nothing new'}{failed.length
           ? `; couldn’t reach NSE for ${failed.map(r => r.company).join(', ')}${kept ? `, the list shows results as of ${clock(kept)}` : ''}` : ''}.{failed.length ? <> <button type="button" className="link" onClick={run}>Try again</button></> : null}</>
         : state === 'stopped' ? `Stopped after ${done} of ${n}${found.length ? `; ${found.length} saved with new results` : ''}. The rest weren’t checked.`
         : state === 'failed' ? <>Couldn’t reach NSE at {at}: {error} The list shows results as of {lastSaved ? clock(lastSaved) : 'the last save'}. <button type="button" className="link" onClick={run}>Try again</button></>
-        : `Asks NSE about the ${n === 1 ? 'company' : `${n} companies`} added by ticker and adds any new results; your own edits are kept.`}</span>
+        : `Polls NSE for the ${n === 1 ? 'company' : `${n} companies`} added by ticker and adds any new results; assumptions are kept.`}</span>
     </div>
   )
 }

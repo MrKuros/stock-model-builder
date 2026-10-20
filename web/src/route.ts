@@ -1,30 +1,31 @@
-/** Real path URLs: / (your companies), /add, /c/<slug>/<page>[/<statement>][?v=<version>][#<anchor>]. Every link is an
+/** Real path URLs: / (coverage), /add, /c/<slug>/<page>[/<statement>][?v=<version>][#<anchor>]. Every link is an
  * <a href>; clicks on same-origin links are taken here (pushState), so a page switch keeps the open model. */
 import { createContext, useContext } from 'react'
 
-export type Page = 'summary' | 'value' | 'priced-in' | 'risks' | 'changes' | 'peers' | 'forecast' | 'note' | 'business'
+export type Page = 'summary' | 'valuation' | 'reverse-dcf' | 'risks' | 'tracking' | 'peers' | 'forecast' | 'note' | 'financials'
   | 'statements' | 'documents' | 'versions'
-/** Page names from before the redesign; links and addresses using them land on their new page (moved()). */
-type OldPage = 'overview' | 'fundamentals' | 'valuation' | 'checks'
+/** Page names from before: links and addresses using them land on their current page (moved()). The question-first
+ * names (value, priced-in, business, changes) and the first ones (overview, fundamentals, checks). */
+type OldPage = 'overview' | 'fundamentals' | 'checks' | 'value' | 'priced-in' | 'business' | 'changes'
 
-/** The rail: three groups, each page with its label (the title of its page, a question where it answers one). */
+/** The rail: three groups, each page with its label (the title of its page). */
 export const RAIL: [string, [Page, string][]][] = [
-  ['Answers', [['summary', 'Summary'], ['value', 'Is it cheap?'], ['priced-in', 'What does the price assume?'],
-    ['risks', 'What could go wrong?'], ['changes', 'What changed?'], ['peers', 'How does it compare?']]],
-  ['Work on it', [['forecast', 'Our forecast'], ['note', 'Research note']]],
-  ['Evidence', [['business', 'How the business is doing'], ['statements', 'Statements'], ['documents', 'Documents and sources'],
-    ['versions', 'Saved versions']]],
+  ['Analysis', [['summary', 'Summary'], ['valuation', 'Valuation'], ['reverse-dcf', 'Reverse DCF'],
+    ['risks', 'Risks & forensics'], ['tracking', 'Results tracking'], ['peers', 'Peers']]],
+  ['Model', [['forecast', 'Forecast'], ['note', 'Research note']]],
+  ['Data', [['financials', 'Financials'], ['statements', 'Statements'], ['documents', 'Documents'],
+    ['versions', 'Versions']]],
 ]
 export const PAGES: [Page, string][] = RAIL.flatMap(g => g[1])
-/** The number keys 1-6: the Answers pages. */
+/** The number keys 1-6: the Analysis pages. */
 export const ANSWERS = RAIL[0][1].map(p => p[0])
 /** Pages that show reported years only: the case and years controls do nothing there (dimmed, still focusable). */
-export const REPORTED: Page[] = ['business', 'risks', 'documents', 'versions', 'peers']
+export const REPORTED: Page[] = ['financials', 'risks', 'documents', 'versions', 'peers']
 
 /** Statement sub-pages: url, tab label, the LAYOUT section it shows */
 export const STATEMENTS = [
-  ['profit-and-loss', 'Profit & loss', 'PROFIT & LOSS'], ['balance-sheet', 'Balance sheet', 'BALANCE SHEET'],
-  ['cash-flow', 'Cash flow', 'CASH FLOW'], ['ratios', 'Ratios', 'RATIOS'], ['quarters', 'Quarters', 'QUARTERS'],
+  ['profit-and-loss', 'P&L', 'PROFIT & LOSS'], ['balance-sheet', 'Balance sheet', 'BALANCE SHEET'],
+  ['cash-flow', 'Cash flow', 'CASH FLOW'], ['ratios', 'Ratios', 'RATIOS'], ['quarters', 'Quarterly results', 'QUARTERS'],
 ] as const
 
 /** Set once the first page of this load is placed: every later page (another company, Back, the list) moves focus
@@ -37,11 +38,15 @@ export const VERSION = /^\d{4}-\d{2}-\d{2}(-\d{4})?$/
 /** An old page (and its anchor) as the new page and anchor; a new page is itself. */
 export function moved(page: string, anchor = ''): [Page, string] {
   switch (page as Page | OldPage) {
-    case 'overview': return anchor === 'changed' ? ['changes', ''] : ['summary', anchor]
-    case 'fundamentals': return ['business', anchor]
-    case 'valuation': return anchor === 'hinges' || anchor === 'gap' ? ['priced-in', ''] : anchor === 'peers' ? ['peers', ''] : ['value', anchor]
+    case 'overview': return anchor === 'changed' ? ['tracking', ''] : ['summary', anchor]
+    case 'fundamentals': case 'business': return ['financials', anchor]
+    case 'value': return ['valuation', anchor]
+    case 'priced-in': return ['reverse-dcf', anchor]
+    case 'changes': return ['tracking', anchor]
+    // the first valuation page held the reverse view (#hinges, #gap) and the peers (#peers) too
+    case 'valuation': return anchor === 'hinges' || anchor === 'gap' ? ['reverse-dcf', ''] : anchor === 'peers' ? ['peers', ''] : ['valuation', anchor]
     case 'checks': return anchor === 'documents' ? ['documents', 'add'] : anchor === 'audit' || anchor.startsWith('src-') ? ['documents', anchor.startsWith('src-') ? 'reading' : anchor] : ['risks', anchor === 'flags' ? 'signs' : anchor]
-    case 'forecast': return anchor === 'tracking' ? ['changes', 'by-input'] : ['forecast', anchor]
+    case 'forecast': return anchor === 'tracking' ? ['tracking', 'by-input'] : ['forecast', anchor]
   }
   return PAGES.some(p => p[0] === page) ? [page as Page, anchor] : ['summary', '']
 }
@@ -98,7 +103,7 @@ export function onLinkClick(e: MouseEvent) {
   navigate(u.pathname + u.search + u.hash)
 }
 
-/** The open company's links: href('value', 'bridge') -> /c/tcs/value#bridge. Old page names still work (moved()). */
+/** The open company's links: href('valuation', 'bridge') -> /c/tcs/valuation#bridge. Old page names still work (moved()). */
 export type Href = (page: Page | OldPage, anchor?: string, sub?: string) => string
 export const HrefCtx = createContext<Href>(() => '/')
 export const useHref = () => useContext(HrefCtx)

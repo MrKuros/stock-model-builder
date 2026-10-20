@@ -3,7 +3,6 @@ import { Explain, FlagExplain, useAi } from './Sources'
 import type { Upgrade } from './Model'
 import { More, Next, PageHead, Sev } from './Shell'
 import { useHref } from './route'
-import { subjectOf } from './Note'
 import {
   SEV_WORD, fmt, isAnnual, properName, sevCounts, shortYear, type Forensic, type ModelDoc, type OneOff, type OneOffNote, type Parsed, type Proposal,
   type Row, type Severity,
@@ -12,47 +11,41 @@ import {
 const ORDER: Severity[] = ['high', 'medium', 'low', 'ok', 'not_checked']
 /** The radar in reading order: worst first, then passed, then what couldn't run. */
 export const bySeverity = (fs: Forensic[]) => [...fs].sort((a, b) => ORDER.indexOf(a.severity) - ORDER.indexOf(b.severity))
-const WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen']
-const w = (n: number) => WORDS[n] ?? String(n)
 const cap = (t: string) => t[0].toUpperCase() + t.slice(1)
 const lit = (f: Forensic) => f.severity === 'high' || f.severity === 'medium' || f.severity === 'low'
 
-/** The checks in one sentence: "Nothing serious. Two things are worth a look, nine checks passed, and four can't run
- * until the annual report is read." From sevCounts only, like every count in the app. */
+/** The checks in one line: "No high-severity flags; 2 medium, 9 clear, 4 need the annual report." From sevCounts only,
+ * like every count in the app. */
 export function riskWords(fs: Forensic[] | null | undefined): string {
   const c = sevCounts(fs)
-  if (!fs?.length) return 'The checks haven’t run on this model yet.'
-  const first = c.high ? `${cap(w(c.high))} serious warning sign${c.high > 1 ? 's' : ''}.` : 'Nothing serious.'
+  if (!fs?.length) return 'Forensic checks haven’t run on this model yet.'
+  const first = c.high ? `${c.high} high-severity red flag${c.high > 1 ? 's' : ''}` : 'No high-severity red flags'
   // the annual report unlocks only the checks that need it; the rest wait for more years
   const ar = fs.filter(f => f.severity === 'not_checked' && f.needs).length, short = c.not_checked - ar
   const rest = [
-    c.medium ? `${w(c.medium)} ${c.medium > 1 ? 'things are' : 'thing is'} worth a look` : '',
-    c.low ? `${w(c.low)} minor ${c.low > 1 ? 'signs' : 'sign'}` : '',
-    c.ok ? `${w(c.ok)} check${c.ok > 1 ? 's' : ''} passed` : '',
-    ar ? `${w(ar)} can’t run until the annual report is read` : '',
-    short ? `${w(short)} can’t run on the years this file has` : '',
+    c.medium ? `${c.medium} medium` : '', c.low ? `${c.low} low` : '', c.ok ? `${c.ok} clear` : '',
+    ar ? `${ar} need${ar === 1 ? 's' : ''} the annual report` : '', short ? `${short} lack${short === 1 ? 's' : ''} enough years` : '',
   ].filter(Boolean)
-  const list = rest.length > 1 ? `${rest.slice(0, -1).join(', ')} and ${rest[rest.length - 1]}` : rest[0] ?? ''
-  return list ? `${first} ${cap(list)}.` : first
+  return `${first} of ${fs.length} checks${rest.length ? `; ${rest.join(', ')}` : ''}.`
 }
 
-/** Each rule in plain words: a title for when it's lit, why it matters, and a gloss for the passed list (term in brackets). */
+/** Each rule: its title when flagged, why it matters, and its name in the passed list. */
 const PLAIN: Record<string, { title: string; why: string; gloss: string }> = {
-  cash: { title: 'Profit isn’t turning into cash', why: 'Profit that never arrives as cash can be an accounting choice rather than money in the bank.', gloss: 'Cash from operations against profit, three years (cash conversion)' },
-  cash5: { title: 'Profit isn’t turning into cash', why: 'Profit that never arrives as cash can be an accounting choice rather than money in the bank.', gloss: 'Cash from operations against profit, five years (cash conversion)' },
-  dso: { title: 'Customers are paying more slowly', why: 'Sales booked but not collected can flatter revenue, or mean customers are struggling to pay.', gloss: 'How long customers take to pay (receivable days)' },
-  dio: { title: 'Stock is piling up', why: 'Unsold stock ties up cash and may have to be written down later.', gloss: 'How long stock sits before it’s sold (inventory days)' },
-  cwip: { title: 'Money is stuck in unfinished projects', why: 'Spending parked as work in progress isn’t depreciated yet, so profit can look better than it is.', gloss: 'Projects not yet running (capital work in progress)' },
-  other_income: { title: 'Other income is out of line', why: 'Income from outside the main business (interest, one-offs) can move profit without the business changing.', gloss: 'Income from outside the main business against profit before tax (other income)' },
-  tax: { title: 'The tax rate jumps around', why: 'An unsteady tax rate makes this year’s profit a poor guide to next year’s.', gloss: 'How steady the tax rate is (tax-rate swing)' },
-  debt: { title: 'Debt is high against operating profit', why: 'Heavy borrowing leaves less room if profits fall.', gloss: 'Debt against a year of operating profit (net debt ÷ EBITDA)' },
-  cover: { title: 'Interest eats into operating profit', why: 'Thin cover means one bad year could make the interest hard to pay.', gloss: 'Times operating profit pays the interest (interest cover)' },
-  nwc: { title: 'More money is tied up in running the business', why: 'Working capital growing faster than sales soaks up cash.', gloss: 'Money tied up day to day (working capital)' },
-  mscore: { title: 'The earnings-quality score looks off', why: 'The score combines eight ratios that often move together when profits are inflated by accounting.', gloss: 'Earnings-quality score (Beneish M-score, a test for profits inflated by accounting)' },
-  contingent: { title: 'Large possible bills off the balance sheet', why: 'Claims the company disputes can still have to be paid.', gloss: 'Possible bills not on the balance sheet (contingent liabilities)' },
-  related: { title: 'Large dealings with group companies', why: 'Money moving to insiders can leave less for other shareholders.', gloss: 'Dealings with group companies and insiders (related parties)' },
-  pledge: { title: 'Promoters have pledged shares', why: 'A lender can sell pledged shares if the price falls, pushing it down further.', gloss: 'Promoter shares pledged against loans (promoter pledge)' },
-  auditor: { title: 'The auditor raised something', why: 'A qualified opinion or a sudden change of auditor can mean a disagreement over the accounts.', gloss: 'What the auditor said, and whether the auditor changed' },
+  cash: { title: 'Weak cash conversion (3-yr)', why: 'Profit not converting into CFO can reflect aggressive revenue or cost recognition.', gloss: 'CFO/PAT, 3 years' },
+  cash5: { title: 'Weak cash conversion (5-yr)', why: 'Profit not converting into CFO can reflect aggressive revenue or cost recognition.', gloss: 'CFO/PAT, 5 years' },
+  dso: { title: 'Debtor days rising', why: 'Receivables growing faster than revenue can mean channel stuffing or weaker collections.', gloss: 'Debtor days' },
+  dio: { title: 'Inventory days rising', why: 'Inventory build-up ties up working capital and risks write-downs.', gloss: 'Inventory days' },
+  cwip: { title: 'High CWIP vs net block', why: 'Capex parked in CWIP isn’t depreciated, which can flatter EBIT.', gloss: 'CWIP ÷ net block' },
+  other_income: { title: 'Other income high vs PBT', why: 'Non-operating income (treasury, one-offs) can drive PBT without the core business.', gloss: 'Other income ÷ PBT' },
+  tax: { title: 'Volatile effective tax rate', why: 'An unstable ETR makes reported PAT a weak base for forecasting.', gloss: 'Effective tax rate swing' },
+  debt: { title: 'High net debt/EBITDA', why: 'High leverage leaves little headroom if EBITDA falls.', gloss: 'Net debt/EBITDA' },
+  cover: { title: 'Low interest cover', why: 'Thin EBIT/interest cover raises refinancing and covenant risk.', gloss: 'Interest cover (EBIT/interest)' },
+  nwc: { title: 'Working capital outgrowing revenue', why: 'Net working capital growing faster than revenue absorbs operating cash flow.', gloss: 'NWC growth vs revenue growth' },
+  mscore: { title: 'Beneish M-score above threshold', why: 'The eight ratios tend to move together when earnings are manipulated.', gloss: 'Beneish M-score' },
+  contingent: { title: 'Large contingent liabilities', why: 'Disputed claims off the balance sheet can still crystallise.', gloss: 'Contingent liabilities ÷ net worth' },
+  related: { title: 'Large related-party transactions', why: 'RPTs can transfer value away from minority shareholders.', gloss: 'Related-party transactions' },
+  pledge: { title: 'Promoter pledge', why: 'Lenders can sell pledged shares in a falling market, adding pressure on the price.', gloss: 'Promoter pledge %' },
+  auditor: { title: 'Audit qualification or auditor change', why: 'A modified opinion or abrupt auditor change can signal disagreement over the accounts.', gloss: 'Auditor’s opinion and auditor change' },
 }
 const plain = (f: Forensic) => PLAIN[f.key] ?? { title: f.title, why: '', gloss: f.title }
 /** Where a rule's numbers are in the statements, and the forecast input it links to. */
@@ -62,7 +55,7 @@ const NUMBERS: Record<string, [sub: string, row: string]> = {
   debt: ['balance-sheet', 'borrowings'], cover: ['ratios', 'int_cover'], nwc: ['balance-sheet', 'receivables'], mscore: ['ratios', 'roce'],
 }
 const INPUT: Record<string, [key: string, words: string]> = {
-  dso: ['dso', 'receivable days'], dio: ['dio', 'inventory days'], other_income: ['oi_pct', 'other income'], tax: ['tax_rate', 'the tax rate'],
+  dso: ['dso', 'debtor days'], dio: ['dio', 'inventory days'], other_income: ['oi_pct', 'other income'], tax: ['tax_rate', 'tax rate'],
 }
 const div = (a: number | null | undefined, b: number | null | undefined) => (a != null && b ? a / b : null)
 /** The series a rule reads, one value per reported year, for its small chart (null: no chart). */
@@ -103,8 +96,8 @@ interface Props {
   toggleYear: (year: string) => void; pendingYear: string | null
 }
 
-/** What could go wrong?: the fixed rules' warning signs as cards, what waits and why, what passed, and years that
- * stand out (never counted as warnings). AI can explain a sign; it never changes a number. */
+/** Risks & forensics: the fixed rules' red flags as cards, what isn't tested and why, what's clear, and outlier
+ * years (never counted as flags). AI can explain a flag; it never changes a number. */
 export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKeep, onProposals, toggleYear, pendingYear }: Props) {
   const href = useHref()
   const ai = useAi()
@@ -125,12 +118,12 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
 
   // the real blocker for the checks that wait on the annual report
   const blocker: { text: ReactNode; act: ReactNode } = !ar
-    ? { text: <>No annual report attached.</>, act: <a className="btn" href={href('documents', 'add')}>Attach the annual report</a> }
-    : off ? { text: <>The {ar.year} annual report is attached, but AI reading is off, so nothing has read it.</>,
-      act: <><a className="btn" href={href('documents', 'ai')}>How to turn on AI reading</a> <a className="btn" href={href('documents', 'reading')}>See the report</a></> }
-    : arNotes.length ? { text: <>The {ar.year} annual report has been read, but the notes these checks need weren’t found or aren’t approved yet.</>,
+    ? { text: <>No annual report attached.</>, act: <a className="btn" href={href('documents', 'add')}>Attach annual report</a> }
+    : off ? { text: <>{ar.year} annual report attached, but AI reading is off, so it hasn’t been read.</>,
+      act: <><a className="btn" href={href('documents', 'ai')}>Enable AI reading</a> <a className="btn" href={href('documents', 'reading')}>See the report</a></> }
+    : arNotes.length ? { text: <>{ar.year} annual report read; the notes these checks need weren’t found or aren’t approved yet.</>,
       act: <a className="btn" href={href('documents', 'reading')}>Review what AI read</a> }
-    : { text: <>The {ar.year} annual report is attached but hasn’t been read yet.</>, act: <a className="btn" href={href('documents', 'reading')}>Read it with AI</a> }
+    : { text: <>{ar.year} annual report attached, not read yet.</>, act: <a className="btn" href={href('documents', 'reading')}>Read with AI</a> }
 
   const card = (f: Forensic) => {
     const p = plain(f), s = seriesOf(f.key, hist, parsed.ratios), num = NUMBERS[f.key], inp = INPUT[f.key]
@@ -140,13 +133,13 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
           <p className="rk-head"><Sev level={f.severity} /> <b id={`rk-${f.key}`}>{p.title}</b></p>
           <p className="rk-fact serif">{f.detail}</p>
           {p.why && <p className="rk-why"><b>Why it matters:</b> {p.why}</p>}
-          <details className="rk-rule"><summary>What the rule checked</summary>
-            <p className="small">{f.rule}.{f.years.length > 0 && <> Years: {f.years.join(', ')}.</>} The number it found: <span className="num">{f.fact}</span>.</p>
+          <details className="rk-rule"><summary>Rule and threshold</summary>
+            <p className="small">{f.rule}.{f.years.length > 0 && <> Years: {f.years.join(', ')}.</>} Reading: <span className="num">{f.fact}</span>.</p>
             {f.parts && <MParts f={f} />}
           </details>
           <div className="rk-act">
-            {num && <a className="btn" href={href('statements', num[1], num[0])}>See the numbers</a>}
-            {inp && <a className="btn" href={href('forecast', inp[0])}>See {inp[1]} in the forecast</a>}
+            {num && <a className="btn" href={href('statements', num[1], num[0])}>Statement line</a>}
+            {inp && <a className="btn" href={href('forecast', inp[0])}>{cap(inp[1])} in Forecast</a>}
           </div>
           <FlagExplain flag={f} company={company} filings={doc.filings} notes={doc.notes} reports={annual}
             proposals={doc.proposals} note={doc.flag_notes.find(x => x.key === f.key)} ai={ai} onProposals={onProposals} />
@@ -158,91 +151,91 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
 
   return (
     <>
-      <PageHead label="Answers" title={`What could go wrong at ${subjectOf(company)}?`}
-        purpose={<>Fifteen fixed rules look for the usual signs of trouble in what {short} reported. Each sign says what was found, why
-          it matters and what the rule checked. AI can explain a sign from the annual report; it never changes a number.</>}
+      <PageHead label="Analysis" title="Risks & forensics"
+        purpose={<>Fifteen fixed forensic rules on {short}’s reported financials (cash conversion, working capital, leverage, Beneish
+          M-score, disclosures). AI can explain a flag from the annual report; it never changes a number.</>}
         answer={riskWords(parsed.forensic)} />
 
-      <nav className="sev-chips" aria-label="Checks by severity">
+      <nav className="sev-chips" aria-label="Forensic checks by severity">
         {(['high', 'medium', 'low', 'ok', 'not_checked'] as Severity[]).map(s => (
           <a key={s} className={`sev-chip sc-${s}`} href={`#${s === 'ok' ? 'passed' : s === 'not_checked' ? 'waiting' : 'signs'}`}>
             <b className="num">{c[s]}</b><span>{SEV_WORD[s]}</span></a>))}
       </nav>
 
-      {off && <p className="notice-in">AI reading is off, so {needAr.length ? `${w(needAr.length)} check${needAr.length > 1 ? 's' : ''} and ` : ''}the
-        explanations wait for it. All {flags.length - needAr.length} rule checks that need only the numbers still run.{' '}
-        <a href={href('documents', 'ai')}>How to turn it on</a></p>}
+      {off && <p className="notice-in">AI reading is off: {needAr.length ? `${needAr.length} disclosure check${needAr.length > 1 ? 's' : ''} and ` : ''}flag
+        explanations wait for it. The {flags.length - needAr.length} checks on reported numbers still run.{' '}
+        <a href={href('documents', 'ai')}>Enable it</a></p>}
 
       {upgrades.length > 0 && <div className="banner" role="status">
-        <p>The rules’ figures moved: {upgrades.map((u, i) => <span key={u.key}>{i > 0 && ' · '}{u.label.toLowerCase()} {fmt(u.from, u.kind)} → {fmt(u.to, u.kind)}</span>)}.</p>
-        <div className="banner-act"><button type="button" className="btn" onClick={onApply}>Use the new figures</button>
+        <p>Rule defaults moved: {upgrades.map((u, i) => <span key={u.key}>{i > 0 && ' · '}{u.label.toLowerCase()} {fmt(u.from, u.kind)} → {fmt(u.to, u.kind)}</span>)}.</p>
+        <div className="banner-act"><button type="button" className="btn" onClick={onApply}>Use new defaults</button>
           <button type="button" className="link" onClick={onKeep}>Keep mine</button></div>
       </div>}
 
       <section className="blk" id="signs" tabIndex={-1} aria-labelledby="signs-h">
-        <h2 id="signs-h">Warning signs <span className="cnt">{c.signs}</span></h2>
+        <h2 id="signs-h">Red flags <span className="cnt">{c.signs}</span></h2>
         {signs.length ? <ol className="risk-cards">{signs.map(card)}</ol>
-          : <p className="empty-state">No rule found a warning sign: nothing in the reported years crosses a threshold.</p>}
+          : <p className="empty-state">No red flags: no reported year crosses a threshold.</p>}
       </section>
 
       {waiting.length > 0 && <section className="blk" id="waiting" tabIndex={-1} aria-labelledby="waiting-h">
-        <h2 id="waiting-h">Not checked yet <span className="cnt">{waiting.length}</span></h2>
-        <p className="why">{cap(waiting.map(f => f.title.toLowerCase()).join(', ').replace(/, (?=[^,]*$)/, ' and '))}: {needAr.length ? 'these are only in the annual report’s notes.' : 'this file lacks the years they need.'}</p>
+        <h2 id="waiting-h">Not tested <span className="cnt">{waiting.length}</span></h2>
+        <p className="why">{waiting.map(f => plain(f).gloss).join(', ').replace(/, (?=[^,]*$)/, ' and ')}: {needAr.length ? 'disclosed only in the annual report’s notes.' : 'not enough reported years.'}</p>
         {needAr.length > 0 && <div className="wait-box"><p className="serif">{blocker.text}</p><div className="rk-act">{blocker.act}</div></div>}
-        {waiting.length > needAr.length && <p className="small-note">{waiting.filter(f => !f.needs).map(f => plain(f).title).join(', ')}: this file doesn’t have the years the rule needs.</p>}
+        {waiting.length > needAr.length && <p className="small-note">{waiting.filter(f => !f.needs).map(f => plain(f).gloss).join(', ')}: not enough reported years for the rule.</p>}
       </section>}
 
-      {passed.length > 0 && <div id="passed" tabIndex={-1}><More title={<span><b>Passed</b> · {passed.map(f => plain(f).gloss.replace(/ \(.*\)$/, '').toLowerCase()).slice(0, 4).join(', ')}{passed.length > 4 ? '…' : ''}</span>} n={passed.length}>
+      {passed.length > 0 && <div id="passed" tabIndex={-1}><More title={<span><b>Clear</b> · {passed.map(f => plain(f).gloss).slice(0, 4).join(', ')}{passed.length > 4 ? '…' : ''}</span>} n={passed.length}>
         <ul className="passed">{passed.map(f => <li key={f.key} id={`a-${f.key}`} tabIndex={-1}><Sev level="ok" /> <span>{plain(f).gloss}</span> <span className="num dim">{f.fact}</span></li>)}</ul>
       </More></div>}
 
       <section className="blk" id="unusual" tabIndex={-1} aria-labelledby="odd-h">
-        <h2 id="odd-h">Not warnings: years that stand out <span className="cnt">{oneoffYears.length}</span></h2>
-        <p className="why">These years look unlike the rest of {short}’s history. They are not counted as warning signs. You can leave one out
-          of the rules’ figures, or have AI explain it from that year’s report.</p>
+        <h2 id="odd-h">Outlier years (not flags) <span className="cnt">{oneoffYears.length}</span></h2>
+        <p className="why">Years far from {short}’s own median (robust z-score on median and MAD). Not counted as red flags. Exclude one
+          from the rule defaults, or have AI explain it from that year’s report.</p>
         {oneoffYears.length ? <ul className="odd-years">{oneoffYears.map(([year, items]) => {
           const out = doc.excluded_years.includes(year), inRules = used.includes(year)
           return (
             <li key={year}>
               <h3>{items.map(o => o.note).join('. ')}</h3>
-              <p className="small">In the rules’ figures: <b>{out ? 'no, you left it out' : inRules ? 'yes' : 'no, older than the three years the rules use'}</b>.</p>
+              <p className="small">In rule defaults: <b>{out ? 'no, excluded' : inRules ? 'yes' : 'no, outside the 3-year window'}</b>.</p>
               {/* an older year changes no rule figure, so it gets no button; one you left out can still go back */}
               {(inRules || out) && <div className="rk-act">
                 <button type="button" className="btn" aria-pressed={out} aria-busy={pendingYear === year} aria-disabled={pendingYear != null || undefined}
-                  onClick={() => toggleYear(year)}>{pendingYear === year ? 'Working…' : out ? `Put ${year} back in` : `Leave ${year} out`}</button>
+                  onClick={() => toggleYear(year)}>{pendingYear === year ? 'Working…' : out ? `Include ${year}` : `Exclude ${year}`}</button>
               </div>}
               <Explain year={year} company={company} filings={doc.filings} notes={doc.notes} ai={ai} proposals={doc.proposals}
                 report={annual.find(r => r.year === year)} note={doc.notes[`oneoff:${year}`] as OneOffNote | undefined}
                 onProposals={onProposals} onReports={onReports} />
             </li>
           )
-        })}</ul> : <p className="small-note">No year sits far from {short}’s own history on other income, tax rate, capex or operating margin.</p>}
+        })}</ul> : <p className="small-note">No outlier year in other income, tax rate, capex or EBITDA margin.</p>}
       </section>
 
-      <More title="How each rule works">
-        <p className="small">Every rule runs on the reported years with the same thresholds for every company. A sign is <b>Serious</b>,
-          <b> Worth a look</b> or <b>Minor</b> by how far past its threshold the number is; <b>Passed</b> means it stayed inside; <b>Not checked
-          yet</b> means the rule needs a figure only the annual report prints.</p>
+      <More title="Methodology">
+        <p className="small">Each rule runs on the reported years with the same thresholds for every company. Severity is <b>High</b>,
+          <b> Medium</b> or <b>Low</b> by distance past the threshold; <b>Clear</b> means within it; <b>Not tested</b> means the rule needs
+          an annual-report disclosure or more years.</p>
         <ul className="small rules-list">{flags.map(f => <li key={f.key}><b>{plain(f).gloss}.</b> {f.rule}.</li>)}</ul>
         {flags.find(f => f.parts) && <MParts f={flags.find(f => f.parts)!} />}
       </More>
 
-      <Next lead={needAr.length && !ar ? 'Some checks wait for the annual report.' : 'The research note puts these signs in words.'}>
-        {needAr.length && !ar ? <a className="primary" href={href('documents', 'add')}>Attach the annual report</a>
-          : <a className="primary" href={href('note')}>Read the research note</a>}
+      <Next lead={needAr.length && !ar ? 'Disclosure checks need the annual report.' : 'The research note discusses these flags.'}>
+        {needAr.length && !ar ? <a className="primary" href={href('documents', 'add')}>Attach annual report</a>
+          : <a className="primary" href={href('note')}>Research note</a>}
       </Next>
     </>
   )
 }
 
-const M_PARTS: [string, string][] = [['DSRI', 'Receivable days index'], ['GMI', 'Gross margin index'], ['AQI', 'Asset quality index'],
+const M_PARTS: [string, string][] = [['DSRI', 'Days sales in receivables index'], ['GMI', 'Gross margin index'], ['AQI', 'Asset quality index'],
   ['SGI', 'Sales growth index'], ['DEPI', 'Depreciation index'], ['SGAI', 'SG&A index'], ['LVGI', 'Leverage index'],
   ['TATA', 'Accruals / total assets']]
-/** The earnings-quality score's eight ratios, and what this file lacks and is approximated. */
+/** The Beneish M-score's eight ratios, and what this file lacks and is approximated. */
 function MParts({ f }: { f: Forensic }) {
   return <>
-    <div className="table-wrap" tabIndex={0} role="region" aria-label="The eight ratios of the earnings-quality score"><table className="keys">
-      <caption className="small">The eight ratios of the earnings-quality score</caption>
+    <div className="table-wrap" tabIndex={0} role="region" aria-label="Beneish M-score components"><table className="keys">
+      <caption className="small">Beneish M-score components</caption>
       <tbody>{M_PARTS.map(([k, label]) => <tr key={k}><th scope="row">{label} <span className="dim">{k}</span></th>
         <td className="num">{f.parts![k] != null ? f.parts![k].toFixed(2) : '–'}</td></tr>)}</tbody>
     </table></div>

@@ -29,7 +29,7 @@ function oldLink(hash: string, id: string): string | null {
   const [, v, a = ''] = m, slug = slugOf(id)
   if (v === 'note') return pathOf(slug, 'summary')
   if (v === 'evidence') return pathOf(slug, 'checks', '', null, a === 'oneoffs' ? 'unusual' : a)
-  if (a === 'valuation' || a === 'bridge') return pathOf(slug, 'value', '', null, a === 'bridge' ? 'bridge' : '')
+  if (a === 'valuation' || a === 'bridge') return pathOf(slug, 'valuation', '', null, a === 'bridge' ? 'bridge' : '')
   if (a === 'statements') return pathOf(slug, 'statements')
   return pathOf(slug, 'forecast', '', null, a)
 }
@@ -298,7 +298,7 @@ export default function App() {
     try {
       const w = await watchSymbol(symbol)
       setWatch(w.list)
-      setWatchMsg(<>Watching {w.name}. It’s under <a href="/#watching">Watching</a> on Your companies.</>)
+      setWatchMsg(<>Added {w.name} to the <a href="/#watching">watchlist</a>.</>)
     } catch (e) { setWatchMsg(<span className="bad">Couldn’t watch {symbol}: {(e as Error).message}</span>) }
   }
   // Restore: the version is re-read from disk and saved as today's; today's own file is kept first (keep=1). The
@@ -317,7 +317,7 @@ export default function App() {
       openDoc(p, { ...d, saved_at: r.saved_at }, r.id, null)
       loadList()
       navigate(location.pathname + location.hash, true)
-      setNotice('Restored. The version you had before is kept under Saved versions, so you can go back.')
+      setNotice('Restored. The previous version is kept under Versions.')
     } catch (e) { setSave(s => ({ ...s, error: (e as Error).message })) }
   }
   const checked = (saved: { id: string; saved_at: string }[]) => { // other tabs on those companies reload them
@@ -349,7 +349,7 @@ export default function App() {
   if (open) lastUrl.current = location.pathname + location.search
   useEffect(() => {
     if (route.slug) return
-    document.title = route.top === 'add' ? `Add a company · ${TITLE}` : route.top === 'none' ? `No page here · ${TITLE}` : `Your companies · ${TITLE}`
+    document.title = route.top === 'add' ? `Add company · ${TITLE}` : route.top === 'none' ? `No page here · ${TITLE}` : `Coverage · ${TITLE}`
     if (route.anchor) { window.setTimeout(() => document.getElementById(route.anchor)?.scrollIntoView({ block: 'start' }), 60); return }
     window.scrollTo({ top: route.y ?? 0, behavior: 'instant' })
     if (openRef.current) flushRef.current() // the list shows the values you just set
@@ -392,13 +392,13 @@ export default function App() {
           ? <main id="main" className="page" tabIndex={-1}>
               {missing
                 ? <div className="gone"><h1 id="page-h" tabIndex={-1} className="h1">Couldn’t open this company</h1>
-                    <p className="purpose">{missing} Your other companies are fine.</p><p><a className="primary" href="/">Back to your companies</a></p></div>
+                    <p className="purpose">{missing} Other companies are unaffected.</p><p><a className="primary" href="/">Back to coverage</a></p></div>
                 : <div aria-busy="true"><p className="label">Opening</p><h1 id="page-h" tabIndex={-1} className="h1">Opening {route.slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}…</h1>
                     <div className="skel-block" /></div>}
             </main>
           : route.top === 'none'
           ? <main id="main" className="page" tabIndex={-1}><div className="gone"><h1 id="page-h" tabIndex={-1} className="h1">There’s no page here</h1>
-              <p><a className="primary" href="/">Your companies</a></p></div></main>
+              <p><a className="primary" href="/">Coverage</a></p></div></main>
           : route.top === 'add'
           ? <main id="main" className="page" tabIndex={-1}>
               <AddPage models={models} build={build} onAdd={add} onWatch={watchIt} watchMsg={watchMsg} /></main>

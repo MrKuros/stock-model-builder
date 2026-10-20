@@ -128,7 +128,7 @@ export default function DraftPanel({ parsed, doc, d, ai, href }: { parsed: Parse
           {off ? <p className="small">AI reading is off, so nothing can suggest inputs. <a href={href.replace('#add', '#ai')}>How to turn it on</a> · or set them yourself below.</p>
             : docs.length ? <p className="small">AI reads {docs.map(r => `the ${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}`).join(', ')} and suggests each input
                 with a quote; rules check the quote, the bounds and the company’s record. Inputs the documents don’t cover keep the rule’s figure.</p>
-            : <p className="small">No documents attached, so AI has nothing to read: a suggestion would just repeat the rules’ figures. <a href={href}>Attach an annual report or call transcript</a></p>}
+            : <p className="small">No documents attached, so AI has nothing to read: a suggestion would just repeat the rule defaults. <a href={href}>Attach an annual report or call transcript</a></p>}
         </div>
         {!off && (d.busy
           ? <span className="chk-run" role="status">{d.busy} · <button type="button" className="link" onClick={d.stop}>Stop</button></span>
@@ -143,8 +143,8 @@ export default function DraftPanel({ parsed, doc, d, ai, href }: { parsed: Parse
         </div>
         <div className="table-wrap draft-wrap" tabIndex={0} role="region" aria-label="Suggested inputs against yours">
           <table className="draft-t" role="table">
-            <caption className="sr">Each input: the suggested cautious, central and hopeful values against yours, the source, the rule checks and your decision</caption>
-            <thead role="rowgroup"><tr role="row">{['Input', ...ORDER.map(s => NAMES[s]), 'Source', 'Rule check', 'Decision'].map(h =>
+            <caption className="sr">Each driver: the suggested bear, base and bull values against yours, the source, the rule checks and your decision</caption>
+            <thead role="rowgroup"><tr role="row">{['Driver', ...ORDER.map(s => NAMES[s]), 'Source', 'Rule check', 'Decision'].map(h =>
               <th key={h} scope="col" role="columnheader">{h}</th>)}</tr></thead>
             <tbody role="rowgroup">{rows.map(p => <Row key={p.id} p={p} doc={doc} kind={kinds[p.field] ?? 'pct'} name={names[p.field] ?? p.field} d={d} />)}</tbody>
           </table>
@@ -205,7 +205,7 @@ function Row({ p, doc, kind, name, d }: { p: Proposal; doc: ModelDoc; kind: Kind
           <span className="acts">
             {p.status === 'proposed' && !noop && <>
               <button type="button" className="btn" onClick={() => d.accept([p])} disabled={bad} aria-disabled={!!d.busy}
-                aria-label={`Use ${name}: central ${path(v.base, kind)}`}>Use</button>
+                aria-label={`Use ${name}: base ${path(v.base, kind)}`}>Use</button>
               <button type="button" className="link" onClick={() => d.reject(p)} aria-label={`Keep mine for ${name}`}>Keep mine</button></>}
             <button type="button" className="link" aria-label={`Edit ${name}`}
               onClick={() => setEdit(Object.fromEntries(ORDER.map(s => [s, shown((bad ? doc.scenarios[s][p.field] : v[s]).start, kind)])) as Record<Scenario, string>)}>Edit</button>

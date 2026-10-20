@@ -332,7 +332,7 @@ def share_gap(co):
     return {"gap": gap, "now": now, "then": then,
             "text": f"share count up {gap:.0%} since the last balance sheet ({now:,.1f} cr from market cap / price, "
                     f"{then:,.1f} cr from share capital / face value): shares issued since (IPO or QIP?), so net debt "
-                    "misses the proceeds and our value per share reads low"}
+                    "misses the proceeds and fair value per share is understated"}
 
 
 # ---------- XBRL filings (NSE/BSE financial results, Ind AS) ----------
@@ -1217,7 +1217,7 @@ def default_ends(hist, d, g=None):
 # (ratios() key, words for the sentence, unit, floor). The floor is the smallest gap from typical worth a flag,
 # so a very steady metric (TCS tax 22-26%) can't flag a 2 pp wobble just because its spread is tiny.
 ONEOFF = (("oi_pct", "other income", " of revenue", 0.02), ("tax_rate", "tax rate", "", 0.10),
-          ("capex_pct", "capex", " of revenue", 0.05), ("ebitda_margin", "operating margin", "", 0.05),
+          ("capex_pct", "capex", " of revenue", 0.05), ("ebitda_margin", "EBITDA margin", "", 0.05),
           ("mi_pct", "minority share of profit", "", 0.05))
 
 
@@ -1281,16 +1281,16 @@ def key_numbers(hist, labels):
     flagged for one-off other income: a gain in profit that was never operating cash)."""
     r = ratios(hist)
     gain = {o["year"] for o in detect_oneoffs(hist, labels) if o["metric"] == "oi_pct"}
-    series = (("growth", "Sales growth", "pct", [x["growth"] for x in r]),
-              ("ebitda_margin", "Operating margin (EBITDA)", "pct", [x["ebitda_margin"] for x in r]),
-              ("pat_growth", "Net profit growth", "pct",
+    series = (("growth", "Revenue growth", "pct", [x["growth"] for x in r]),
+              ("ebitda_margin", "EBITDA margin", "pct", [x["ebitda_margin"] for x in r]),
+              ("pat_growth", "PAT growth", "pct",
                [None, *(_div(h["pat"], p["pat"]) - 1 if p["pat"] > 0 and h["pat"] is not None else None
                         for p, h in zip(hist, hist[1:]))]),
-              ("roce", "Return on capital (ROCE)", "pct", [h.get("roce") for h in hist]),
-              ("cash_conversion", "Cash from operations ÷ profit", "x",
+              ("roce", "ROCE", "pct", [h.get("roce") for h in hist]),
+              ("cash_conversion", "Cash conversion (CFO/PAT)", "x",
                [h["cfo"] / h["pat"] if h.get("cfo") is not None and h["pat"] > 0 and y not in gain else None
                 for y, h in zip(labels, hist)]),
-              ("dso", "Receivable days", "days", [x["dso"] for x in r]))
+              ("dso", "Debtor days", "days", [x["dso"] for x in r]))
     return [{"key": k, "label": lab, "kind": kind, "year": labels[-1], "last": xs[-1], "typical": _median_before(xs)}
             for k, lab, kind, xs in series]
 
@@ -1530,7 +1530,7 @@ def forensic(hist, labels, notes=None):
         add("nwc", "Working capital", _sev(wc[-1] - typ, NWC_DRIFT), wc[-1] - typ, NWC_DRIFT[2], labels[-4:],
             f"{_pct(wc[-1])} of revenue, median {_pct(typ)}",
             f"Working capital was {_pct(wc[-1])} of revenue in {y} against a median of {_pct(typ)} in the three years before."
-            + (" Below zero means customers and suppliers fund the business day to day; that funding shrank against sales."
+            + (" Negative NWC: customer advances and supplier credit fund operations, and that funding shrank relative to revenue."
                if wc[-1] < 0 else ""),
             rule)
 
@@ -1761,22 +1761,21 @@ def _burn(rows, tax):
     EBITDA margin."""
     r = rows[-1]
     rev, f = r["revenue"], r["fcff"]
-    head = (f"In the last forecast year the business still spends more cash than it brings in (free cash flow of "
-            f"Rs {_signed(f)} cr), so there is nothing to value: a value needs cash coming in after the forecast ends.")
+    head = (f"Final forecast year FCFF of Rs {_signed(f)} cr is negative, so the terminal value is undefined and there is "
+            "no fair value.")
     if rev <= 0:
-        return head + " Raise sales growth or the operating margin, or lower capex, in the last years.", {}
+        return head + " Raise revenue growth or EBITDA margin, or cut capex, in the final years.", {}
     g = rev / rows[-2]["revenue"] - 1 if len(rows) > 1 and rows[-2]["revenue"] > 0 else None
     # a tenth of a point past break-even, rounded away from it, so the figure shown does stop the burn
     cap, mar = math.floor(((r["capex"] + f) / rev - 0.001) * 1000) / 1000, None
     if tax < 1:
         mar = math.ceil(((r["ebitda"] - f / (1 - tax)) / rev + 0.001) * 1000) / 1000
     fixes = [f"capex of at most {_pct(cap)} of sales that year"] if cap > 0 else []
-    fixes += [f"an operating margin of at least {_pct(mar)} that year"] if mar is not None else []
-    fixes.append("more forecast years, with growth fading lower and capex cut to match")
-    return (head + f" That year capex (spending on plant and equipment) takes {_pct(r['capex'] / rev)} of sales against an "
-            f"operating margin (EBITDA) of {_pct(r['ebitda'] / rev)}"
-            + (f", with sales still growing {_pct(g)}" if g is not None else "")
-            + ". Any one of these stops the cash burn: " + "; ".join(fixes) + "."), \
+    fixes += [f"EBITDA margin of at least {_pct(mar)} that year"] if mar is not None else []
+    fixes.append("a longer forecast, with growth fading and capex cut to match")
+    return (head + f" Final-year capex is {_pct(r['capex'] / rev)} of sales vs EBITDA margin of {_pct(r['ebitda'] / rev)}"
+            + (f", with revenue still growing {_pct(g)}" if g is not None else "")
+            + ". Any one of these turns FCFF positive: " + "; ".join(fixes) + "."), \
         {"capex_pct": cap if cap > 0 else None, "ebitda_margin": mar}
 
 
@@ -1784,11 +1783,10 @@ def _no_equity(ev, equity):
     """Why a scenario whose last year makes cash still leaves the shares worth nothing (equity <= 0). The number stays
     (the Excel sheet shows it too); every page reads this error instead of calling it a value."""
     if ev <= 0:
-        return (f"The whole business comes out worth Rs {_signed(ev)} cr on these inputs: the cash the forecast years "
-                "burn outweighs what the years after the forecast bring back, so a share has no value. Lower capex or "
-                "raise the operating margin in the forecast years, not only the last one.")
-    return (f"The business is worth Rs {_inr(ev)} cr, less than its net debt and other claims (Rs {_inr(ev - equity)} "
-            "cr), so a share has no value on these inputs.")
+        return (f"EV is Rs {_signed(ev)} cr on these inputs: forecast-period cash burn outweighs the PV of the terminal "
+                "value, so equity has no value. Cut capex or raise EBITDA margin across the forecast, not only the final year.")
+    return (f"EV of Rs {_inr(ev)} cr is below net debt and other claims (Rs {_inr(ev - equity)} cr), so equity has no "
+            "value on these inputs.")
 
 
 def valuation(projs, hist, val, base, market, inputs=None, note=False):

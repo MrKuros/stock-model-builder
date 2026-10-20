@@ -32,15 +32,14 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
   const hide = parsed.sources?.basis === 'cogs' ? undefined : new Set(['cogs'])
   return (
     <>
-      <PageHead label="Evidence · Statements" title={cur[1]}
+      <PageHead label="Data · Statements" title={cur[1]}
         purpose={tab === 'QUARTERS'
-          ? <>The last ten quarters as {properName(parsed.company.name).replace(/\s+(ltd\.?|limited)$/i, '')} reported them, then the last full year. TTM = the last four
-            quarters added up, so the run rate sits next to the annual figure.</>
-          : tab === 'RATIOS' ? <>Percentages, days and multiples worked out from the statements, every year. Reported years in black; forecast years
-            in blue, marked E.</>
-          : <>Every line, every year. Reported years in black; forecast years in blue, marked E. Rs crore.</>}
-        answer={tab === 'QUARTERS' ? (quarterly ? <>Quarters to {month(quarterly.quarters.dates[quarterly.quarters.dates.length - 1])}.</> : <>No quarterly figures in this file.</>)
-          : <>Reported {histYears[0]}–{histYears[nHist - 1].slice(-2)}{proj ? <>, then our {NAMES[active].toLowerCase()} case’s forecast to {projection!.years[n - 1]}</> : null}.</>} />
+          ? <>Last ten quarters as reported by {properName(parsed.company.name).replace(/\s+(ltd\.?|limited)$/i, '')}, the last full year, and TTM (run rate
+            vs the annual figure).</>
+          : tab === 'RATIOS' ? <>Margins, returns, working-capital days and leverage, every year. Reported in black; forecast in blue, marked E.</>
+          : <>Every line, every year. Reported in black; forecast in blue, marked E. Rs cr.</>}
+        answer={tab === 'QUARTERS' ? (quarterly ? <>Quarters to {month(quarterly.quarters.dates[quarterly.quarters.dates.length - 1])}.</> : <>No quarterly data in this file.</>)
+          : <>Reported {histYears[0]}–{histYears[nHist - 1].slice(-2)}{proj ? <>; {NAMES[active]}-case forecast to {projection!.years[n - 1]}</> : null}.</>} />
       <nav className="stmt-tabs" aria-label="Statements">
         {tabs.map(([id, name]) => <a key={id} href={href('statements', '', id)} aria-current={id === cur[0] ? 'true' : undefined}>{name}</a>)}
       </nav>
@@ -50,17 +49,17 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
       <section className="statements" aria-labelledby="page-h">
         {tab === 'QUARTERS'
           ? quarterly
-            ? <div className="table-wrap" tabIndex={0} role="region" aria-label="Quarters"><QuarterTable {...quarterly} /></div>
-            : <p className="val-empty">This Excel export has no quarterly figures. Exports that include the Quarters block
-                show the last ten quarters and the trailing twelve months here.</p>
+            ? <div className="table-wrap" tabIndex={0} role="region" aria-label="Quarterly results"><QuarterTable {...quarterly} /></div>
+            : <p className="val-empty">No quarterly data in this Excel export. Exports with the Quarters block show the last ten quarters
+                and TTM here.</p>
           : <StatementTable layout={layout} section={tab} years={years} rows={rows} nHist={nHist} hide={hide} />}
         {tab === 'PROFIT & LOSS' && proj && moved?.year === histYears[nHist - 1] && <p className="guard small">
-          The forecast grows from Rs {money((hist[nHist - 1].revenue ?? 0) - moved.revenue_out)} cr, not the reported Rs {money(hist[nHist - 1].revenue ?? 0)} cr:
-          Rs {money(moved.revenue_out)} cr of {histYears[nHist - 1]} sales ({moved.reason || 'a business that left the group'}) left the group, so the step down
-          into {projection!.years[0]} is deliberate. <a href={href('forecast', 'growth')}>Change it in Our forecast</a></p>}
+          Forecast base is Rs {money((hist[nHist - 1].revenue ?? 0) - moved.revenue_out)} cr, not the reported Rs {money(hist[nHist - 1].revenue ?? 0)} cr:
+          Rs {money(moved.revenue_out)} cr of {histYears[nHist - 1]} revenue ({moved.reason || 'divested business'}) deconsolidated, so the step down
+          into {projection!.years[0]} is deliberate. <a href={href('forecast', 'growth')}>Edit in Forecast</a></p>}
         {tab === 'RATIOS' && (
           <p className="muted small">
-            ROE = net profit / average equity. ROCE = EBIT / average (equity + borrowings + lease liabilities), EBIT = profit before tax +
+            ROE = PAT / average equity. ROCE = EBIT / average (equity + borrowings + lease liabilities), EBIT = profit before tax +
             interest. Asset turnover = revenue / average total assets. Averages use opening and closing balances; the
             first year uses closing. Net debt = borrowings + lease liabilities − cash − investments. – means not meaningful (zero or
             negative denominator).
@@ -68,15 +67,15 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
         )}
         {tab === 'QUARTERS' && quarterly && (
           <p className="muted small">
-            As reported, last {Math.min(quarterly.quarters.dates.length, SHOW)} quarters. Operating profit = profit before
-            tax + interest + depreciation − other income, the same as EBITDA in the yearly tables. TTM (trailing twelve
+            As reported, last {Math.min(quarterly.quarters.dates.length, SHOW)} quarters. EBITDA = PBT + interest + depreciation −
+            other income, as in the annual tables. TTM (trailing twelve
             months) adds up the last four quarters{quarterly.ttm ? ` to ${month(quarterly.ttm.end)}` : ''}. YoY (year
             on year) compares a quarter with the same quarter a year earlier, and TTM with the four quarters before it.
             {!quarterly.ttm && ' No TTM here: the last four quarters in the file aren’t consecutive.'}
           </p>
         )}
       </section>
-      <Next lead="The whole model, every formula live, in a workbook.">{excel}</Next>
+      <Next lead="Full model in Excel, with live formulas.">{excel}</Next>
     </>
   )
 }
@@ -106,7 +105,7 @@ function StatementTable({ layout, section, years, rows, nHist, hide }: {
           <tr className="mark" aria-hidden="true"><td />
             <td colSpan={nHist}>Reported</td>{nProj > 0 && <td colSpan={nProj} className="proj">Forecast →</td>}</tr>
           <tr>
-            <th scope="col">{section === 'RATIOS' ? 'Ratio' : 'Rs crore'}</th>
+            <th scope="col">{section === 'RATIOS' ? 'Ratio' : 'Rs cr'}</th>
             {years.map((y, i) => <th scope="col" key={y} className={i >= nHist ? 'proj' : undefined}>{i >= nHist && !y.endsWith('E') ? `${y}E` : y}</th>)}
           </tr>
         </thead>
@@ -147,21 +146,21 @@ function QuarterTable({ quarters, ttm, ttmPrev, fy, last, prev }: QuarterProps) 
   const t = ttm?.values, tp = ttmPrev?.values
   const lines: [string, LineKind, (i: number) => number | null, number | null, number | null][] = [
     // label, kind, quarter i, last FY, TTM
-    ['Sales', 'num', i => at('sales', i), last.revenue, t?.sales ?? null],
-    ['Operating profit', 'num', i => at('op_profit', i), last.ebitda, t?.op_profit ?? null],
-    ['Operating margin', 'pct', i => margin(at('op_profit', i), at('sales', i)), margin(last.ebitda, last.revenue),
+    ['Revenue', 'num', i => at('sales', i), last.revenue, t?.sales ?? null],
+    ['EBITDA', 'num', i => at('op_profit', i), last.ebitda, t?.op_profit ?? null],
+    ['EBITDA margin', 'pct', i => margin(at('op_profit', i), at('sales', i)), margin(last.ebitda, last.revenue),
       margin(t?.op_profit, t?.sales)],
-    ['Net profit', 'num', i => at('net_profit', i), last.pat, t?.net_profit ?? null],
-    ['Sales growth YoY', 'pct', i => growth(at('sales', i), at('sales', yearAgo(i))),
+    ['PAT', 'num', i => at('net_profit', i), last.pat, t?.net_profit ?? null],
+    ['Revenue YoY', 'pct', i => growth(at('sales', i), at('sales', yearAgo(i))),
       growth(last.revenue, prev?.revenue), growth(t?.sales, tp?.sales)],
-    ['Net profit growth YoY', 'pct', i => growth(at('net_profit', i), at('net_profit', yearAgo(i))),
+    ['PAT YoY', 'pct', i => growth(at('net_profit', i), at('net_profit', yearAgo(i))),
       growth(last.pat, prev?.pat), growth(t?.net_profit, tp?.net_profit)],
   ]
   return (
     <table className="q-table">
       <thead>
         <tr>
-          <th scope="col">Rs crore</th>
+          <th scope="col">Rs cr</th>
           {idx.map(i => <th scope="col" key={dates[i]}>{month(dates[i])}</th>)}
           <th scope="col" className="q-sum">{fy}</th>
           {ttm && <th scope="col" className="q-sum"><abbr title="Trailing twelve months">TTM</abbr> {month(ttm.end)}</th>}
@@ -169,7 +168,7 @@ function QuarterTable({ quarters, ttm, ttmPrev, fy, last, prev }: QuarterProps) 
       </thead>
       <tbody>
         {lines.map(([label, kind, f, fyv, tv]) => (
-          <tr key={label} className={label === 'Net profit' ? 'total' : undefined}>
+          <tr key={label} className={label === 'PAT' ? 'total' : undefined}>
             <th scope="row">{label}</th>
             {idx.map(i => <td key={dates[i]}>{fmt(f(i), kind)}</td>)}
             <td className="q-sum">{fmt(fyv, kind)}</td>

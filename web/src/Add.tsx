@@ -166,8 +166,8 @@ export function SearchBox({ models, onBuild, onWatch, busy }: {
         Use <kbd>↑</kbd> <kbd>↓</kbd> to pick, <kbd>Enter</kbd> to build, <kbd>W</kbd> to watch. Banks, NBFCs and insurers aren’t supported yet; the app says so as soon as you pick one.
       </p>
       <dl className="add-what">
-        <div><dt>Build model</dt><dd>Everything: filings, price, documents, our value, the checks. About a minute.</dd></div>
-        <div><dt>Watch price</dt><dd>Price only, listed under Watching. Build the model later with one click.</dd></div>
+        <div><dt>Build model</dt><dd>Filings, CMP, documents, three-statement model, DCF and forensic checks. About a minute.</dd></div>
+        <div><dt>Watch price</dt><dd>CMP only, on the watchlist. Build the model later in one click.</dd></div>
       </dl>
     </div>
   )
@@ -219,7 +219,7 @@ export function BuildCard({ build, onWatch, onUpload, onClose }: { build: BuildA
             <button type="button" className={b.fail.final || (b.state === 'stopped' && build.hasNumbers()) ? 'btn' : 'primary'} onClick={build.retry}>Try again</button>
             {upload}<button type="button" className="link" onClick={onClose}>Cancel</button></>}
       </div>
-      {b.state === 'stopped' && build.hasNumbers() && <p className="small muted">Its numbers are in; documents not downloaded yet can be attached later on Documents and sources.</p>}
+      {b.state === 'stopped' && build.hasNumbers() && <p className="small muted">Its numbers are in; documents not downloaded yet can be attached later on Documents.</p>}
       {b.state === 'running' && <p className="small muted">When it’s done you land on {who}’s Summary. You can keep working meanwhile. If NSE stops answering, what was fetched is kept and you can try again.</p>}
     </section>
   )
@@ -245,9 +245,9 @@ function Duplicate({ d, onCancel, onPick }: { d: Dup; onCancel: () => void; onPi
         {d.m.symbol ? `, built from NSE (${d.m.symbol})` : ', from an Excel export'}{d.m.reviewed_at ? ' and reviewed by you' : ''}.{' '}
         {d.what === 'upload' ? `This upload has ${yrs?.length ? `${yrs[0]}–${yrs[yrs.length - 1]}` : 'its years'}.` : `This adds ${d.name} from NSE’s filings.`} What should happen?</p>
       <fieldset className="radios"><legend className="sr">What should happen</legend>
-        {opt('merge', 'Add these years to it', 'Keeps your inputs, notes and review. Recommended.')}
+        {opt('merge', 'Add these years to it', 'Keeps assumptions, notes and review status. Recommended.')}
         {opt('separate', 'Keep both, separately', 'Saves this as a second company.')}
-        {opt('replace', 'Replace it', 'Starts again from this. Today’s version is kept under Saved versions, so you can go back.')}
+        {opt('replace', 'Replace it', 'Starts again from this. The current version is kept under Versions.')}
       </fieldset>
       <div className="dlg-act">
         <button type="button" className="primary" onClick={() => onPick(mode)}>Continue</button>
@@ -258,7 +258,7 @@ function Duplicate({ d, onCancel, onPick }: { d: Dup; onCancel: () => void; onPi
 }
 
 /** /add: by name or symbol (Build model / Watch price), or an Excel export, or the sample. With `first`, the same
- * pieces are the first-run screen on Your companies. */
+ * pieces are the first-run screen on Coverage. */
 export default function AddPage({ models, build, onAdd, onWatch, watchMsg, first }: {
   models: ModelSummary[] | null; build: BuildApi; onAdd: OnAdd; onWatch: (s: string) => void; watchMsg: ReactNode; first?: boolean
 }) {
@@ -320,8 +320,8 @@ export default function AddPage({ models, build, onAdd, onWatch, watchMsg, first
 
   return (
     <>
-      {!first && <PageHead title="Add a company" purpose="Type a name or NSE symbol. The app reads the exchange filings, today’s price, annual reports
-        and call transcripts, then builds a first forecast and runs the checks for you to review. Usually about a minute; you can keep working meanwhile." />}
+      {!first && <PageHead title="Add company" purpose="Enter a name or NSE symbol. The app reads exchange filings (XBRL), CMP, annual reports and
+        concall transcripts, then builds a first forecast, DCF and forensic checks for review. About a minute; you can keep working meanwhile." />}
       <div className="add-grid">
         <section className="pane" aria-labelledby="find-h">
           <h2 id="find-h">Find it on NSE</h2>

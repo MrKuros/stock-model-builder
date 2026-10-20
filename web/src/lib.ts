@@ -41,8 +41,8 @@ export function copyBase(setDoc: (f: (d: ModelDoc) => ModelDoc) => void, scenari
   setDoc(d => ({ ...d, scenarios: seed(d.scenarios.base),
     assumption_sources: { ...d.assumption_sources, bull: { ...d.assumption_sources.base }, bear: { ...d.assumption_sources.base } } }))
 }
-/** The cases in plain words (the Excel export keeps its sheet names). */
-export const NAMES: Record<Scenario, string> = { base: 'Central', bull: 'Hopeful', bear: 'Cautious' }
+/** The scenario names, as on the Excel sheets. */
+export const NAMES: Record<Scenario, string> = { base: 'Base', bull: 'Bull', bear: 'Bear' }
 
 /** Share price (Rs) and count (crore) from the export; null when the export left them out. */
 export interface Market { price: number | null; shares: number | null; price_hist: (number | null)[]; shares_hist: (number | null)[]; face_value?: number | null }
@@ -394,7 +394,7 @@ export function groupKeys<T>(e: KeyboardEvent<HTMLElement>, ids: T[], cur: T, se
   ;(e.currentTarget.parentElement?.children[j] as HTMLElement | undefined)?.focus()
 }
 
-/** Price against value in words, one way everywhere: value / price - 1, "79% upside" or "22% downside". */
+/** Fair value against CMP, one way everywhere: value / price - 1, "79% upside" or "22% downside". */
 export function gap(price: number | null | undefined, value: number | null | undefined): string | null {
   if (price == null || value == null || !(price > 0) || !(value > 0)) return null // zero or below is no value
   const g = value / price - 1
@@ -402,22 +402,22 @@ export function gap(price: number | null | undefined, value: number | null | und
 }
 
 export type VerdictKind = 'cheap' | 'range' | 'dear' | 'fix' | 'none'
-/** Where the price sits against our cautious and hopeful values. ponytail: thresholds are cautious/hopeful only; add a
+/** Where CMP sits against the bear and bull fair values. ponytail: thresholds are bear/bull only; add a
  * margin-of-safety setting if asked. */
 export function verdict(price: number | null | undefined, v: Partial<Record<Scenario, number | null>> | null | undefined): { kind: VerdictKind; word: string } {
   if (v?.base == null || v.base <= 0) return { kind: 'fix', word: 'Needs a fix' } // zero or below is no value
   if (price == null) return { kind: 'none', word: 'No price yet' }
   const bear = v.bear != null && v.bear > 0 ? v.bear : null, bull = v.bull != null && v.bull > 0 ? v.bull : null
-  if (bear != null && price < bear) return { kind: 'cheap', word: 'Looks cheap' }
-  if (bull != null && price > bull) return { kind: 'dear', word: 'Looks expensive' }
-  // a range needs both ends: a cautious or hopeful case without a value is a case to fix, never "inside"
+  if (bear != null && price < bear) return { kind: 'cheap', word: 'Below bear FV' }
+  if (bull != null && price > bull) return { kind: 'dear', word: 'Above bull FV' }
+  // a range needs both ends: a bear or bull case without a value is a case to fix, never "within"
   if (bear == null || bull == null) return { kind: 'fix', word: 'Needs a fix' }
-  return { kind: 'range', word: 'Inside our range' }
+  return { kind: 'range', word: 'Within FV range' }
 }
 
 /** The one severity scale (engine level -> word). Unusual years and data notes are never part of it. */
-export const SEV_WORD: Record<Severity, string> = { high: 'Serious', medium: 'Worth a look', low: 'Minor', ok: 'Passed', not_checked: 'Not checked yet' }
-/** Every warning-sign count in the app comes from here. signs = serious + worth a look + minor. */
+export const SEV_WORD: Record<Severity, string> = { high: 'High', medium: 'Medium', low: 'Low', ok: 'Clear', not_checked: 'Not tested' }
+/** Every red-flag count in the app comes from here. signs = high + medium + low. */
 export function sevCounts(fs: Forensic[] | null | undefined) {
   const c: Record<Severity, number> = { high: 0, medium: 0, low: 0, ok: 0, not_checked: 0 }
   for (const f of fs ?? []) c[f.severity]++

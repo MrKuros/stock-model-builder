@@ -26,7 +26,7 @@ const MARK = <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="14" widt
   <rect x="13" y="8" width="6" height="20" fill="currentColor" />
   <rect x="22" y="3" width="6" height="25" fill="none" stroke="var(--ours)" strokeWidth="2.4" /></svg>
 export const Brand = ({ short }: { short?: boolean }) =>
-  <a className="brand" href="/" aria-label={short ? 'Stock Model Builder: your companies' : undefined}>{MARK}<span>Stock Model Builder</span></a>
+  <a className="brand" href="/" aria-label={short ? 'Stock Model Builder: coverage' : undefined}>{MARK}<span>Stock Model Builder</span></a>
 
 const THEME_ICON = <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
   <path d="M8 1.8a6.2 6.2 0 0 1 0 12.4z" fill="currentColor" /></svg>
@@ -37,7 +37,7 @@ export const DL = <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8m0 
 export const CHECK = <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 11.8 4M12 1.5V4.5H9" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg>
 const ICON: Record<string, ReactNode> = {
   summary: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M2 8h8M2 13h10" fill="none" stroke="currentColor" strokeWidth="1.6" /></svg>,
-  value: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 11h13" stroke="currentColor" strokeWidth="1.3" /><rect x="4" y="7.5" width="6" height="3.5" fill="none" stroke="currentColor" strokeWidth="1.4" /><path d="M12.5 4v9" stroke="currentColor" strokeWidth="1.8" /></svg>,
+  valuation: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 11h13" stroke="currentColor" strokeWidth="1.3" /><rect x="4" y="7.5" width="6" height="3.5" fill="none" stroke="currentColor" strokeWidth="1.4" /><path d="M12.5 4v9" stroke="currentColor" strokeWidth="1.8" /></svg>,
   risks: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2 14.5 13.5h-13z" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M8 6.5v3.5M8 11.5v1" stroke="currentColor" strokeWidth="1.6" /></svg>,
   forecast: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 12l4-4 3 2 5-6" fill="none" stroke="currentColor" strokeWidth="1.6" /><circle cx="14" cy="4" r="1.6" fill="currentColor" /></svg>,
   all: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3.5h2M2 8h2M2 12.5h2M6 3.5h8M6 8h8M6 12.5h8" stroke="currentColor" strokeWidth="1.6" /></svg>,
@@ -56,16 +56,16 @@ export const slugOf = (id: string) => id.split('/')[0]
 // ---------- small pieces every page uses ----------
 
 const LO = -2, HI = 2 // log2(value / price): a quarter of the price to four times it
-/** Our value range against today's price on one log scale shared by every row: the price is always the middle line,
- * a value to the right is above the price (looks cheap), to the left below it (looks expensive). */
+/** The bear-bull fair-value range against CMP on one log scale shared by every row: CMP is always the middle line,
+ * a value to the right is above CMP (upside), to the left below it (downside). */
 export function Scale({ price, bear, base, bull, size = 'row', ghost }: {
   price: number | null | undefined; bear?: number | null; base: number | null | undefined; bull?: number | null; size?: 'row' | 'mini'; ghost?: number | null
 }) {
   if (base == null || price == null || !(price > 0)) return <span className={`scale ${size} none`} aria-hidden="true" />
   const at = (v: number) => Math.min(100, Math.max(0, ((Math.log2(Math.max(v, 1e-9) / price) - LO) / (HI - LO)) * 100))
   const off = base <= 0 || at(base) <= 0 ? 'lo' : at(base) >= 100 ? 'hi' : ''
-  const label = `Our central value Rs ${rs(base)}${bear != null && bull != null ? ` (cautious Rs ${rs(bear)} to hopeful Rs ${rs(bull)})` : ''}`
-    + ` against today’s price Rs ${rs(price)}: ${gap(price, base)}`
+  const label = `Base FV Rs ${rs(base)}${bear != null && bull != null ? ` (bear Rs ${rs(bear)}, bull Rs ${rs(bull)})` : ''}`
+    + ` vs CMP Rs ${rs(price)}: ${gap(price, base)}`
   return (
     <span className={`scale ${size}`} role="img" aria-label={label} title={label}>
       <i className="ax" />
@@ -79,18 +79,18 @@ export function Scale({ price, bear, base, bull, size = 'row', ghost }: {
 /** The axis above a column of scales. */
 export const ScaleHead = () => (
   <span className="scale-head" aria-hidden="true">
-    <span className="sh-words"><span>← Our value under the price: looks expensive</span><span>Our value over the price: looks cheap →</span></span>
+    <span className="sh-words"><span>← FV below CMP: downside</span><span>FV above CMP: upside →</span></span>
     <span className="sh-ticks"><span style={{ left: '0%' }}>¼×</span><span style={{ left: '25%' }}>½×</span>
-      <span className="p" style={{ left: '50%' }}>Today’s price</span><span style={{ left: '75%' }}>2×</span><span style={{ left: '100%' }}>4×</span></span>
+      <span className="p" style={{ left: '50%' }}>CMP</span><span style={{ left: '75%' }}>2×</span><span style={{ left: '100%' }}>4×</span></span>
   </span>
 )
 /** What the marks on a scale mean, in one line above the list (the head itself hides on narrow screens). */
 export const ScaleKey = () => (
-  <p className="sh-key"><span><i className="k-bd" /> our cautious-to-hopeful range</span><span><i className="k-bs" /> our central value</span>
-    <span><i className="k-px" /> today’s price</span><span>Further right: our value is further above the price</span></p>
+  <p className="sh-key"><span><i className="k-bd" /> bear–bull FV range</span><span><i className="k-bs" /> base FV</span>
+    <span><i className="k-px" /> CMP</span><span>Log scale, FV ÷ CMP: right of centre = upside</span></p>
 )
 
-/** "Looks expensive · 22% downside": the verdict word and the gap in words, the same everywhere. */
+/** "Above bull FV · 22% downside": the verdict word and the gap to base FV, the same everywhere. */
 export function Verdict({ price, values, words = true }: { price: number | null | undefined; values: Partial<Record<Scenario, number | null>> | null | undefined; words?: boolean }) {
   const v = verdict(price, values), g = words ? gap(price, values?.base) : null
   return <span className={`vd ${v.kind}`}>{v.word}{g && v.kind !== 'fix' ? ` · ${g}` : ''}</span>
@@ -133,7 +133,7 @@ export function Stepper({ id, label, kind, value, onChange, you }: {
   )
 }
 
-/** Every page opens the same way: kicker, the title (a question or a plain name), what the page is for, the answer. */
+/** Every page opens the same way: kicker, the title, what the page is for, the answer line. */
 export function PageHead({ label, title, purpose, answer, next }: { label?: ReactNode; title: ReactNode; purpose: ReactNode; answer?: ReactNode; next?: ReactNode }) {
   return (
     <div className="p-head">
@@ -276,7 +276,7 @@ export function Rail({ here, foot }: { here: Here; foot: ReactNode }) {
   return (
     <div className="side">
       <Brand />
-      <a className="back" href="/">← Your companies</a>
+      <a className="back" href="/">← Coverage</a>
       <RailList here={here} />
       <div className="side-foot">{foot}<KeysFoot /></div>
     </div>
@@ -286,18 +286,18 @@ const KeysFoot = () => (
   <div className="row"><ThemeButton /><button type="button" className="tbtn" onClick={openKeys} aria-label="Keyboard keys">Keys <kbd>?</kbd></button></div>
 )
 
-/** Rail on Your companies and Add a company. */
+/** Rail on Coverage and Add company. */
 export function HomeRail({ here, count, foot }: { here: 'home' | 'add'; count: number | null; foot?: ReactNode }) {
   return (
     <div className="side">
       <Brand />
-      <nav className="rail-nav" aria-label="Your library">
+      <nav className="rail-nav" aria-label="Library">
         <div className="rail-g">
-          <p className="rail-gh">Your library</p>
+          <p className="rail-gh">Library</p>
           <ul>
-            <li><a href="/" aria-current={here === 'home' ? 'page' : undefined}><span>Your companies</span>{count != null && <span className="rn">{count}</span>}</a></li>
-            <li><a href="/#watching"><span>Watching</span></a></li>
-            <li><a href="/add" aria-current={here === 'add' ? 'page' : undefined}><span>Add a company</span></a></li>
+            <li><a href="/" aria-current={here === 'home' ? 'page' : undefined}><span>Coverage</span>{count != null && <span className="rn">{count}</span>}</a></li>
+            <li><a href="/#watching"><span>Watchlist</span></a></li>
+            <li><a href="/add" aria-current={here === 'add' ? 'page' : undefined}><span>Add company</span></a></li>
           </ul>
         </div>
       </nav>
@@ -311,7 +311,7 @@ export function PhoneTop({ short, menu }: { short?: string; menu: MenuItem[] }) 
   return (
     <div className="mtop">
       {short != null
-        ? <><a className="m-back" href="/" aria-label="All your companies">‹ All</a>
+        ? <><a className="m-back" href="/" aria-label="Coverage: all companies">‹ All</a>
           <button type="button" className="m-switch" onClick={() => openFinder('switch')} aria-label={`Company: ${short}. Switch company`}>
             <b>{short}</b> <span aria-hidden="true">▾</span></button></>
         : <><Brand short /><b className="mtop-name">Stock Model Builder</b></>}
@@ -319,13 +319,13 @@ export function PhoneTop({ short, menu }: { short?: string; menu: MenuItem[] }) 
     </div>
   )
 }
-/** Phones: the four pages most used and All pages (the rail as a sheet); on the list pages, Companies, Watching, Add. */
+/** Phones: the four pages most used and All pages (the rail as a sheet); on the list pages, Coverage, Watchlist, Add. */
 export function BottomBar({ here }: { here: Here | 'home' | 'add' }) {
   const [all, setAll] = useState(false)
   if (typeof here === 'string') return (
-    <nav className="bnav" aria-label="Your library">
-      <a href="/" aria-current={here === 'home' ? 'page' : undefined}>{ICON.companies}Companies</a>
-      <a href="/#watching">{ICON.watching}Watching</a>
+    <nav className="bnav" aria-label="Library">
+      <a href="/" aria-current={here === 'home' ? 'page' : undefined}>{ICON.companies}Coverage</a>
+      <a href="/#watching">{ICON.watching}Watchlist</a>
       <a href="/add" aria-current={here === 'add' ? 'page' : undefined}>{ICON.add}Add</a>
     </nav>
   )
@@ -334,12 +334,12 @@ export function BottomBar({ here }: { here: Here | 'home' | 'add' }) {
   return (
     <>
       <nav className="bnav" aria-label={`Pages for ${here.short}`}>
-        {link('summary', 'Summary')}{link('value', 'Cheap?')}{link('risks', 'Risks')}{link('forecast', 'Forecast')}
+        {link('summary', 'Summary')}{link('valuation', 'Valuation')}{link('risks', 'Risks')}{link('forecast', 'Forecast')}
         <button type="button" onClick={() => setAll(true)} aria-haspopup="dialog">{ICON.all}All pages</button>
       </nav>
       <Sheet open={all} title={`${here.short}: all pages`} onClose={() => setAll(false)} full>
         <div onClick={e => { if ((e.target as Element).closest('a')) setAll(false) }}><RailList here={here} /></div>
-        <a className="back" href="/" onClick={() => setAll(false)}>← Your companies</a>
+        <a className="back" href="/" onClick={() => setAll(false)}>← Coverage</a>
       </Sheet>
     </>
   )
@@ -348,9 +348,9 @@ export function BottomBar({ here }: { here: Here | 'home' | 'add' }) {
 // ---------- go-to box and company switcher (one listbox), and the keys list ----------
 
 const ALIASES: Partial<Record<Page, string>> = {
-  summary: 'overview home answers', value: 'value valuation cheap dcf worth', 'priced-in': 'priced in reverse implied assume',
-  risks: 'risks checks warning forensic flags', changes: 'changes results tracking new', peers: 'peers compare',
-  forecast: 'forecast inputs assumptions model', note: 'note research thesis', business: 'business fundamentals growth',
+  summary: 'overview home answers', valuation: 'value valuation fair dcf wacc sensitivity multiples', 'reverse-dcf': 'priced in reverse implied expectations',
+  risks: 'risks checks red flags forensic beneish', tracking: 'changes results tracking new quarterly', peers: 'peers compare relative',
+  forecast: 'forecast inputs assumptions drivers model', note: 'note research thesis', financials: 'business fundamentals financials growth cagr',
   statements: 'statements p&l balance cash ratios quarters', documents: 'documents sources filings audit', versions: 'versions history saved',
 }
 interface Item { key: string; label: string; find: string; href: string; extra?: ReactNode; side?: ReactNode }
@@ -377,14 +377,14 @@ export function Finder({ mode, onClose, models, here }: {
   const toks = q.toLowerCase().split(/\s+/).filter(Boolean)
   const hit = (it: Item) => toks.every(t => it.find.toLowerCase().includes(t))
   const items = [...(toks.length ? pages.filter(hit) : []), ...cos.filter(hit),
-    { key: 'add', label: '+ Add a company', find: '', href: '/add' }]
+    { key: 'add', label: '+ Add company', find: '', href: '/add' }]
   const go = (it: Item | undefined) => { if (!it) return; onClose(); navigate(it.href) }
   const opt = (i: number) => `${id}-o${i}`
   return (
     <dialog {...p} className="dlg finder" aria-label={mode === 'switch' ? 'Switch company' : 'Go to a company or page'}>
       <label className="sr" htmlFor={`${id}-q`}>{mode === 'switch' ? 'Find a company' : 'Go to a company or page'}</label>
       <input id={`${id}-q`} className="fi-q" type="text" role="combobox" autoComplete="off" spellCheck={false} value={q} autoFocus
-        placeholder={mode === 'switch' ? 'Find a company' : here ? `A company, or a page of ${here.short} (e.g. “${here.short.toLowerCase()} cheap”)` : 'A company'}
+        placeholder={mode === 'switch' ? 'Find a company' : here ? `A company, or a page of ${here.short} (e.g. “${here.short.toLowerCase()} dcf”)` : 'A company'}
         aria-expanded="true" aria-controls={`${id}-l`} aria-autocomplete="list" aria-activedescendant={opt(Math.min(active, items.length - 1))}
         onChange={e => { setQ(e.target.value); setActive(0) }}
         onKeyDown={e => {
@@ -413,7 +413,7 @@ export function KeysDialog({ open, onClose }: { open: boolean; onClose: () => vo
     <Sheet open={open} title="Keyboard keys" onClose={onClose}>
       <dl className="keylist">
         <dt><kbd>/</kbd></dt><dd>Go to a company or a page</dd>
-        <dt><kbd>1</kbd>–<kbd>6</kbd></dt><dd>The six answer pages: Summary, Is it cheap?, What does the price assume?, What could go wrong?, What changed?, How does it compare?</dd>
+        <dt><kbd>1</kbd>–<kbd>6</kbd></dt><dd>The six analysis pages: Summary, Valuation, Reverse DCF, Risks & forensics, Results tracking, Peers</dd>
         <dt><kbd>?</kbd></dt><dd>This list</dd>
         <dt><kbd>Esc</kbd></dt><dd>Close a menu, sheet or box</dd>
       </dl>

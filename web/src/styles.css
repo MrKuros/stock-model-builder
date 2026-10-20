@@ -1480,3 +1480,12 @@ html:has(.eff-wrap) { scroll-padding-bottom: 110px; }
 }
 /* form fields' outlines at 3:1 or more (WCAG 1.4.11); --rule-2 stays for dividers */
 .sel, .draft-t input, .moved-f input { border-color: var(--ink-3); }
+
+/* a glossary term (Term.tsx): dotted underline; its definition on hover (title) and on keyboard focus (below) */
+abbr.gt { text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 3px; cursor: help; position: relative; }
+abbr.gt:focus-visible { outline: 2px solid var(--ours); outline-offset: 1px; border-radius: 2px; }
+abbr.gt:focus-visible::after {
+  content: attr(data-def); position: absolute; left: 0; top: calc(100% + 6px); z-index: 50; width: max-content; max-width: min(280px, 80vw);
+  padding: 6px 8px; border: 1px solid var(--ink-3); border-radius: 4px; background: var(--panel); color: var(--ink);
+  font: 400 12.5px/1.4 var(--ui); letter-spacing: 0; text-transform: none; white-space: normal; text-align: left;
+}

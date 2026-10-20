@@ -5,16 +5,13 @@ import { useHref } from './route'
 import { forecastOf } from './Tracking'
 import { fmt, money, properName, shortYear, type ArNote, type Forensic, type Parsed, type Row, type Tracking } from './lib'
 
-/** Fundamentals: what the company reported, before any forecast. Everything here derives from the parsed history
+/** Financials: what the company reported, before any forecast. Everything here derives from the parsed history
  * (parsed.hist, parsed.ratios) and the forensic radar's lit flags; nothing is computed on the server for it. */
 
 type S = (number | null)[]
 const fin = (x: number | null | undefined): x is number => x != null && Number.isFinite(x)
 const pc = (x: number | null | undefined) => fmt(x, 'pct')
 const xx = (x: number | null | undefined) => (fin(x) ? `${x.toFixed(2)}×` : '–')
-const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']
-const word = (k: number) => WORDS[k] ?? String(k)
-const cap = (t: string) => t[0].toUpperCase() + t.slice(1)
 /** Compound growth over the last k years; null when either end is missing or not positive. */
 export const cagrOf = (v: S, k: number) => {
   const n = v.length, a = v[n - 1 - k], b = v[n - 1]
@@ -110,7 +107,7 @@ export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { p
   const spans = [3, 5, 10].filter(k => k <= n - 1)
   if (!spans.length && n > 1) spans.push(n - 1)
   const top = spans[spans.length - 1]
-  const growthRows: [string, S][] = [['Revenue', revenue], ['Operating profit (EBITDA)', f.ebitda], ['Net profit', pat], ['Cash from operations', cfo]]
+  const growthRows: [string, S][] = [['Revenue', revenue], ['EBITDA', f.ebitda], ['PAT', pat], ['CFO', cfo]]
 
   const mx = margin.filter(fin), g = cagrOf(revenue, long), g3 = cagrOf(revenue, Math.min(3, long)), gp = cagrOf(pat, long)
   const payout5 = div(sum(dividend.slice(-5)), sum(fcf.slice(-5)))
@@ -122,46 +119,46 @@ export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { p
   const fYears = Object.keys(fRev)
   const fMargin = fc(Object.fromEntries(fYears.filter(y => fEb[y] != null && fRev[y]).map(y => [y, fEb[y] / fRev[y]])))
   const cards: { id: string; title: string; big: string; says: ReactNode; chart: ReactNode; to: string; table: string; lit?: Forensic | null }[] = [
-    { id: 'revenue', title: 'Revenue', big: `Rs ${money(revenue[n - 1])} cr`, to: st(PL, 'revenue'), table: 'Profit & loss',
-      says: g != null ? <>Grew {pc(g)} a year over {word(long)} years{long > 3 && g3 != null ? <>; {pc(g3)} in the last three</> : null}.</> : <>Sales as reported.</>,
-      chart: <Plot years={years} kind="bars" lines={[{ v: revenue }]} show={money} label="Revenue by year, Rs crore" marks={fc(fRev)} /> },
-    { id: 'margin', title: 'Operating margin', big: pc(margin[n - 1]), to: st(PL, 'ebitda'), table: 'Profit & loss',
-      says: <>Operating profit before depreciation (EBITDA) as a share of sales{mx.length ? <>: between {pc(Math.min(...mx))} and {pc(Math.max(...mx))} in {word(mx.length)} years</> : null}.</>,
-      chart: <Plot years={years} kind="lines" lines={[{ v: margin }]} show={pc} refLine={med(margin)} label="Operating margin by year" marks={fMargin} /> },
-    { id: 'profit', title: 'Net profit', big: `Rs ${money(pat[n - 1])} cr`, to: st(PL, 'pat'), table: 'Profit & loss',
-      says: <>{gp != null ? <>{pc(gp)} a year over {word(long)} years. </> : null}Net margin {pc(div(pat[n - 1], revenue[n - 1]))} of sales in {last}.</>,
-      chart: <Plot years={years} kind="bars" lines={[{ v: pat }]} show={money} neg label="Net profit by year, Rs crore" marks={fc(fPat)} /> },
-    { id: 'cash', title: 'Cash from operations vs profit', big: xx(f.conv5), to: st(CF, 'cfo'), table: 'Cash flow', lit: cashLit,
-      says: f.conv5 == null ? <>The export has no operating cash flow.</>
-        : <>Rs {Math.round(f.conv5 * 100)} of operating cash for every Rs 100 of net profit over the last {word(f.k5)} years: {f.conv5 >= 0.9 ? 'profits turn into cash' : f.conv5 >= 0.8 ? 'most of it does' : 'less cash than the profit suggests'}.</>,
-      chart: <Plot years={years} kind="bars" lines={[{ v: pat, name: 'Net profit' }, { v: cfo, cls: 'out', name: 'Cash from operations' }]} show={money} label="Net profit and cash from operations by year, Rs crore" /> },
-    { id: 'returns', title: 'Return on capital', big: pc(roce[n - 1]), to: st(RT, 'roce'), table: 'Ratios',
-      says: <>ROCE: profit before interest and tax for every rupee of equity and debt in the business. ROE: net profit per rupee of equity.</>,
+    { id: 'revenue', title: 'Revenue', big: `Rs ${money(revenue[n - 1])} cr`, to: st(PL, 'revenue'), table: 'P&L',
+      says: g != null ? <>{long}-year CAGR {pc(g)}{long > 3 && g3 != null ? <>; 3-year {pc(g3)}</> : null}.</> : <>As reported.</>,
+      chart: <Plot years={years} kind="bars" lines={[{ v: revenue }]} show={money} label="Revenue by year, Rs cr" marks={fc(fRev)} /> },
+    { id: 'margin', title: 'EBITDA margin', big: pc(margin[n - 1]), to: st(PL, 'ebitda'), table: 'P&L',
+      says: <>EBITDA ÷ revenue{mx.length ? <>; {mx.length}-year range {pc(Math.min(...mx))}–{pc(Math.max(...mx))}</> : null}.</>,
+      chart: <Plot years={years} kind="lines" lines={[{ v: margin }]} show={pc} refLine={med(margin)} label="EBITDA margin by year" marks={fMargin} /> },
+    { id: 'profit', title: 'PAT', big: `Rs ${money(pat[n - 1])} cr`, to: st(PL, 'pat'), table: 'P&L',
+      says: <>{gp != null ? <>{long}-year CAGR {pc(gp)}. </> : null}{last} PAT margin {pc(div(pat[n - 1], revenue[n - 1]))}.</>,
+      chart: <Plot years={years} kind="bars" lines={[{ v: pat }]} show={money} neg label="PAT by year, Rs cr" marks={fc(fPat)} /> },
+    { id: 'cash', title: 'Cash conversion (CFO/PAT)', big: xx(f.conv5), to: st(CF, 'cfo'), table: 'Cash flow', lit: cashLit,
+      says: f.conv5 == null ? <>No operating cash flow in the export.</>
+        : <>Cumulative {f.k5}-year CFO/PAT {xx(f.conv5)}: {f.conv5 >= 0.9 ? 'strong' : f.conv5 >= 0.8 ? 'adequate' : 'weak'} cash conversion.</>,
+      chart: <Plot years={years} kind="bars" lines={[{ v: pat, name: 'PAT' }, { v: cfo, cls: 'out', name: 'CFO' }]} show={money} label="PAT and CFO by year, Rs cr" /> },
+    { id: 'returns', title: 'ROCE and ROE', big: pc(roce[n - 1]), to: st(RT, 'roce'), table: 'Ratios',
+      says: <>ROCE = EBIT ÷ average capital employed; ROE = PAT ÷ average equity.</>,
       chart: <Plot years={years} kind="lines" lines={[{ v: roce, name: 'ROCE' }, { v: roe, cls: 'alt', name: 'ROE' }]} show={x => fmt(x, 'pct')} label="ROCE and ROE by year" /> },
-    { id: 'fcf', title: 'Free cash flow and dividends', big: `Rs ${money(fcf[n - 1])} cr`, to: st(CF, 'fcf'), table: 'Cash flow',
-      says: <>Free cash flow is cash from operations after capital spending.{payout5 != null && payout5 > 0 ? <> Over the last five years dividends took {pc(payout5)} of it.</> : null}</>,
-      chart: <Plot years={years} kind="bars" neg lines={[{ v: fcf, name: 'Free cash flow' }, { v: dividend, cls: 'out', name: 'Dividends' }]} show={money} label="Free cash flow and dividends by year, Rs crore" /> },
-    { id: 'receivables', title: 'Receivable days', big: fin(dsoNow) ? `${Math.round(dsoNow)} days` : '–', to: st(BS, 'receivables'), table: 'Balance sheet', lit: dsoLit,
-      says: <>Days of sales waiting to be collected{fin(dsoThen) && fin(dsoNow) ? <>: {Math.round(dsoThen)} in {years[n - 4]}, {Math.round(dsoNow)} now</> : null}.{dsoLit ? ' A rule check is lit on this.' : ''}</>,
-      chart: <Plot years={years} kind="lines" lines={[{ v: dso, cls: dsoLit && dsoLit.severity !== 'low' ? 'flag' : undefined }]} show={x => String(Math.round(x))} refLine={med(dso)} label="Receivable days by year" /> },
+    { id: 'fcf', title: 'FCF and dividends', big: `Rs ${money(fcf[n - 1])} cr`, to: st(CF, 'fcf'), table: 'Cash flow',
+      says: <>FCF = CFO − capex.{payout5 != null && payout5 > 0 ? <> 5-year dividends ÷ FCF: {pc(payout5)}.</> : null}</>,
+      chart: <Plot years={years} kind="bars" neg lines={[{ v: fcf, name: 'FCF' }, { v: dividend, cls: 'out', name: 'Dividends' }]} show={money} label="FCF and dividends by year, Rs cr" /> },
+    { id: 'receivables', title: 'Debtor days', big: fin(dsoNow) ? `${Math.round(dsoNow)} days` : '–', to: st(BS, 'receivables'), table: 'Balance sheet', lit: dsoLit,
+      says: <>Receivables ÷ revenue × 365{fin(dsoThen) && fin(dsoNow) ? <>: {Math.round(dsoThen)} in {years[n - 4]}, {Math.round(dsoNow)} in {last}</> : null}.{dsoLit ? ' Flagged by a forensic rule.' : ''}</>,
+      chart: <Plot years={years} kind="lines" lines={[{ v: dso, cls: dsoLit && dsoLit.severity !== 'low' ? 'flag' : undefined }]} show={x => String(Math.round(x))} refLine={med(dso)} label="Debtor days by year" /> },
     { id: 'netcash', title: nc[n - 1] != null && nc[n - 1]! < 0 ? 'Net debt' : 'Net cash', big: `Rs ${money(nc[n - 1])} cr`, to: st(BS, 'cash'), table: 'Balance sheet', lit: debtLit,
-      says: <>Cash and investments minus borrowings{hist.some(h => h.lease) ? ' and leases' : ''}. {ncN ? (pos === ncN ? 'Positive every year: the company holds more than it owes.' : pos === 0 ? 'Negative every year: it owes more than it holds.' : `Positive in ${word(pos)} of ${word(ncN)} years.`) : ''}</>,
-      chart: <Plot years={years} kind="bars" neg lines={[{ v: nc }]} show={money} label="Net cash by year, Rs crore (negative = net debt)" /> },
+      says: <>Cash + investments − borrowings{hist.some(h => h.lease) ? ' incl. leases' : ''}. {ncN ? (pos === ncN ? 'Net cash in every year.' : pos === 0 ? 'Net debt in every year.' : `Net cash in ${pos} of ${ncN} years.`) : ''}</>,
+      chart: <Plot years={years} kind="bars" neg lines={[{ v: nc }]} show={money} label="Net cash/(debt) by year, Rs cr" /> },
   ]
 
   // key ratios: the last ten years and their median; each name opens the line it comes from
   const from = Math.max(0, n - 10), shownYears = years.slice(from)
   const R: [string, S, (x: number) => string, string, boolean?][] = [
     ['Revenue growth', ratios.map(r => r.growth ?? null), pc, st(PL, 'revenue')],
-    ['Operating margin (EBITDA)', margin, pc, st(PL, 'ebitda')],
-    ['Net margin', hist.map(h => div(h.pat, h.revenue)), pc, st(PL, 'pat')],
-    ['Return on capital (ROCE)', roce, pc, st(RT, 'roce')],
-    ['Return on equity (ROE)', roe, pc, st(RT, 'roe')],
-    ['Cash from operations ÷ profit', hist.map(h => (fin(h.pat) && h.pat > 0 ? div(h.cfo, h.pat) : null)), x => x.toFixed(2) + '×', st(CF, 'cfo')],
-    ['Receivable days', dso, x => String(Math.round(x)), st(BS, 'receivables'), !!dsoLit],
+    ['EBITDA margin', margin, pc, st(PL, 'ebitda')],
+    ['PAT margin', hist.map(h => div(h.pat, h.revenue)), pc, st(PL, 'pat')],
+    ['ROCE', roce, pc, st(RT, 'roce')],
+    ['ROE', roe, pc, st(RT, 'roe')],
+    ['CFO/PAT', hist.map(h => (fin(h.pat) && h.pat > 0 ? div(h.cfo, h.pat) : null)), x => x.toFixed(2) + '×', st(CF, 'cfo')],
+    ['Debtor days', dso, x => String(Math.round(x)), st(BS, 'receivables'), !!dsoLit],
     ['Asset turnover', col('asset_turnover'), x => x.toFixed(2) + '×', st(RT, 'asset_turnover')],
-    ['Dividend ÷ profit (payout)', ratios.map(r => r.payout ?? null), pc, st(PL, 'dividend')],
-    ['Net debt ÷ EBITDA', col('nd_ebitda'), x => x.toFixed(1) + '×', st(RT, 'nd_ebitda')],
+    ['Dividend payout', ratios.map(r => r.payout ?? null), pc, st(PL, 'dividend')],
+    ['Net debt/EBITDA', col('nd_ebitda'), x => x.toFixed(1) + '×', st(RT, 'nd_ebitda')],
     ['Interest cover', col('int_cover'), x => x.toFixed(0) + '×', st(RT, 'int_cover')],
   ]
 
@@ -175,27 +172,26 @@ export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { p
         <a className="go" href={c.to}>{c.table} table</a></footer>
     </article>
   )
-  // the answer, by rules: the last three years' sales growth against the longest period, and whether it's the slowest run
+  // the answer, by rules: the last three years' revenue CAGR against the longest period, and whether it's the slowest run
   const r3 = parsed.cagrs?.['3'] ?? []
   const slowest = r3.length > 2 && g3 != null && r3.every(c => c.value >= r3[r3.length - 1].value - 1e-9)
-  const story = g3 == null ? <>Sales as reported; too few positive years to measure growth.</>
-    : <>{g3 < 0 ? 'Shrinking.' : g != null && long > 3 && g3 < g - 0.01 ? 'Growing, but slowing.' : g != null && long > 3 && g3 > g + 0.01 ? 'Speeding up.' : 'Steady.'}{' '}
-      Sales {g3 < 0 ? 'shrank' : 'grew'} {pc(Math.abs(g3))} a year over the last three years{slowest ? `, the slowest stretch since ${years[0]}` : g != null && long > 3 ? `, against ${pc(g)} over ${word(long)}` : ''}.
-      {mx.length > 0 && <> The operating margin was {pc(margin[n - 1])} in {last}, between {pc(Math.min(...mx))} and {pc(Math.max(...mx))} over the years.</>}</>
+  const story = g3 == null ? <>Too few positive years to compute revenue CAGR.</>
+    : <>3-year revenue CAGR {pc(g3)}{slowest ? `, the slowest 3-year run since ${years[0]}` : g != null && long > 3 ? ` vs ${pc(g)} over ${long} years (${g3 < g - 0.01 ? 'decelerating' : g3 > g + 0.01 ? 'accelerating' : 'steady'})` : ''}.
+      {mx.length > 0 && <> {last} EBITDA margin {pc(margin[n - 1])} (range {pc(Math.min(...mx))}–{pc(Math.max(...mx))}).</>}</>
 
   return (
     <>
-      <PageHead label="Evidence" title="How the business is doing"
-        purpose={<>{cap(word(n))} years of what {short} reported ({years[0]}–{last.slice(-2)}), before any forecast. Each chart says what it shows
-          in one line and links to its full table.</>}
+      <PageHead label="Data · Financials" title="Financials"
+        purpose={<>{n}-year reported fundamentals for {short} ({years[0]}–{last.slice(-2)}), before any forecast. Each chart links to its
+          statement line.</>}
         answer={story} />
 
       <section className="blk first" id="growth" aria-labelledby="growth-h">
-        <h2 id="growth-h">Growth, a year on average</h2>
-        <p className="why">Growth a year on average to {last}. “▾ slower” marks a period slower than the {word(top)}-year rate.</p>
+        <h2 id="growth-h">CAGR</h2>
+        <p className="why">Compound annual growth to {last}. “▾ slower”: below the {top}-year CAGR.</p>
         <div className="tw-m" tabIndex={0} role="region" aria-labelledby="growth-h">
           <table className="growth">
-            <thead><tr><th scope="col">Rs crore</th>{spans.map(k => <th scope="col" key={k}>{k} years</th>)}</tr></thead>
+            <thead><tr><th scope="col">Rs cr</th>{spans.map(k => <th scope="col" key={k}>{k}Y</th>)}</tr></thead>
             <tbody>{growthRows.map(([name, v]) => {
               const ref = cagrOf(v, top)
               return <tr key={name}><th scope="row">{name}</th>{spans.map(k => {
@@ -208,17 +204,17 @@ export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { p
       </section>
 
       <section className="blk" id="charts" aria-labelledby="charts-h">
-        <h2 id="charts-h">{cap(word(n))} years at a glance</h2>
-        <p className="why">Black is what the company reported. Each chart’s link opens every number behind it.{fYears.length > 0 && <>
-          {' '}<span className="fc-key" aria-hidden="true" /> Blue ticks on revenue, margin and profit: what you forecast for {fYears.join(', ')} before
-          it was reported (<a href={href('forecast', 'tracking')}>how the forecast did</a>).</>}</p>
+        <h2 id="charts-h">{n}-year trends</h2>
+        <p className="why">Black: reported. Each chart links to its statement line.{fYears.length > 0 && <>
+          {' '}<span className="fc-key" aria-hidden="true" /> Blue ticks on revenue, margin and PAT: the forecast for {fYears.join(', ')} made before
+          reporting (<a href={href('tracking', 'by-input')}>variance</a>).</>}</p>
         <div className="fgrid">{shown.map(chart)}</div>
         {more.length > 0 && <More title="More charts" n={more.length}><div className="fgrid">{more.map(chart)}</div></More>}
       </section>
 
       <section className="blk" id="ratios" aria-labelledby="ratios-h">
-        <h2 id="ratios-h">Key ratios by year</h2>
-        <p className="why">The right-most column is the median over these years. Each row name opens the table it comes from.</p>
+        <h2 id="ratios-h">Key ratios</h2>
+        <p className="why">Last column: median over these years. Each row links to its statement line.</p>
         <div className="tw" tabIndex={0} role="region" aria-labelledby="ratios-h">
           <table className="rt">
             <thead><tr><td />{shownYears.map(y => <th scope="col" key={y}>{y}</th>)}<th scope="col" className="med">Median</th></tr></thead>
@@ -233,7 +229,7 @@ export default function Fundamentals({ parsed, tracking, notes, hasAnnual }: { p
 
       <OperatingNumbers notes={notes} hasAnnual={hasAnnual} />
 
-      <Next lead="Every line and every year behind these charts."><a className="primary" href={href('statements')}>Open the statements</a></Next>
+      <Next lead="Full reported P&L, balance sheet and cash flow."><a className="primary" href={href('statements')}>Statements</a></Next>
     </>
   )
 }
@@ -246,15 +242,15 @@ function OperatingNumbers({ notes, hasAnnual }: { notes: Record<string, unknown>
     .sort((a, b) => b.year.localeCompare(a.year))[0]
   return (
     <section className="blk" id="kpis" aria-labelledby="kpis-h">
-      <h2 id="kpis-h">Operating numbers</h2>
+      <h2 id="kpis-h">Operating KPIs</h2>
       {n ? <>
-        <p className="why">{n.year}, as printed in {n.file ?? 'the annual report'}: read by AI, checked by rules and approved by you. They never change a number in the model.</p>
+        <p className="why">{n.year}, as printed in {n.file ?? 'the annual report'}: AI-read, rule-checked, approved by you. Not used in the model.</p>
         <ul className="kpi-list">{n.rows.map((r, i) => (
           <li key={i}><span>{r.label}</span> <b className="num">{r.amount == null ? '–' : r.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}{r.unit === '%' ? '%' : ` ${r.unit ?? ''}`}</b>
             <span className="small dim"> p.{r.page}<span className="sr">: “{r.quote}”</span></span></li>))}</ul>
-      </> : <p className="why">Order book, headcount, attrition or volumes, as the annual report prints them. None read yet: {hasAnnual
+      </> : <p className="why">Order book, headcount, attrition or volumes from the annual report. None read yet: {hasAnnual
         ? <>the report is attached; <a href={href('documents', 'reading')}>have AI read “Operating numbers”</a> from it.</>
-        : <>attach the report on <a href={href('documents', 'add')}>Documents and sources</a> and have AI read “Operating numbers”.</>}</p>}
+        : <>attach the report on <a href={href('documents', 'add')}>Documents</a> and have AI read “Operating numbers”.</>}</p>}
     </section>
   )
 }

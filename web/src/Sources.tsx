@@ -289,9 +289,9 @@ export default function Sources({
       {status}
       {upgrades.length > 0 && (
         <div className="banner" role="status">
-          <p>The rules’ figures moved: {upgrades.map((u, i) => <span key={u.key}>{i > 0 && ' · '}{lower(u.label)} {fmt(u.from, u.kind)} → {fmt(u.to, u.kind)}</span>)}.
+          <p>Rule defaults moved: {upgrades.map((u, i) => <span key={u.key}>{i > 0 && ' · '}{lower(u.label)} {fmt(u.from, u.kind)} → {fmt(u.to, u.kind)}</span>)}.
             Your inputs haven’t changed.</p>
-          <div className="banner-act"><button type="button" className="btn" onClick={apply}>Use the new figures</button></div>
+          <div className="banner-act"><button type="button" className="btn" onClick={apply}>Use new defaults</button></div>
         </div>
       )}
       {(used.length > 0 || (sources?.notes.length ?? 0) > 0) && (
@@ -313,7 +313,7 @@ export default function Sources({
             return (
               <li key={f.id} className="src-item">
                 <details className="sub-fold">
-                  <summary><b>{title(f)}</b>: {facts.length} lines read, {f.unmapped.length} the rules couldn’t place
+                  <summary><b>{title(f)}</b>: {facts.length} lines mapped, {f.unmapped.length} unmapped
                     {f.checks.some(c => c.pass === false) ? ` · ${f.checks.filter(c => c.pass === false).length} check failed` : ''}</summary>
                   <p className="muted small src-meta">{f.file}{f.company && <> · {f.company}</>}{' · '}
                     <button type="button" className="link" onClick={() => remove(f)} aria-label={`Remove filing ${f.file}, ${title(f)}`}>Remove</button></p>
@@ -335,8 +335,8 @@ export default function Sources({
                         <tbody>{facts.map(([k, v]) => <tr key={k}><th scope="row">{label(k)}</th><td>{amount(k, v)}</td></tr>)}</tbody>
                       </table>
                     </div></details>}
-                  {f.unmapped.length > 0 && <details><summary>Lines the rules couldn’t place ({f.unmapped.length})</summary>
-                    <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={`Lines the rules couldn’t place, ${f.file}`}>
+                  {f.unmapped.length > 0 && <details><summary>Unmapped tags ({f.unmapped.length})</summary>
+                    <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={`Unmapped tags, ${f.file}`}>
                       <table className="src-table">
                         <thead><tr><th scope="col">XBRL tag</th><th scope="col">Value</th><th scope="col">Context</th></tr></thead>
                         <tbody>{f.unmapped.map((u, i) => (

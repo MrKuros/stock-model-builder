@@ -40,23 +40,23 @@ export function Prices({ models, watch, onDone }: { models: ModelSummary[]; watc
   return (
     <div className="prices" aria-busy={running}>
       <span className="small">{oldest
-        ? <>Prices from NSE, checked <b className="num">{clock(oldest)}</b> ({ago(oldest)})</>
+        ? <>NSE prices as of <b className="num">{clock(oldest)}</b> ({ago(oldest)})</>
         : 'Prices not checked yet'}</span>
       {running
-        ? <><span className="small muted" role="status">{step ?? 'Checking prices…'}</span>
+        ? <><span className="small muted" role="status">{step ?? 'Fetching prices…'}</span>
           <button type="button" className="link" onClick={() => { ctl.current?.abort(); setState('stopped') }}>Stop</button></>
         : <button type="button" className="link" onClick={run}>Refresh prices</button>}
       {state === 'done' && <span className="small muted" role="status">{checked
         ? `Updated ${checked} price${checked > 1 ? 's' : ''}.`
-        : `Prices are under 15 minutes old, so NSE wasn’t asked again${oldest ? `. Try after ${clock(new Date(new Date(oldest).getTime() + FRESH).toISOString())}` : ''}.`}</span>}
-      {state === 'stopped' && <span className="small muted" role="status">Stopped. Prices already checked are shown; the rest are the last ones kept.</span>}
+        : `Prices under 15 minutes old; NSE not polled again${oldest ? `. Try after ${clock(new Date(new Date(oldest).getTime() + FRESH).toISOString())}` : ''}.`}</span>}
+      {state === 'stopped' && <span className="small muted" role="status">Stopped. Prices fetched so far are shown; the rest are the last cached.</span>}
       {state === 'offline' && <span className="small warn" role="status">Couldn’t reach NSE{missed.length ? ` for ${missed.join(', ')}` : ''}.
-        Showing the last prices kept{oldest ? `, from ${clock(oldest)}` : ''}. Try again in a minute.</span>}
+        Showing last cached prices{oldest ? `, from ${clock(oldest)}` : ''}. Try again in a minute.</span>}
     </div>
   )
 }
 
-/** Price (ochre) against our base value (blue) for each day the coverage page refreshed prices. */
+/** CMP (ochre) against base fair value (blue) for each day the coverage page refreshed prices. */
 export function Spark({ pts }: { pts: [string, number, number | null, number, number | null][] | undefined }) {
   if (!pts || pts.length < 2) return null
   const w = 120, h = 26, vs = pts.flatMap(p => [p[1], p[3]])
@@ -67,7 +67,7 @@ export function Spark({ pts }: { pts: [string, number, number | null, number, nu
   return (
     <span className="spark-w">
       <svg className="cov-spark" viewBox={`0 0 ${w} ${h}`} width={w} height={h} role="img"
-        aria-label={`Since ${day(a[0])}: price Rs ${rs(a[1])} to Rs ${rs(b[1])}, our base value Rs ${rs(a[3])} to Rs ${rs(b[3])}`}>
+        aria-label={`Since ${day(a[0])}: CMP Rs ${rs(a[1])} to Rs ${rs(b[1])}, base FV Rs ${rs(a[3])} to Rs ${rs(b[3])}`}>
         <polyline points={line(3)} className="sp-ours" />
         <polyline points={line(1)} className="sp-mkt" />
       </svg>
@@ -76,7 +76,7 @@ export function Spark({ pts }: { pts: [string, number, number | null, number, nu
   )
 }
 
-/** Tickers you follow without a model yet: today's price, Build model (Add a company, by that symbol) and Stop watching. */
+/** Tickers on the watchlist without a model yet: CMP, Build model (Add company, by that symbol) and Stop watching. */
 export function WatchSection({ list, models, onChange }: { list: WatchList | null; models: ModelSummary[]; onChange: (w: WatchList) => void }) {
   const [error, setError] = useState<string | null>(null)
   const head = useRef<HTMLHeadingElement>(null)
@@ -88,12 +88,12 @@ export function WatchSection({ list, models, onChange }: { list: WatchList | nul
   if (!rows.length) return null
   return (
     <section aria-labelledby="watch-head" className="watching" id="watching" tabIndex={-1}>
-      <h2 id="watch-head" ref={head} tabIndex={-1}>Watching: price only, no model yet</h2>
-      <p className="purpose">Build a model when you want our value and the checks.</p>
+      <h2 id="watch-head" ref={head} tabIndex={-1}>Watchlist <span className="cnt">price only, not modelled</span></h2>
+      <p className="purpose">Build a model for fair value and forensic checks.</p>
       <ul className="watch-list">{rows.map(w => (
         <li key={w.symbol}>
           <span className="c-name"><b>{w.name}</b><span className="c-meta">{w.symbol}{w.industry ? ` · ${w.industry}` : ''}</span></span>
-          <span className="w-px">{w.price != null ? <>Price <b className="num mkt">Rs {rs(w.price)}</b> · checked {ago(w.at)}</> : 'No price kept yet'}</span>
+          <span className="w-px">{w.price != null ? <>CMP <b className="num mkt">Rs {rs(w.price)}</b> · {ago(w.at)}</> : 'No CMP yet'}</span>
           <a className="primary" href={`/add?symbol=${encodeURIComponent(w.symbol)}`}>Build model</a>
           <Menu label={`More for ${w.name}`} items={[{ label: 'Stop watching', onClick: () => remove(w) }]} />
         </li>))}</ul>
