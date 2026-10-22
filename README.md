@@ -141,3 +141,7 @@ web/src/          App (routing, autosave, tab sync, keys), Shell (rail, company 
 3. ~~Richer data: BSE/NSE XBRL, AI-proposed mappings, annual-report notes, quarterly/TTM~~ ✓
 4. ~~The analyst: research note first, assumptions proposed from filings and concalls, forensic red-flag radar, thesis writer~~ ✓
 5. ~~Hands-off coverage: fetch by ticker, automatic peers, tracking results against the forecast, watchlist~~ ✓
+
+## License
+
+MIT. See [LICENSE](LICENSE).
