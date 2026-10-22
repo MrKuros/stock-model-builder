@@ -1510,3 +1510,4 @@ abbr.gt:focus::after {
 .kf-table { width: auto; min-width: min(100%, 520px); }
 .kf-table td { min-width: 9ch; }
 .kf-table tbody th { background: var(--ground); padding-left: 0; }
+.provenance.trk + .empty-state, .provenance.trk + .provenance.trk { margin-top: 16px; }

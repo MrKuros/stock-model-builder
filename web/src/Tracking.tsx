@@ -46,12 +46,12 @@ export const Q_WORD: Record<QStatus, string> = { ahead: 'Ahead of run-rate', in_
 const gapOf = (key: string, g: number | null) => g == null ? '–' : key === 'ebitda_margin'
   ? `${g >= 0 ? '+' : '−'}${Math.round(Math.abs(g) * 10000)} bps` : `${g >= 0 ? '+' : '−'}${(Math.abs(g) * 100).toFixed(1)}%`
 
-/** "H1 FY27: revenue 2.1% behind run-rate", for the answer line, Summary and the coverage list. */
+/** "H1 FY27 behind FY27E run-rate: revenue −2.1%, PAT −8.0%", for the answer line, Summary and the coverage list. */
 export function quarterWords(q: Pick<QuarterTrack, 'quarter' | 'period' | 'year' | 'status'> & { rev: number | null; pat: number | null }): string {
-  const fyq = fy(q.quarter.split(' ')[1] ?? q.year)
-  const part = (label: string, g: number | null) => g == null ? null : `${label} ${(Math.abs(g) * 100).toFixed(1)}% ${g >= 0 ? 'ahead of' : 'behind'}`
+  const part = (label: string, g: number | null) => g == null ? null : `${label} ${g >= 0 ? '+' : '−'}${(Math.abs(g) * 100).toFixed(1)}%`
   const bits = [part('revenue', q.rev), part('PAT', q.pat)].filter(Boolean)
-  return `${q.period} ${fyq}${bits.length ? `: ${bits.join(', ')} ${fy(q.year)}E run-rate` : ''}`
+  const where = q.status === 'ahead' ? 'ahead of' : q.status === 'behind' ? 'behind' : q.status === 'in_line' ? 'in line with' : 'vs'
+  return `${q.period} ${fy(q.year)} ${where} ${fy(q.year)}E run-rate${bits.length ? `: ${bits.join(', ')}` : ''}`
 }
 
 /** Results tracking, first: the quarters filed in the current forecast year (YTD) against the base case's FY E,
@@ -64,8 +64,8 @@ export function QuarterCard({ q }: { q: QuarterTrack }) {
       <h2 id="q-h">{q.period} {fyq} vs {fyq}E run-rate <span className="cnt">{q.quarters} quarter{q.quarters > 1 ? 's' : ''} to {qfy(q.through)}</span></h2>
       <p className="serif">{q.status ? <b>{Q_WORD[q.status]}.</b> : null} Run-rate = base-case {fyq}E × the share of last year the same
         {q.quarters > 1 ? ` ${q.quarters} quarters` : ' quarter'} made{q.basis === 'straight' ? <> (last year’s quarters aren’t all filed, so {q.quarters} of 4 is used)</> : null}.</p>
-      <div className="scroll" tabIndex={0} role="region" aria-label={`${q.period} ${fyq} against the ${fyq}E run-rate`}>
-        <table className="mini-t">
+      <div className="tw" tabIndex={0} role="region" aria-label={`${q.period} ${fyq} against the ${fyq}E run-rate`}>
+        <table className="mini-t trk-t">
           <thead><tr><th scope="col">Rs cr</th><th scope="col" className="r">{q.period} actual</th><th scope="col" className="r">Run-rate</th>
             <th scope="col" className="r">Variance</th><th scope="col" className="r"><T k="yoy" /> vs {fyq}E</th><th scope="col">Status</th></tr></thead>
           <tbody>{q.lines.map(l => {
