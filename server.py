@@ -403,7 +403,8 @@ def ar_capex(notes):
 
 MOVED_REV = re.compile(r"\s*(?:revenue|turnover|sales|income from operations)", re.I)  # the label starts with it
 MOVED_EBITDA = re.compile(r"\s*(?:ebitda|operating profit|profit before (?:depreciation|interest))", re.I)
-MOVED_ASSETS = re.compile(r"\s*(?:total assets|assets|property, plant|fixed assets)", re.I)
+# the engine takes it out of net block, so a disposal group's total assets or assets held for sale never match
+MOVED_ASSETS = re.compile(r"\s*(?:net block|property, plant|fixed assets)", re.I)
 MOVED_DEBT = re.compile(r"\s*(?:borrowings|debt|loans)", re.I)
 
 
@@ -451,7 +452,8 @@ def _lender_payload(co, excluded=(), notes=None):
         "ttm": None, "ttm_prev": None, "years": labels, "hist": h, "sources": None,
         "ratios": lender.ratios(h),
         "defaults": lender.defaults(h, exclude=set(excluded), labels_=labels), "default_ends": {},
-        "checks": checks, "share_gap": None, "oneoffs": [],
+        "default_notes": lender.default_notes(h, exclude=set(excluded), labels_=labels),
+        "checks": checks, "share_gap": None, "oneoffs": lender.oneoffs(h, labels),
         "forensic": radar, "rule_checks": model.rule_checks(h, labels, [], checks, notes, radar),
         "key_numbers": lender.key_numbers(h, labels),
         "cagrs": {n: lender.cagrs(h, labels, int(n)) for n in ("3", "5")},
@@ -668,12 +670,21 @@ async def report(file: UploadFile, year: str = Form(...), kind: str = Form("annu
         raise HTTPException(503 if str(e) == ai.PDF_MISSING else 422, str(e))
 
 
-def keep_report(data, name, year, kind):
-    """A PDF's page text kept in the library (rules: pdftotext) -> the document's Report entry. ValueError if unreadable."""
+def keep_report(data, name, year, kind, date=None):
+    """A PDF's page text kept in the library (rules: pdftotext) -> the document's Report entry. ValueError if unreadable.
+    date: a call's date (ISO), so it is named by its quarter (doc_title)."""
     pages = ai.pdf_pages(data)
     rid = hashlib.sha1(data).hexdigest()[:12]
     _write(MODELS / REPORTS / f"{rid}.json", json.dumps({"file": name, "pages": pages}).encode())
-    return {"id": rid, "file": name[:200], "year": year[:20], "pages": len(pages), "kind": kind}
+    return {"id": rid, "file": name[:200], "year": year[:20], "pages": len(pages), "kind": kind,
+            **({"date": date} if date else {})}
+
+
+def doc_title(r):
+    """'Q2 FY27 earnings-call transcript' for a call with a date, else 'FY2026 annual report' (r: a Report)."""
+    d = getattr(r, "date", None)
+    return (f"{sources.call_quarter(d)} {ai.KINDS[r.kind]}" if isinstance(d, str) and re.match(r"\d{4}-\d\d", d)
+            else f"{r.year} {ai.KINDS[r.kind]}")
 
 
 NOT_FOR_LENDERS = ("Not for banks and NBFCs yet: this reads the non-financial model's lines. The lender template's "
@@ -946,7 +957,7 @@ def draft(req: DraftRequest):
         return hist("No page of the attached documents talks about the years ahead (guidance, outlook, capacity, "
                     "margins, demand), so every driver comes from history.")
     sent = {lb: [n for b, n in picks if b == lb] for lb in docs}
-    pages = [(lb, f"{docs[lb][0].year} {ai.KINDS[docs[lb][0].kind]}, {docs[lb][0].file}", n, docs[lb][1][n - 1][0])
+    pages = [(lb, f"{doc_title(docs[lb][0])}, {docs[lb][0].file}", n, docs[lb][1][n - 1][0])
              for lb, n in picks]
     try:
         reply = ai.draft_assumptions(req.company.name, ctx["years"], ctx["rows"], pages)
@@ -1025,7 +1036,7 @@ def load_answers(s, root=None):
 def keep_answer(s, entry, root=None):
     with ANSWERS_LOCK:
         xs = [entry, *(x for x in load_answers(s, root) if x.get("id") != entry["id"])][:ANSWERS_MAX]
-        _write(answers_file(s, root), json.dumps({"answers": xs}).encode())
+        _write(answers_file(s, root), json.dumps({"answers": xs}, allow_nan=False).encode())
 
 
 def _ask_proposal(req, reply, docs, sent):
@@ -1075,13 +1086,14 @@ def ask(req: AskRequest):
         raise HTTPException(422, "The text of the attached documents isn't on this machine any more; attach them again.")
     picks = ai.search_pages([(lb, pages) for lb, (_, pages) in docs.items()], question)
     hits = [{"report": docs[lb][0].id, "file": docs[lb][0].file, "year": docs[lb][0].year, "kind": docs[lb][0].kind,
+             "date": getattr(docs[lb][0], "date", None),
              "page": n, "score": s, "snippet": ai.snippet(docs[lb][1][n - 1][0], question)} for s, lb, n in picks]
     if req.search_only or not ai.available() or not picks:
         why = ("No page of the attached documents uses the question's words. Try other terms (order book, capex, margin)."
                if not picks else "" if req.search_only else "AI is off, so these are the pages that match your words. " + ai.NOT_SET)
         return {"hits": hits, "answer": None, "message": why, "missing": gone}
     sent = {lb: sorted(n for _, b, n in picks if b == lb) for lb in docs}
-    pages = [(lb, f"{docs[lb][0].year} {ai.KINDS[docs[lb][0].kind]}", n, docs[lb][1][n - 1][0]) for _, lb, n in picks]
+    pages = [(lb, doc_title(docs[lb][0]), n, docs[lb][1][n - 1][0]) for _, lb, n in picks]
     drivers = [] if req.company.kind else [(k, lb, kind) for k, lb, kind in model.DRIVERS if k != "debt_change"]
     page_of = {lb: pages_ for lb, (_, pages_) in docs.items()}
     why, checks, rounds = None, [], 0
@@ -1100,14 +1112,17 @@ def ask(req: AskRequest):
     answered = bool((reply.get("answer") or "").strip())
     ok = answered and all(c["pass"] is not False for c in checks)
     cites = [{"report": docs[c["doc"]][0].id, "file": docs[c["doc"]][0].file, "year": docs[c["doc"]][0].year,
-              "kind": docs[c["doc"]][0].kind, "page": c["page"], "quote": c["quote"].strip()[:600]}
+              "kind": docs[c["doc"]][0].kind, "date": getattr(docs[c["doc"]][0], "date", None), "page": c["page"],
+              "quote": c["quote"].strip()[:600]}
              for c in reply.get("citations") or [] if c["doc"] in docs]
     now = datetime.now().isoformat(timespec="seconds")
     entry = {"id": os.urandom(6).hex(), "question": question,
-             "status": "answered" if ok else "failed" if answered else "not_found",
+             # complete false: the pages answer part of it (the AI says so); shown, not counted as answered
+             "status": ("answered" if reply.get("complete", True) is not False else "partial") if ok
+             else "failed" if answered else "not_found",
              "answer": reply["answer"].strip()[:ai.ASK_LEN * 2] if answered else None,
              "citations": cites if answered else [], "checks": checks, "rounds": rounds, "asked_at": now,
-             "pages": [{"report": h["report"], "file": h["file"], "year": h["year"], "kind": h["kind"], "page": h["page"]} for h in hits],
+             "pages": [{k: h[k] for k in ("report", "file", "year", "kind", "date", "page")} for h in hits],
              "proposal": _ask_proposal(req, reply, docs, sent) if ok else None, "ai": True}
     keep_answer(req.slug, entry)
     return {"hits": hits, "answer": entry, "message": "", "missing": gone}
@@ -1122,7 +1137,7 @@ def answers_list(s: str):
 def answers_delete(s: str, aid: str):
     with ANSWERS_LOCK:
         xs = load_answers(s)
-        _write(answers_file(s), json.dumps({"answers": [x for x in xs if x.get("id") != aid]}).encode())
+        _write(answers_file(s), json.dumps({"answers": [x for x in xs if x.get("id") != aid]}, allow_nan=False).encode())
     return {"ok": True}
 
 
@@ -1214,7 +1229,7 @@ def _moved_checks(rows, h, year, last):
     amt = lambda r: r and r.get("amount")  # noqa: E731
     m = model.move_out(h, {"revenue": amt(rev), "ebitda": amt(ebitda), "assets": amt(assets), "debt": amt(debt)})
     bs = "".join(f"; {what} Rs {model._inr(m[k])} cr leave the base balance sheet" for k, what in
-                 (("assets_out", "assets"), ("debt_out", "borrowings")) if not isinstance(m, str) and m.get(k))
+                 (("assets_out", "net block"), ("debt_out", "borrowings")) if not isinstance(m, str) and m.get(k))
     return [{"name": "Fits the year", "pass": not isinstance(m, str),
              "detail": m if isinstance(m, str) else f"Revenue moved out Rs {model._inr(m['revenue_out'])} cr of the year's "
              f"Rs {model._inr(h['revenue'])} cr; EBITDA Rs {model._inr(m['ebitda_out'])} cr"
@@ -1891,7 +1906,11 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
     if filed and other and bank:
         co, filled, mism = lender.merge(filed, other)
         if filled:
-            merged.append(f"{lender.EXPORT_NOTE} ({', '.join(filled)}).")
+            first = model.fy(filed["dates"][0])
+            merged.append(f"{lender.EXPORT_NOTE} ({first}); export years {filled[0]}–{filled[-1]}.")
+            if fs := filed.get("fee_split"):
+                merged.append(lender.FEE_NOTE.format(span=f"{filled[0]}–{filled[-1]}", year=fs["year"],
+                                                     k=model._pct(fs["k"])) + ".")
         if not local:
             co["name"] = other["name"]
     elif filed and other:
@@ -1966,7 +1985,7 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
     want = []
     if ars and ars[0]["pdf"]:
         want.append((ars[0]["url"], f"the {ars[0]['year']} annual report", ars[0]["year"], "annual",
-                     f"NSE {sym} annual report {ars[0]['year']}.pdf"))
+                     f"NSE {sym} annual report {ars[0]['year']}.pdf", None))
     elif ars:
         yield {"note": f"The {ars[0]['year']} annual report on NSE is a zip file; download it from NSE and attach it "
                        "on the Checks page."}
@@ -1976,15 +1995,15 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
     t = next((d for d in docs if d["kind"] == "transcript"), None)
     if t:
         want.append((t["url"], f"the {t['date']:%d %b %Y} call transcript", sources.fy_of(t["date"]), "transcript",
-                     f"NSE {sym} call transcript {t['date']:%Y-%m-%d}.pdf"))
+                     f"NSE {sym} call transcript {t['date']:%Y-%m-%d}.pdf", f"{t['date']:%Y-%m-%d}"))
     else:
         yield {"note": "No earnings-call transcript filed on NSE in the last two years."}
-    for url, what, year, kind, file in want:
+    for url, what, year, kind, file, date in want:
         yield {"step": f"Downloading {what}…"}
         try:
             data, _ = c.get(url, None, MAX_PDF)
             yield {"detail": f"reading {len(data) / 1048576:.1f} MB of pages"}
-            yield {"report": keep_report(data, file, year, kind)}
+            yield {"report": keep_report(data, file, year, kind, date)}
         except (sources.Offline, ValueError) as e:
             c.path(url).unlink(missing_ok=True)  # an unreadable or cut-off file: fetched again next time
             yield {"note": f"Couldn’t keep {what}: {e}"}
@@ -2119,15 +2138,18 @@ def check_all(today=None):
             p = next(e["company"] for e in fetch_company(_sym(sym), doc.company.model_dump(), False, today, fresh=True)
                      if "company" in e)
             d, years, q = with_results(doc, p["company"], p["fetched"]["filings"], today)
-        except (sources.Offline, ValueError, HTTPException, StopIteration) as e:
+            if d is not None:
+                mid, at = save_model(d, now=today)
+        except Exception as e:  # noqa: BLE001  an odd filing or a failed save skips this company, not the rest
             # what the list still shows for it: the results as last read from NSE
-            yield {"result": {**row, "status": "failed", "text": f"Couldn’t check: {getattr(e, 'detail', None) or e}",
+            why = getattr(e, "detail", None) or (e if isinstance(e, (sources.Offline, ValueError)) else
+                                                 f"an unexpected error ({type(e).__name__})")
+            yield {"result": {**row, "status": "failed", "text": f"Couldn’t check: {why}",
                               "kept": doc.company.source.get("fetched_at") or doc.saved_at}}
             continue
         if d is None:
             yield {"result": {**row, "status": "none", "text": "No new results."}}
             continue
-        mid, at = save_model(d, now=today)
         what = f"{', '.join(years)} results" if years else f"the quarter to {q:%b %Y}"
         yield {"result": {**row, "id": mid, "saved_at": at, "status": "new",
                           "text": f"Added {what}. Your assumptions haven’t changed."}}
@@ -2194,13 +2216,16 @@ def auto_run(root=None, now=None):
         return None
     try:
         started = (now or datetime.now()).isoformat(timespec="seconds")
-        prices = next((e for e in refresh_prices(root, now) if "done" in e), {})
-        new, failed = [], 0
-        for e in check_all(now):
-            r = e.get("result") or {}
-            if r.get("status") == "new":
-                new.append({k: r.get(k) for k in ("id", "company", "saved_at", "text")})
-            failed += r.get("status") == "failed"
+        prices, new, failed = {}, [], 0
+        try:
+            prices = next((e for e in refresh_prices(root, now) if "done" in e), {})
+            for e in check_all(now):
+                r = e.get("result") or {}
+                if r.get("status") == "new":
+                    new.append({k: r.get(k) for k in ("id", "company", "saved_at", "text")})
+                failed += r.get("status") == "failed"
+        except Exception:  # noqa: BLE001  a run that died is still a run: it waits a day like a finished one
+            failed = -1
         last = {"started_at": started, "done_at": datetime.now().isoformat(timespec="seconds"),
                 "prices": {k: prices.get(k) for k in ("checked", "missed", "stopped")}, "new": new, "failed": failed}
         _write(root / AUTO, json.dumps({**auto_state(root), "last": last}).encode())
@@ -2210,10 +2235,14 @@ def auto_run(root=None, now=None):
 
 
 def _auto_loop(stop, root=None):
-    start = True
+    start, tried = True, None
     while not stop.is_set():
         try:
-            if auto_due(auto_state(root), datetime.now(), start):
+            now = datetime.now()
+            # tried: a run that died before writing auto.json (a full disk) still waits its day, not the next tick
+            if auto_due(auto_state(root), now, start) and (
+                    tried is None or (now - tried).total_seconds() >= (AUTO_START if start else AUTO_EVERY)):
+                tried = now
                 auto_run(root)
         except Exception:  # noqa: BLE001  ponytail: a failed run waits for the next tick; the list shows the last good one
             pass
@@ -2292,6 +2321,11 @@ def _live(root, sym):
     except (sources.Offline, ValueError):
         return None
     return q if q["price"] else None
+
+
+def _live_price(doc, root):
+    """The cached quote a saved ticker model shows instead of its saved CMP (None when the price is typed or none)."""
+    return None if doc.valuation.price is not None else _live(root, (doc.company.source or {}).get("symbol"))
 
 
 def watchlist(root=None):
@@ -2460,27 +2494,46 @@ def _number(x):
     return v
 
 
+HEAD_ROLES = (  # a broker export's header, its letters only, lowercased -> the column's role
+    ("symbol", lambda n: n.startswith(("instrument", "symbol", "tradingsymbol", "scrip", "stock"))),
+    # an exact quantity first: 'quantity long term' or 'quantity pledged' beside it would corrupt the position
+    ("qty", lambda n: n in ("qty", "quantity", "quantityavailable", "availableqty")),
+    ("cost", lambda n: n.startswith(("avg", "average")) and ("cost" in n or "price" in n) or n.startswith("buyav")),
+)
+
+
 def parse_holdings(text):
-    """'symbol,qty,cost' per line (comma or tab; a number with Indian grouping in quotes; Rs/₹ allowed; a header line
-    skipped) -> (holdings, errors [{line, text}]). Nothing is merged or saved here."""
-    out, errors = [], []
-    for i, line in enumerate(text.splitlines(), 1):
-        if not line.strip():
-            continue
-        parts = [x.strip() for x in (line.split("\t") if "\t" in line else next(csv.reader([line])))]
-        if len(parts) != 3:
+    """'symbol,qty,cost' per line (comma or tab; a number with Indian grouping in quotes; Rs/₹ allowed) -> (holdings,
+    errors [{line, text}]). A first line with no number is a header: a broker's holdings export is read by its column
+    names (Instrument, Qty., Avg. cost; the other columns ignored). Nothing is merged or saved here."""
+    out, errors, cols, width = [], [], (0, 1, 2), None
+    split = lambda line: [x.strip() for x in (line.split("\t") if "\t" in line else next(csv.reader([line])))]  # noqa: E731
+    lines = [(i, line) for i, line in enumerate(text.splitlines(), 1) if line.strip()]
+    if lines:
+        head = split(lines[0][1])
+        if not any(_is_number(x) for x in head):
+            names = [re.sub(r"[^a-z]", "", x.lower()) for x in head]
+            found = {role: next((j for j, n in enumerate(names) if ok(n)), None) for role, ok in HEAD_ROLES}
+            missing = [role for role, j in found.items() if j is None]
+            if missing and len(head) != 3:
+                what = {"symbol": "symbol (Instrument)", "qty": "quantity (Qty.)", "cost": "average cost (Avg. cost)"}
+                return [], [{"line": lines[0][0], "text": f"the header has no {' or '.join(what[m] for m in missing)} column"}]
+            if not missing:
+                cols, width = (found["symbol"], found["qty"], found["cost"]), len(head)
+            lines = lines[1:]
+    for i, line in lines:
+        parts = split(line)
+        if width is None and len(parts) != 3 or width is not None and len(parts) < max(cols) + 1:
             errors.append({"line": i, "text": f"needs 3 values (symbol, quantity, average cost), found {len(parts)}" + (
                 "; put a number with commas in quotes (\"1,250\")" if len(parts) > 3 else "")})
             continue
         try:
-            qty, cost = _number(parts[1]), _number(parts[2])
+            qty, cost = _number(parts[cols[1]]), _number(parts[cols[2]])
         except ValueError:
-            if not out and not errors and re.search(r"[a-z]", parts[1].lower()):
-                continue  # the header line
             errors.append({"line": i, "text": "quantity and average cost must be numbers"})
             continue
         try:
-            sym = sources.symbol(parts[0])
+            sym = sources.symbol(parts[cols[0]])
         except ValueError as e:
             errors.append({"line": i, "text": str(e)})
             continue
@@ -2489,6 +2542,25 @@ def parse_holdings(text):
             continue
         out.append({"symbol": sym, "qty": qty, "cost": cost})
     return out, errors
+
+
+def _is_number(x):
+    try:
+        _number(x)
+        return True
+    except ValueError:
+        return False
+
+
+def errors_text(errors, most=10):
+    """'Lines 1-6: same text; Line 8: other text': lines with the same complaint said once."""
+    by = {}
+    for e in errors:
+        by.setdefault(e["text"], []).append(e["line"])
+    span = lambda ls: f"Line {ls[0]}" if len(ls) == 1 else (  # noqa: E731
+        f"Lines {ls[0]}-{ls[-1]}" if ls[-1] - ls[0] == len(ls) - 1 else f"Lines {', '.join(map(str, ls))}")
+    parts = [f"{span(ls)}: {t}" for t, ls in by.items()]
+    return "; ".join(parts[:most]) + (f"; and {len(parts) - most} more." if len(parts) > most else ".")
 
 
 def _hmean(pairs):
@@ -2558,7 +2630,11 @@ def portfolio(root=None):
 def save_holdings(hs, root=None):
     root = root or MODELS
     _holdings(root, strict=True)
-    _write(root / PORTFOLIO, json.dumps({"holdings": merge(hs)}).encode())
+    try:  # what is written must read back: a repeated symbol's summed quantity can pass the cap each line was held to
+        hs = Holdings(holdings=merge(hs)).model_dump()["holdings"]
+    except ValidationError:
+        raise HTTPException(422, "Nothing saved: a company's combined quantity would be above 1e12 shares.") from None
+    _write(root / PORTFOLIO, json.dumps({"holdings": hs}).encode())
 
 
 @app.get("/api/portfolio")
@@ -2578,8 +2654,7 @@ def portfolio_paste(req: Paste):
     """Pasted 'symbol,qty,cost' lines, added (or replacing all). Any bad line: nothing is saved, and every bad line is named."""
     hs, errors = parse_holdings(req.text)
     if errors:
-        raise HTTPException(422, "Nothing saved. " + "; ".join(f"Line {e['line']}: {e['text']}" for e in errors[:10]) +
-                            (f"; and {len(errors) - 10} more." if len(errors) > 10 else "."))
+        raise HTTPException(422, "Nothing saved. " + errors_text(errors))
     if not hs:
         raise HTTPException(422, "No holdings in the pasted text.")
     save_holdings(hs if req.replace else _holdings(strict=True)[0] + hs)
@@ -2619,6 +2694,8 @@ def portfolio_excel(p, at=None):
                "pnl_pct": r["pnl"] / r["invested"] if r["pnl"] is not None and r["invested"] else None}
         for j, (k, _, f) in enumerate(cols, 1):
             c = ws.cell(i, j, val.get(k))
+            if isinstance(c.value, str):
+                c.data_type = "s"  # a name from an upload or the exchange that starts with '=' stays text
             if f:
                 c.number_format = f
     t, r = p["total"], 5 + len(p["holdings"])
@@ -2644,9 +2721,9 @@ def portfolio_excel(p, at=None):
     ws.cell(r, 2, "Weight").font = bold
     for name, w, syms in p["sectors"]:
         r += 1
-        ws.cell(r, 1, name)
+        ws.cell(r, 1, name).data_type = "s"
         ws.cell(r, 2, w).number_format = pct
-        ws.cell(r, 3, ", ".join(syms))
+        ws.cell(r, 3, ", ".join(syms)).data_type = "s"
     ws.column_dimensions["A"].width = 38
     ws.column_dimensions["B"].width = 30
     ws.column_dimensions["C"].width = 24
@@ -2853,7 +2930,7 @@ def list_models(root=None):
             radar = eng.forensic(co["hist"], labels, doc.notes)
             sym = (doc.company.source or {}).get("symbol")
             live = _live(root, sym)
-            if live and doc.valuation.price is None:  # today's price, from the cache only (a typed price stays)
+            if _live_price(doc, root):  # today's price, from the cache only (a typed price stays)
                 co["market"] = {**co["market"], "price": live["price"]}
             cover = _coverage(projs, co, ex, doc.valuation.model_dump())
             rec = doc.track[-1] if doc.track else {}
@@ -2967,8 +3044,13 @@ def models():
 
 @app.get("/api/models/{model_id:path}")
 def open_model(model_id: str):
-    """The saved document plus everything the dashboard derives from the company, defaults honouring exclusions."""
+    """The saved document plus everything the dashboard derives from the company, defaults honouring exclusions. The
+    latest version carries the cached CMP and its time, as the library list shows them (not written until a save)."""
     doc = load_model(model_id)
+    slug, ver = model_id.split("/", 1)
+    if ver == max(p.stem for p in (MODELS / slug).glob("*.json")) and (live := _live_price(doc, MODELS)):
+        doc.company.market.price = live["price"]
+        doc.company.source = {**doc.company.source, "price_at": _ago(live["age"])}
     try:
         parsed = _company_payload(doc.company.model_dump(), doc.excluded_years, [f.model_dump() for f in doc.filings],
                                   doc.notes)

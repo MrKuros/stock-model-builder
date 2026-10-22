@@ -51,7 +51,7 @@ const PLAIN: Record<string, { title: string; why: string; gloss: string }> = {
   nim: { title: 'NIM compression', why: 'A falling NIM squeezes the main earnings line; growth then has to come from volume or fees.', gloss: 'NIM trend' },
   spread: { title: 'Yield vs cost of funds narrowing', why: 'A narrowing spread behind a steady NIM is held up by funding mix or fees, which can reverse.', gloss: 'Yield − cost of funds' },
   cd_ratio: { title: 'Loans outrunning deposits', why: 'Growth past the deposit base leans on costlier wholesale funding that runs off faster.', gloss: 'Credit-deposit ratio' },
-  capital: { title: 'Thin capital', why: 'Low CET1 limits growth and invites a dilutive raise.', gloss: 'CET1 ratio' },
+  capital: { title: 'Thin capital', why: 'Low CET1 limits growth and invites a dilutive raise.', gloss: 'CET1 / CRAR (as filed)' },
   oi_share: { title: 'Profit leaning on other income', why: 'Treasury gains and one-offs inside other income reverse when rates rise.', gloss: 'Other income ÷ net total income' },
 }
 const plain = (f: Forensic) => {
@@ -223,10 +223,12 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
         <ul className="passed">{passed.map(f => <li key={f.key} id={`a-${f.key}`} tabIndex={-1}><Sev level="ok" /> <span>{plain(f).gloss}</span> <span className="num dim">{fy(f.fact)}</span></li>)}</ul>
       </More></div>}
 
-      {!lender && <section className="blk" id="unusual" tabIndex={-1} aria-labelledby="odd-h">
+      <section className="blk" id="unusual" tabIndex={-1} aria-labelledby="odd-h">
         <h2 id="odd-h">Outlier years (not flags) <span className="cnt">{oneoffYears.length}</span></h2>
-        <p className="why">Years far from {short}’s own median (robust z-score on median and MAD). Not counted as red flags. Exclude one
-          from the rule defaults, or have AI explain it from that year’s report.</p>
+        {lender ? <p className="why">A merger year (total assets up over 40%) or a tax rate outside 18–40%. Not counted as red flags.
+          Exclude one from the rule defaults.</p>
+          : <p className="why">Years far from {short}’s own median (robust z-score on median and MAD). Not counted as red flags. Exclude one
+          from the rule defaults, or have AI explain it from that year’s report.</p>}
         {oneoffYears.length ? <ul className="odd-years">{oneoffYears.map(([year, items]) => {
           const out = doc.excluded_years.includes(year), inRules = used.includes(year)
           return (
@@ -238,13 +240,13 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
                 <button type="button" className="btn" aria-pressed={out} aria-busy={pendingYear === year} aria-disabled={pendingYear != null || undefined}
                   onClick={() => toggleYear(year)}>{pendingYear === year ? 'Working…' : out ? `Include ${year}` : `Exclude ${year}`}</button>
               </div>}
-              <Explain year={year} company={company} filings={doc.filings} notes={doc.notes} ai={ai} proposals={doc.proposals}
+              {!lender && <Explain year={year} company={company} filings={doc.filings} notes={doc.notes} ai={ai} proposals={doc.proposals}
                 report={annual.find(r => r.year === year)} note={doc.notes[`oneoff:${year}`] as OneOffNote | undefined}
-                onProposals={onProposals} onReports={onReports} />
+                onProposals={onProposals} onReports={onReports} />}
             </li>
           )
-        })}</ul> : <p className="small-note">No outlier year in other income, tax rate, capex or EBITDA margin.</p>}
-      </section>}
+        })}</ul> : <p className="small-note">{lender ? 'No merger year or odd tax rate.' : 'No outlier year in other income, tax rate, capex or EBITDA margin.'}</p>}
+      </section>
 
       <More title="Methodology">
         <p className="small">Each rule runs on the reported years with the same thresholds for every company. Severity is <b>High</b>,

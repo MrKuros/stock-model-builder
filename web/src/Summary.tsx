@@ -48,7 +48,7 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
   const since = company.source?.fetched_at ?? doc.saved_at
   const lastQ = company.quarters?.dates.at(-1)
   const qt = projection?.quarter
-  const qline = qt && quarterWords({ ...qt, rev: qt.lines.find(l => l.key === 'revenue')?.gap ?? null, pat: qt.lines.find(l => l.key === 'pat')?.gap ?? null })
+  const qline = qt && quarterWords({ ...qt, rev: qt.lines.find(l => l.key === 'revenue')?.gap ?? null, pat: qt.lines.find(l => l.key === 'pat')?.gap ?? null, lines: qt.lines })
   const c = sevCounts(parsed.forensic)
   const tn = doc.note
   const w = useWrite(doc, setDoc)
@@ -149,7 +149,8 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
           <a href={href('documents', 'restated')}>choose filed or restated</a></>}</p>
 
       <Next lead={doc.reviewed_at ? <>Reviewed {when(doc.reviewed_at).replace(/ \d{4}$/, '')}.</>
-        : <>Before relying on this: read Risks & forensics and the note, then mark it reviewed.</>}>
+        : <>Before relying on this: read <a href={href('risks')}>Risks & forensics</a> and {tn ? <a href={href('note')}>the note</a>
+          : <a href={href('valuation')}>Valuation</a>}, then mark it reviewed.</>}>
         <button type="button" className={doc.reviewed_at || fix ? 'btn' : 'primary'} onClick={onReview}>{doc.reviewed_at ? 'Mark as draft' : 'Mark as reviewed'}</button>
       </Next>
     </>

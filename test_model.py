@@ -9,6 +9,8 @@ import shutil
 import statistics
 import subprocess
 import tempfile
+import threading
+import time
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -2137,8 +2139,11 @@ def ar_notes_check(server, root, co, data):
             bs_p = client.post("/api/project", json={**req, "notes": bs}).json()
             assert bs_p["valuation"]["d"] < moved_p["valuation"]["d"], "the debt moved out leaves the bridge"
             rows = [{"label": "Revenue: unit", "amount": 5.0}, {"label": "Borrowings of the unit", "amount": 2.0},
-                    {"label": "Assets held for sale", "amount": 3.0}]
+                    {"label": "Assets held for sale", "amount": 9.0}, {"label": "Total assets of the unit", "amount": 8.0},
+                    {"label": "Net block of the unit", "amount": 3.0}]
+            # the engine takes it out of net block: a disposal group's total assets or held-for-sale assets never count
             assert [r and r["amount"] for r in server._moved_rows(rows)] == [5.0, None, 3.0, 2.0]
+            assert server._moved_rows(rows[:4])[2] is None
             nameless = {"adj:moved_out": {"year": "FY2025", "revenue": 100.0, "reason": " "}}
             assert "moved_out" not in client.post("/api/company", json={"company": data["company"], "notes": nameless}).json()["sources"]
             assert client.post("/api/export", json={**req, "notes": mine}).status_code == 200
@@ -2387,6 +2392,20 @@ def ask_check(server, root, data):
                     ("The order of the board.", "")])]
     assert [p for _, _, p in ai.search_pages(docs, "What is the order book?")] == [2, 3], ai.search_pages(docs, "order book")
     assert ai.search_pages(docs, "the and of") == [] and "order book stands" in ai.snippet(docs[0][1][1][0], "order book")
+    import sources  # noqa: PLC0415
+    # a call is named by the quarter it discusses: the last one ended before it
+    assert [sources.call_quarter(d) for d in ("2026-10-14", "2026-07-10", "2027-01-20", "2026-04-18", "2026-03-31",
+                                              "2026-09-30")] == ["Q2 FY27", "Q1 FY27", "Q3 FY27", "Q4 FY26", "Q3 FY26", "Q1 FY27"]
+    # analyst synonyms on the question: a headcount question finds the page that only says "Employees"
+    hc = [("D1", [("Employees 584,519 at the year end", ""), ("BRSR: attrition rate of permanent staff", "")])]
+    assert 1 in [p for _, _, p in ai.search_pages(hc, "What was attrition and headcount at year end?")], ai.search_pages(hc, "headcount")
+    # NaN and Infinity are no number a page prints: such a reply has no usable JSON (the retry names it)
+    for bad_json in ('{"value": NaN}', '{"value": -Infinity}', '{"value": 1e999}'):
+        try:
+            ai.first_json(bad_json)
+            raise AssertionError(bad_json)
+        except ValueError:
+            pass
     if not ai.pdf_available():
         print("pdftotext missing: skipped asking the filings")
         return
@@ -2416,8 +2435,8 @@ def ask_check(server, root, data):
         calls = fake_llm(root / "llm", "Answer:\n" + json.dumps(good))
         a = post().json()["answer"]
         assert calls() == 1 and a["status"] == "answered" and a["rounds"] == 1 and a["proposal"] is None, a
-        assert a["citations"] == [{"report": rep["id"], "file": "call.pdf", "year": "FY2025", "kind": "transcript", "page": 3,
-                                   "quote": q_capex}], a["citations"]
+        assert a["citations"] == [{"report": rep["id"], "file": "call.pdf", "year": "FY2025", "kind": "transcript", "date": None,
+                                   "page": 3, "quote": q_capex}], a["citations"]
         prompt = (root / "llm" / "prompt-0.txt").read_text()
         assert "What capex is planned next year?" in prompt and "=== D1 (FY2025 earnings-call transcript) PAGE 3 ===" in prompt
         assert "buy or sell" in prompt and "growth (Revenue growth" in prompt, prompt[-900:]
@@ -2439,6 +2458,13 @@ def ask_check(server, root, data):
         assert post(question="What is the order book?").json()["hits"] == [] and calls() == 0, "no matching page: no call"
         a4 = post(question="How is demand across segments?").json()["answer"]
         assert calls() == 1 and a4["status"] == "not_found" and a4["answer"] is None, a4
+        # the pages answer part of it (the AI says complete: false): shown with its citations, not counted as answered
+        fake_llm(root / "llm", dict(good, complete=False))
+        assert post().json()["answer"]["status"] == "partial"
+        # a NaN in a reply, twice: a 502, and the company's saved answers still load
+        nan = json.dumps(dict(good, driver={"key": "growth", "value": 1, "citation": 0})).replace('"value": 1,', '"value": NaN,')
+        fake_llm(root / "llm", nan, nan)
+        assert post().status_code == 502 and client.get("/api/answers/test-co").status_code == 200
         # a guided driver figure becomes an assumption proposal; accepting it re-checks by rules with no LLM call
         drv = {"answer": "Management expects revenue growth of 14 percent next year as the new plant ramps up.",
                "citations": [{"doc": "D1", "page": 2, "quote": q_growth}], "driver": {"key": "growth", "value": 14, "citation": 0}}
@@ -3553,6 +3579,36 @@ def auto_check(server):
             assert len(lines) == 1 and "scheduled check is running" in lines[0]["error"], lines
         (root / server.AUTO).write_text("{damaged")
         assert server.auto_state(root) == {"enabled": True, "last": None}, "a damaged file: on, never run"
+        # a company whose check raises (an odd filing) is reported and the rest still checked; a run that dies is
+        # still recorded, so it waits a day; a run that can't even record itself isn't retried every tick
+        import types  # noqa: PLC0415
+        saved = server.latest_models, server.load_model, server.fetch_company, server.check_all, server.auto_run, server.AUTO_TICK
+        try:
+            fake = lambda sym: types.SimpleNamespace(company=types.SimpleNamespace(  # noqa: E731
+                source={"symbol": sym}, model_dump=lambda: {}), saved_at=None)
+            server.latest_models = lambda root: [{"id": "a/1", "company": "A"}, {"id": "b/1", "company": "B"}]
+            server.load_model = lambda mid: fake("AAA" if mid == "a/1" else "BBB")
+            server.fetch_company = lambda *a, **k: (_ for _ in ()).throw(KeyError("odd"))
+            res = [e["result"]["status"] for e in server.check_all() if "result" in e]
+            assert res == ["failed", "failed"], res
+            server.check_all = lambda now=None: (_ for _ in ()).throw(KeyError("boom"))
+            server.latest_models = lambda root: []
+            last = server.auto_run(root)
+            assert last["failed"] == -1 and not server.auto_due(server.auto_state(root), datetime.now()), last
+            runs = []
+            server.auto_run = lambda root=None: runs.append(1)
+            (root / server.AUTO).unlink()  # never recorded: due on every look at the clock
+            server.AUTO_TICK = 0.02
+            stop = threading.Event()
+            t = threading.Thread(target=server._auto_loop, args=(stop, root))
+            t.start()
+            time.sleep(0.3)
+            stop.set()
+            t.join()
+            assert runs == [1], runs
+        finally:
+            (server.latest_models, server.load_model, server.fetch_company, server.check_all, server.auto_run,
+             server.AUTO_TICK) = saved
     finally:
         server.MODELS = models
 
@@ -3606,6 +3662,9 @@ def watch_check(server, data):
         r1 = row()
         assert r1["price"] == 1650 and r1["price_saved"] == saved and r1["price_live"], r1
         assert r1["values"]["base"] is not None and r1["implied"] != r0["implied"], (r0, r1)  # recomputed at today's price
+        # opening the latest version shows the same CMP and time as the list (not written until a save)
+        o = client.get(f"/api/models/{mid}").json()["doc"]["company"]
+        assert o["market"]["price"] == 1650 and o["source"]["price_at"] == r1["price_at"], o["source"]
         h = client.get("/api/watch").json()["history"]
         assert set(h) == {"ticker-co", "test-industries-ltd"} and h["ticker-co"][0][1:3] == [1650.0, round(r1["values"]["bear"], 2)], h
         # the opened model keeps its own saved price (Refresh there saves today's); a typed price is never replaced
@@ -3674,6 +3733,14 @@ def portfolio_check(server, data):
         _, err = server.parse_holdings("TESTIND,10\nX,abc,1\n../x,1,1\nTESTIND,0,5\nTESTIND,1,250,000\n")
         assert [e["line"] for e in err] == [1, 2, 3, 4, 5] and "quotes" in err[4]["text"], err
         assert server.merge(hs) == [{"symbol": "TESTIND", "qty": 2000, "cost": 1600}, {"symbol": "TBANK", "qty": 2000, "cost": 40}]
+        # a broker's holdings export as it is: columns by their header names, the rest ignored
+        hs, err = server.parse_holdings('Instrument,Qty.,Avg. cost,LTP,Cur. val,P&L\nTESTIND,10,"1,500.5",1650,16500,1495\n'
+                                        'TBANK,20,40,50,1000,200\n')
+        assert not err and hs == [{"symbol": "TESTIND", "qty": 10, "cost": 1500.5}, {"symbol": "TBANK", "qty": 20, "cost": 40}], (hs, err)
+        assert server.parse_holdings("TCS,1,250,3500")[1], "no header: an unquoted Indian-grouped row stays an error"
+        _, err = server.parse_holdings("Instrument,LTP,Cur. val,P&L\nTESTIND,1,2,3\nTBANK,1,2,3")
+        assert len(err) == 1 and "quantity" in err[0]["text"] and "average cost" in err[0]["text"], err
+        assert server.errors_text([{"line": i, "text": "x"} for i in (1, 2, 3)] + [{"line": 5, "text": "y"}]) == "Lines 1-3: x; Line 5: y."
         # nothing held: an empty view; a paste with one bad line saves nothing
         e = client.get("/api/portfolio").json()
         assert e["holdings"] == [] and e["total"]["value"] is None and not e["damaged"], e
@@ -3720,6 +3787,16 @@ def portfolio_check(server, data):
         p = client.post("/api/portfolio", json={"holdings": [{"symbol": "testind", "qty": 10, "cost": 1}]}).json()
         assert [(r["symbol"], r["qty"]) for r in p["holdings"]] == [("TESTIND", 10)]
         assert client.post("/api/portfolio", json={"holdings": [{"symbol": "X", "qty": -1, "cost": 1}]}).status_code == 422
+        # a repeated symbol summed past the cap: refused, and the file still reads
+        r = client.post("/api/portfolio/paste", json={"text": "TESTIND,999999999999,1\nTESTIND,999999999999,1"})
+        assert r.status_code == 422 and not client.get("/api/portfolio").json()["damaged"], r.text
+        # a name or sector starting with '=' stays text in the Excel sheet
+        px = server.portfolio(root)
+        px["holdings"][0].update(name="=1+1", sector="=2+2")
+        px["sectors"][0][0] = "=3+3"
+        wx = openpyxl.load_workbook(io.BytesIO(server.portfolio_excel(px)))["Portfolio"]
+        assert not any(c.data_type == "f" for row in wx.iter_rows() for c in row if isinstance(c.value, str)
+                       and c.value.startswith("=") and c.value[1:2] in "123"), "untrusted strings are never formulas"
         # the Excel sheet: values
         x = client.get("/api/portfolio.xlsx")
         ws = openpyxl.load_workbook(io.BytesIO(x.content))["Portfolio"]
@@ -3916,6 +3993,39 @@ def lender_check(tmp, excel):
     m, filled, mism = lender.merge(co, older)
     assert filled == ["FY2016", "FY2017", "FY2018", "FY2019", "FY2020", "FY2021"] and len(m["hist"]) == 11, filled
     assert len(m["market"]["price_hist"]) == 11 and {x["year"] for x in mism} == {"FY2022", "FY2023", "FY2024", "FY2025"}, mism
+    # an NBFC's export counts fees inside interest earned: older years split at the overlap year's filed ratio
+    nb_rows = [dict(r, cet1=None) for r in bank_rows(4)]
+    filed_nb = {"name": "N", "dates": BANK_DATES[2:4], "hist": lender.derive(nb_rows[2:])}
+    exp_nb = {"dates": BANK_DATES[:3], "hist": lender.derive([dict(r, int_earned=r["int_earned"] + r["other_income"],
+                                                                     other_income=0.0) for r in nb_rows[:3]])}
+    m, filled, _ = lender.merge(filed_nb, exp_nb)
+    assert filled == ["FY2022", "FY2023"] and filed_nb["fee_split"]["year"] == "FY2024", filed_nb.get("fee_split")
+    for got, want in zip(m["hist"][:2], nb_rows[:2]):
+        assert abs(got["int_earned"] - want["int_earned"]) < 1e-6 and abs(got["other_income"] - want["other_income"]) < 1e-6
+        assert abs(got["total_income"] - (want["int_earned"] - want["int_expended"] + want["other_income"])) < 1e-6, "PBT unchanged"
+    # ICICI files ESOP outstanding inside 'Capital': share capital is the paid-up value, net worth unchanged
+    pu = lender.filing_row({**x["facts"], "paid_up_capital": 4.0})
+    assert pu["share_cap"] == 4.0 and abs(pu["share_cap"] + pu["reserves"] - r["share_cap"] - r["reserves"]) < 1e-9, pu
+    # the older banking format files PercentageOfNpa with no unitRef: still read
+    raw = re.sub(rb'(<f:PercentageOfNpa contextRef="\w+") unitRef="pure"', rb"\1", bank_xml(rows[-1], BANK_DATES[-1]))
+    assert b"unitRef" not in raw.split(b"PercentageOfNpa")[1][:30] and model.parse_xbrl(raw)["facts"]["nnpa_pct"] == 0.01
+    # a merger year (total assets +72%) and a tax write-back year are offered for leaving out; the NIM check doesn't
+    # use the merger year as its base; a falling NIM defaults to the last year's
+    assert lender.oneoffs(h, labels) == [] and lender.default_notes(h, labels_=labels) == {}
+    mg = [dict(x) for x in h]
+    for i in range(2, 5):
+        mg[i]["total_assets"] *= 1.5
+    mg[2]["tax"] = 0.14 * mg[2]["pbt"]
+    assert {(o["year"], o["metric"]) for o in lender.oneoffs(mg, labels)} == {("FY2024", "total_assets"), ("FY2024", "tax_rate")}
+    assert lender.defaults(mg)["tax_rate"] < 0.24 and abs(lender.defaults(mg, exclude={"FY2024"}, labels_=labels)["tax_rate"] - 0.25) < 1e-6
+    nim_f = {f["key"]: f for f in lender.forensic(mg, labels)}["nim"]
+    assert "vs FY2025; FY2024 merger year skipped" in nim_f["fact"], nim_f["fact"]
+    fall = [dict(x) for x in h]
+    for i, cut in ((3, 0.002), (4, 0.004)):
+        fall[i]["int_expended"] += cut * fall[i]["total_assets"]
+    fall = lender.derive(fall)
+    assert lender.defaults(fall)["nim"] == lender.ratios(fall)[-1]["nim"], "falling NIM: the last year's, not the mean"
+    assert lender.default_notes(fall, labels_=labels) == {"nim": "FY2026 (NIM falling)"}
 
     if not excel:
         return

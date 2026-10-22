@@ -3,7 +3,7 @@ import { useHref } from './route'
 import { AiOffNote, useAi } from './Sources'
 import {
   NAMES, SCENARIOS, api, fmt, fy, money, postJson, qfy, rs, when,
-  type ModelDoc, type Projection, type QStatus, type QuarterTrack, type Scenario, type ThesisNote, type Tracking, type TrackProposal,
+  type ModelDoc, type Projection, type QStatus, type QuarterLine, type QuarterTrack, type Scenario, type ThesisNote, type Tracking, type TrackProposal,
 } from './lib'
 import { T } from './Term'
 
@@ -47,11 +47,14 @@ const gapOf = (key: string, g: number | null) => g == null ? '–' : key === 'eb
   ? `${g >= 0 ? '+' : '−'}${Math.round(Math.abs(g) * 10000)} bps` : `${g >= 0 ? '+' : '−'}${(Math.abs(g) * 100).toFixed(1)}%`
 
 /** "H1 FY27 behind FY27E run-rate: revenue −2.1%, PAT −8.0%", for the answer line, Summary and the coverage list. */
-export function quarterWords(q: Pick<QuarterTrack, 'quarter' | 'period' | 'year' | 'status'> & { rev: number | null; pat: number | null }): string {
+export function quarterWords(q: Pick<QuarterTrack, 'quarter' | 'period' | 'year' | 'status'> & { rev: number | null; pat: number | null; lines?: QuarterLine[] }): string {
   const part = (label: string, g: number | null) => g == null ? null : `${label} ${g >= 0 ? '+' : '−'}${(Math.abs(g) * 100).toFixed(1)}%`
   const bits = [part('revenue', q.rev), part('PAT', q.pat)].filter(Boolean)
+  // the overall status reads revenue and PAT (model.quarter_track); a margin outside tolerance is said too
+  const m = q.lines?.find(l => l.key === 'ebitda_margin')
+  const margin = m && m.gap != null && m.status && m.status !== 'in_line' ? `; EBITDA margin ${gapOf('ebitda_margin', m.gap)} ${m.status === 'behind' ? 'behind' : 'ahead'}` : ''
   const where = q.status === 'ahead' ? 'ahead of' : q.status === 'behind' ? 'behind' : q.status === 'in_line' ? 'in line with' : 'vs'
-  return `${q.period} ${fy(q.year)} ${where} ${fy(q.year)}E run-rate${bits.length ? `: ${bits.join(', ')}` : ''}`
+  return `${q.period} ${fy(q.year)} ${where} ${fy(q.year)}E run-rate${bits.length ? `: ${bits.join(', ')}` : ''}${margin}`
 }
 
 /** Results tracking, first: the quarters filed in the current forecast year (YTD) against the base case's FY E,

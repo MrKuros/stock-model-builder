@@ -339,6 +339,14 @@ def fy_of(d):
     return f"FY{d.year + 1 if d.month > 3 else d.year}"
 
 
+def call_quarter(iso):
+    """The quarter a results call discusses, the last one ended before the call: "2026-10-14" -> "Q2 FY27" (Jan-Mar
+    calls Q3, Apr-Jun Q4 of the year just ended, Jul-Sep Q1, Oct-Dec Q2). web/src/lib.ts docLabel mirrors it."""
+    y, m = int(iso[:4]), int(iso[5:7])
+    q = (3, 3, 3, 4, 4, 4, 1, 1, 1, 2, 2, 2)[m - 1]
+    return f"Q{q} FY{(y if m <= 6 else y + 1) % 100:02d}"
+
+
 # ---------- peers (5.2): companies in the same NSE sector, close in size, by rules ----------
 
 SECTOR_LIST = "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"

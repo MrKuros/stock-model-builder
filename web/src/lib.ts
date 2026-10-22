@@ -194,8 +194,16 @@ export interface NotesPlan { topics: Record<string, { title: string; pages: numb
 /** An attached PDF (POST /api/report); its page text stays on the server. Notes, one-offs and flags read only annual
  * reports; transcripts and presentations are read to draft assumptions (4.2). Missing kind = annual (saved before 4.2). */
 export type DocKind = 'annual' | 'transcript' | 'presentation'
-export interface Report { id: string; file: string; year: string; pages: number; kind?: DocKind }
+export interface Report { id: string; file: string; year: string; pages: number; kind?: DocKind; date?: string | null }
 export const DOC_KINDS: Record<DocKind, string> = { annual: 'Annual report', transcript: 'Earnings-call transcript', presentation: 'Investor presentation' }
+/** A document in words: "Q2 FY27 earnings-call transcript" for a call with its date (the quarter ended before it, as
+ * sources.call_quarter), else "FY2026 annual report". */
+export function docLabel(r: { year: string; kind?: DocKind; date?: string | null }): string {
+  const what = DOC_KINDS[r.kind ?? 'annual'].toLowerCase()
+  if (!r.date || !/^\d{4}-\d\d/.test(r.date)) return `${r.year} ${what}`
+  const y = +r.date.slice(0, 4), m = +r.date.slice(5, 7)
+  return `Q${[3, 3, 3, 4, 4, 4, 1, 1, 1, 2, 2, 2][m - 1]}\u00a0FY${String((m <= 6 ? y : y + 1) % 100).padStart(2, '0')} ${what}`
+}
 export const isAnnual = (r: Report) => (r.kind ?? 'annual') === 'annual'
 /** An approved one-off explanation, notes[`oneoff:${year}`]: words only, AI-written, never a number. */
 export interface OneOffNote {
@@ -311,6 +319,7 @@ export interface Parsed {
   ratios: Row[]
   defaults: Record<string, number>
   default_ends?: Record<string, number> // a fast grower's fades (growth, capex end values); {} otherwise
+  default_notes?: Record<string, string> // a lender default off its usual rule, in words (NIM held at a falling last year)
   checks: string[]
   share_gap?: { gap: number; now: number; then: number; text: string } | null // shares up since the last balance sheet
   oneoffs: OneOff[]
@@ -437,10 +446,11 @@ export function fmt(v: number | null | undefined, kind: LineKind): string {
 /** Broker year notation, anywhere in a string: "FY2027E" -> "FY27E", "FY2018–23" -> "FY18–23". Display only: the engine's
  * labels stay long (Excel parity, document keys). */
 export const fy = (y: string) => y.replace(/\bFY20(\d\d)/g, 'FY$1')
-/** A quarter-end date as an Indian fiscal quarter: "2026-09-30" -> "Q2FY27" (April–March year). */
+/** A quarter-end date as an Indian fiscal quarter: "2026-09-30" -> "Q2 FY27" (April–March year; a no-break space, as
+ * the engine's "Q2 FY27" strings). */
 export const qfy = (iso: string) => {
   const d = new Date(iso), m = d.getMonth()
-  return `Q${[4, 4, 4, 1, 1, 1, 2, 2, 2, 3, 3, 3][m]}FY${String((m > 2 ? d.getFullYear() + 1 : d.getFullYear()) % 100).padStart(2, '0')}`
+  return `Q${[4, 4, 4, 1, 1, 1, 2, 2, 2, 3, 3, 3][m]}\u00a0FY${String((m > 2 ? d.getFullYear() + 1 : d.getFullYear()) % 100).padStart(2, '0')}`
 }
 
 /** "-0.0" -> "0.0": tiny negatives shouldn't show a sign */

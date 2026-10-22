@@ -10,7 +10,7 @@ import { LenderReadout, isLender } from './Lender'
 import { useHref } from './route'
 import { T } from './Term'
 import {
-  DOC_KINDS, NAMES, SHIFT, copyBase, defaultPaths, fmt, flat, groupKeys, money, rs, seed, type Impact,
+  NAMES, docLabel, SHIFT, copyBase, defaultPaths, fmt, flat, groupKeys, money, rs, seed, type Impact,
   type Kind, type ModelDoc, type MovedOut, type Parsed, type Path, type Paths, type Projection, type Proposal, type Row, type Scenario, type Sources, type Ttm,
 } from './lib'
 
@@ -46,14 +46,14 @@ const L_TOP = ['adv_growth', 'nim', 'credit_cost']
 const L_ALSO = ['cost_income', 'oi_pct', 'tax_rate', 'payout']
 const L_RULE: Record<string, string> = {
   adv_growth: 'Median of the last 3 years’ loan growth (a merger year doesn’t set it)',
-  nim: '3-yr ratio of sums: NII ÷ average total assets',
+  nim: '3-yr ratio of sums: NII ÷ average total assets; the last year’s NIM when it fell 15 bps or more over the window (as the compression flag reads)',
   oi_pct: '3-yr ratio of sums: fee and other income ÷ average total assets',
   cost_income: '3-yr ratio of sums: opex ÷ net total income (years with provisions split out)',
   credit_cost: '3-yr ratio of sums: provisions ÷ average advances (years with provisions split out)',
   tax_rate: '3-yr ratio of sums: tax ÷ PBT',
   payout: '3-yr ratio of sums: dividends paid ÷ PAT',
   adv_assets: 'Last reported year, so total assets start where the books end',
-  rwa_density: 'Last reported year: net worth ÷ (CET1 × total assets) for a bank, so the first forecast CET1 is the reported one; advances ÷ assets (100% risk weight) for an NBFC',
+  rwa_density: 'Last reported year: net worth ÷ (CET1 / CRAR as filed × total assets) for a bank, so the first forecast ratio is the filed one (CRAR-like where the bank files CRAR there); advances ÷ assets (100% risk weight) for an NBFC',
   cet1_min: 'Bank: 12% (RBI’s 8% incl. buffer plus a 4 pp cushion). NBFC: 15% (RBI’s CRAR minimum), on net worth',
 }
 /** A lender's names where a key means something else there (lender.DRIVERS). */
@@ -148,7 +148,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
   const propOf = (id: string | undefined) => (id && id !== 'manual' && id !== 'history' ? doc.proposals.find(p => p.id === id) : undefined)
   const docOf = (p: Proposal) => {
     const r = doc.reports.find(x => x.id === p.report)
-    return r ? `${r.year} ${DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}` : p.source.file ?? 'a document'
+    return r ? docLabel(r) : p.source.file ?? 'a document'
   }
   const valueOf = (k: string) => a[k] ?? flat(seeded[active][k].start)
   const isYou = (k: string) => {
@@ -161,8 +161,8 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
     const s = srcOf(k), p = propOf(s), kind = kindOf(k)
     if (p) return <Src kind="you">Edited · from {docOf(p)} p. {p.source.page}</Src>
     if (s === 'manual' || (s !== 'history' && isYou(k))) return <Src kind="you">Edited · default {path(seeded[active][k], kind)}</Src>
-    return <Src kind="rule">Default: {k === 'debt_change' ? 'zero' : k === 'growth' ? '3-yr CAGR' : lender && ['adv_assets', 'rwa_density'].includes(k) ? 'last year'
-      : k === 'cet1_min' ? 'regulatory floor + cushion' : k === 'adv_growth' ? '3-yr median' : '3-yr history'}</Src>
+    return <Src kind="rule">Default: {parsed.default_notes?.[k] ?? (k === 'debt_change' ? 'zero' : k === 'growth' ? '3-yr CAGR' : lender && ['adv_assets', 'rwa_density'].includes(k) ? 'last year'
+      : k === 'cet1_min' ? 'regulatory floor + cushion' : k === 'adv_growth' ? '3-yr median' : '3-yr history')}</Src>
   }
   const impact = v?.note?.impact
   const be = v?.note?.breakevens ?? {}

@@ -102,15 +102,16 @@ export default function Portfolio({ models }: { models: ModelSummary[] | null })
           <div className="table-wrap" tabIndex={0} role="region" aria-labelledby="hold-h">
             <table className="pf-table">
               <thead><tr>
-                <th scope="col">Company</th><th scope="col">Qty</th><th scope="col">Avg cost</th><th scope="col"><T k="cmp" /></th>
-                <th scope="col"><T k="mv">Mkt value</T></th><th scope="col"><T k="weight" /></th><th scope="col"><T k="upnl" /></th>
-                <th scope="col">Base <T k="fv" /></th><th scope="col"><T k="updown">Up/(down)</T></th><th scope="col"><T k="pe" /></th>
+                {/* valuation first, so a phone shows CMP, upside, FV and P&L beside the sticky name */}
+                <th scope="col">Company</th><th scope="col"><T k="cmp" /></th><th scope="col"><T k="updown">Up/(down)</T></th>
+                <th scope="col">Base <T k="fv" /></th><th scope="col"><T k="upnl" /></th><th scope="col"><T k="weight" /></th>
+                <th scope="col">Qty</th><th scope="col">Avg cost</th><th scope="col"><T k="mv">Mkt value</T></th><th scope="col"><T k="pe" /></th>
                 <th scope="col"><T k="ev_ebitda" /> · <T k="pb" /></th><th scope="col">Flags · results</th><th scope="col"><span className="sr">Actions</span></th>
               </tr></thead>
               <tbody>{rows.map(r => <Row key={r.symbol} r={r} onEdit={() => { setEdit({ symbol: r.symbol, qty: r.qty, cost: r.cost }); formRef.current?.scrollIntoView({ block: 'center' }) }} onRemove={() => remove(r)} />)}</tbody>
               <tfoot><tr className="total">
-                <th scope="row">Total</th><td /><td /><td /><td>{money(t.value)}</td><td>{t.value != null ? '100.0%' : '–'}</td>
-                <td>{money(t.pnl)}</td><td>{t.fv != null ? money(t.fv) : '–'}</td><td className="ours">{fmt(t.upside, 'pct')}</td>
+                <th scope="row">Total</th><td /><td className="ours">{fmt(t.upside, 'pct')}</td><td>{t.fv != null ? money(t.fv) : '–'}</td>
+                <td>{money(t.pnl)}</td><td>{t.value != null ? '100.0%' : '–'}</td><td /><td /><td>{money(t.value)}</td>
                 <td>{fmt(m.pe.value, 'x')}</td><td /><td>{p.flags} flag{p.flags === 1 ? '' : 's'}</td><td />
               </tr></tfoot>
             </table>
@@ -186,15 +187,15 @@ function Row({ r, onEdit, onRemove }: { r: HoldingRow; onEdit: () => void; onRem
     <tr>
       <th scope="row">{slug ? <a href={pathOf(slug, 'summary')}>{name(r)}</a> : <span>{r.name ? name(r) : r.symbol}</span>}
         <span className="pf-sym">{r.symbol}{r.lender ? ' · lender' : ''}</span></th>
-      <td>{r.qty % 1 ? dec2(r.qty) : money(r.qty)}</td>
-      <td>{rs(r.cost)}</td>
       <td className="mkt">{r.price != null ? rs(r.price) : '–'}</td>
-      <td>{money(r.value)}</td>
-      <td>{fmt(r.weight, 'pct')}</td>
-      <td>{money(r.pnl)}<span className="pf-sub">{r.pnl != null && r.invested ? fmt(r.pnl / r.invested, 'pct') : ''}</span></td>
       {!slug ? <td colSpan={2} className="pf-none">No model yet · <a href={`/add?symbol=${encodeURIComponent(r.symbol)}`}>Build model</a></td>
         : r.fv == null ? <td colSpan={2} className="pf-none">No FV: {r.why ?? 'see Valuation'} · <a href={pathOf(slug, 'valuation')}>Valuation</a></td>
-        : <><td className="ours">{rs(r.fv)}</td><td className="ours">{fmt(r.upside, 'pct')}<span className="pf-sub"><Verdict price={r.price} values={{ bear: r.bear, base: r.fv, bull: r.bull }} words={false} /></span></td></>}
+        : <><td className="ours">{fmt(r.upside, 'pct')}<span className="pf-sub"><Verdict price={r.price} values={{ bear: r.bear, base: r.fv, bull: r.bull }} words={false} /></span></td><td className="ours">{rs(r.fv)}</td></>}
+      <td>{money(r.pnl)}<span className="pf-sub">{r.pnl != null && r.invested ? fmt(r.pnl / r.invested, 'pct') : ''}</span></td>
+      <td>{fmt(r.weight, 'pct')}</td>
+      <td>{r.qty % 1 ? dec2(r.qty) : money(r.qty)}</td>
+      <td>{rs(r.cost)}</td>
+      <td>{money(r.value)}</td>
       <td>{fmt(m?.pe, 'x')}</td>
       <td>{r.lender ? <>{fmt(m?.pb, 'x')} <span className="pf-sub">P/B</span></> : fmt(m?.ev_ebitda, 'x')}</td>
       <td className="pf-look">{slug ? <>
@@ -267,7 +268,7 @@ function Paste({ onDone }: { onDone: (p: PortfolioView) => void }) {
       </fieldset>
       <button type="button" className="btn" onClick={go} disabled={busy || !text.trim()}>{replace ? 'Replace holdings' : 'Add these'}</button>
       {err && <p id="pf-csv-err" className="error" role="alert">{err}</p>}
-      <p className="small-note">Comma or tab separated (a spreadsheet copy works); a header line is skipped; put numbers with commas in quotes.</p>
+      <p className="small-note">Comma or tab separated (a spreadsheet copy works); a broker’s holdings export pastes as it is, header included (Instrument, Qty., Avg. cost; other columns ignored); without a header, put numbers with commas in quotes.</p>
     </details>
   )
 }

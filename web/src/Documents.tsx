@@ -5,7 +5,7 @@ import { Confirm, More, Next, PageHead } from './Shell'
 import { ago, streamFetch, useMinute } from './Fetch'
 import { useHref } from './route'
 import {
-  DOC_KINDS, api, fmt, fy, isAnnual, money, postJson, properName, rs, sourceLabel, when, type Company, type ModelDoc, type ModelSummary, type OneOffNote,
+  docLabel, api, fmt, fy, isAnnual, money, postJson, properName, rs, sourceLabel, when, type Company, type ModelDoc, type ModelSummary, type OneOffNote,
   type Parsed, type Projection, type Proposal,
 } from './lib'
 import { T } from './Term'
@@ -22,7 +22,7 @@ export function spans(ys: string[]) {
   }
   return out.map(([a, b]) => (a === b ? fy(a) : `${fy(a)}–${b.slice(-2)}`)).join(', ')
 }
-const LOCAL = 'local 10-yr history'
+const LOCAL = '10-yr Excel export history'
 /** Where each reported year came from, in the allowed words only: [["NSE filings", "FY2023–26"], ["an Excel export", "FY2015–22"]]. */
 export function yearSources(company: Company, years: string[]): [string, string][] {
   const by = new Map<string, string[]>()
@@ -58,6 +58,7 @@ export default function Documents({ parsed, doc, setDoc, projection, versions, u
   const waiting = (parsed.forensic ?? []).filter(f => f.severity === 'not_checked' && f.needs).length
   const latestAr = annual.some(r => r.year === years[years.length - 1])
   const from = yearSources(company, years)
+  const exch = s?.exchange === 'BSE' ? 'BSE' : 'NSE', firstFiled = years.find(y => /filing/i.test(company.source?.years[y] ?? ''))
   const [gone, setGone] = useState(false)
   const [delErr, setDelErr] = useState<string | null>(null)
   const onNse = (s?.documents ?? []).filter(d => !doc.reports.some(r => r.kind === d.kind && d.date?.startsWith(r.year.slice(2)))) // ponytail: listed, not fetched
@@ -77,12 +78,13 @@ export default function Documents({ parsed, doc, setDoc, projection, versions, u
         <h2 id="docs-h">Documents</h2>
         <ul className="doc-rows">
           {from.filter(([l]) => l.startsWith('an Excel')).map(([, y]) => row(<>Excel export, {y}</>, 'Read by rules'))}
-          {from.filter(([l]) => l === LOCAL).map(([, y]) => row(<>Older years, {y}</>, 'NSE filings start FY23; earlier years from the local 10-yr history · read by rules'))}
+          {from.filter(([l]) => l === LOCAL).map(([, y]) => row(<>Older years, {y}</>, <>{firstFiled ? `${exch} filings start ${fy(firstFiled)}; earlier` : 'Earlier'} years
+            from the 10-yr Excel export · read by rules</>))}
           {s?.symbol && row(<>{s.exchange === 'BSE' ? 'BSE' : 'NSE'} annual results filings, {from.find(f => f[0] === `${s.exchange === 'BSE' ? 'BSE' : 'NSE'} filings`)?.[1] ?? 'none'}</>, 'Read by rules')}
           {doc.filings.length > 0 && row(<>Results filings kept with the model ({doc.filings.length})</>, 'Read by rules',
             <a href="#filings" onClick={() => { const d = document.getElementById('filings') as HTMLDetailsElement | null; if (d) d.open = true }}>Review</a>)}
           {[...annual, ...talk].sort((a, b) => b.year.localeCompare(a.year)).map(r => <li key={r.id}>
-            <span className="d-name">{r.year} {DOC_KINDS[r.kind ?? 'annual'].toLowerCase()} <span className="small dim">{r.file} · {r.pages} pages</span></span>
+            <span className="d-name">{docLabel(r)} <span className="small dim">{r.file} · {r.pages} pages</span></span>
             <span className="d-st">{status(r.year, isAnnual(r))}</span>
             <span className="d-act"><button type="button" className="link" aria-label={`Remove ${r.file}`} onClick={() => {
               if (window.confirm(`Remove ${r.file} from this model? What AI read from it and you approved stays.`)) onReports(rs => rs.filter(x => x.id !== r.id))

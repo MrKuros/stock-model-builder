@@ -53,7 +53,7 @@ LAYOUT = [  # (label, key, kind); the Statements page and the Excel Model sheet
     ("Total assets", "total_assets", "num"),
     ("", None, None),
     ("CAPITAL", None, "head"),
-    ("Risk-weighted assets (proxy)", "rwa", "num"), ("CET1 ratio", "cet1", "pct"), ("Equity raised", "raised", "num"),
+    ("Risk-weighted assets (proxy)", "rwa", "num"), ("CET1 / CRAR (as filed)", "cet1", "pct"), ("Equity raised", "raised", "num"),
     ("", None, None),
     ("ASSET QUALITY (reported)", None, "head"),
     ("Gross NPA", "gnpa", "num"), ("Net NPA", "nnpa", "num"), ("GNPA %", "gnpa_pct", "pct"), ("NNPA %", "nnpa_pct", "pct"),
@@ -72,6 +72,8 @@ REQUIRED = ("int_earned", "int_expended", "other_income", "opex", "pbt", "tax", 
 EXPORT_NOTE = ("Older years from the export: provisions sit inside operating expenses and advances include other assets "
                "(an Excel export also keeps deposits inside borrowings), so credit cost and the provision lines start at "
                "the first filed year")
+FEE_NOTE = ("An NBFC's export counts fee income inside interest earned; its years {span} are split at the {year} filed "
+            "ratio (interest {k} of the export's figure), an estimate")
 
 
 # ---------- a lender's year ----------
@@ -89,8 +91,12 @@ def filing_row(x):
     int_exp = g("int_expended") if bank else g("interest")
     oi = g("other_income") + g("exceptional") + (0.0 if bank else g("revenue") - x["int_earned"])
     prov = g("provisions")
+    # ICICI's 'Capital' also holds ESOP outstanding (FY2025: 3,494 cr against 1,425 cr paid up): equity, not paid-up
+    # capital, so the excess goes to reserves and net worth is unchanged
+    cap0, pu = x["share_cap"], x.get("paid_up_capital")
+    cap = pu if pu and 0 < pu < cap0 else cap0
     reserves = (x["reserves"] if "reserves" in x else x["other_equity"] if "other_equity" in x
-                else g("equity_parent") - x["share_cap"])
+                else g("equity_parent") - cap0) + cap0 - cap
     fixed = g("fixed_assets") if bank else sum(g(k) for k in ("ppe", "cwip", "intangibles", "intangibles_wip",
                                                                  "investment_property", "goodwill"))
     cash, inv, adv = g("cash") + g("bank_balances"), g("investments_lender"), x["advances"]
@@ -100,12 +106,15 @@ def filing_row(x):
     tax = x["tax"] if "tax" in x else g("current_tax") + g("deferred_tax")
     r = {"int_earned": x["int_earned"], "int_expended": int_exp, "other_income": oi, "provisions": prov,
          "opex": nii + oi - prov - x["pbt"], "pbt": x["pbt"], "tax": tax, "pat": x["pat"],
-         "dividend": abs(g("dividends_paid")), "share_cap": x["share_cap"], "reserves": reserves,
+         "dividend": abs(g("dividends_paid")), "share_cap": cap, "reserves": reserves,
          "deposits": g("deposits"), "borrowings": g("borrowings_lender") + g("debt_securities") + g("subordinated"),
          "cash": cash, "investments": inv, "advances": adv, "fixed_assets": fixed, "total_assets": total}
     r["other_assets"] = total - cash - inv - adv - fixed
-    r["other_liab"] = total - x["share_cap"] - reserves - r["deposits"] - r["borrowings"]
-    # asset quality and capital are filed only by banks, standalone; a 0 (consolidated files them so) is not filed
+    r["other_liab"] = total - cap - reserves - r["deposits"] - r["borrowings"]
+    # asset quality and capital are filed only by banks, standalone; a 0 (consolidated files them so) is not filed.
+    # ponytail: the CET1Ratio field is total CRAR for some banks (HDFC Bank, Kotak) and AdditionalTier1Ratio holds
+    # Tier 2 or all of Tier 1 for others, so "cet1" is the capital ratio as filed; the exact CET1 needs the results
+    # press release or the Basel III Pillar 3 disclosure
     for k in ("gnpa", "nnpa", "gnpa_pct", "nnpa_pct", "cet1", "at1"):
         r[k] = x.get(k) or None
     return r
@@ -194,10 +203,33 @@ def merge(filed, other):
             for k, line in (("pat", "Net profit"), ("total_assets", "Total assets"), ("int_earned", "Interest earned")):
                 if abs(f[k] - h[k]) > model.MERGE_TOL * max(abs(f[k]), 1.0):
                     mism.append({"year": fy(d), "line": line, "filing": f[k], "export": h[k]})
-    co = {**filed, "dates": [d for d, _ in add] + filed["dates"], "hist": [h for _, h in add] + filed["hist"]}
+    co = {**filed, "dates": [d for d, _ in add] + filed["dates"],
+          "hist": derive(fee_split(filed, other, [h for _, h in add])) + filed["hist"]}
     m = co.get("market") or {}
     co["market"] = {**m, "price_hist": [None] * len(co["dates"]), "shares_hist": [None] * len(co["dates"])}
     return co, [fy(d) for d, _ in add], mism
+
+
+def fee_split(filed, other, rows):
+    """An NBFC (no capital ratio filed) whose export counts fees inside interest earned: the export years' interest
+    earned scaled by k = filed / export interest earned in the earliest year both have (when over 5% apart), the rest
+    moved to fee & other income, so NII, NIM and fee income read on the filed basis and PBT is unchanged. A bank's
+    export interest is its interest (k ~ 1): untouched. Sets fee_split {k, year} on the filed company for the note."""
+    # ponytail: one year's ratio for every older year, so the fee mix can drift back in time; the upgrade is each
+    # year's fee line from its annual report
+    if not rows or filed["hist"][-1].get("cet1") is not None:
+        return rows
+    have = {d.date(): h for d, h in zip(filed["dates"], filed["hist"])}
+    both = [(d, have[d.date()], h) for d, h in zip(other["dates"], other["hist"]) if d.date() in have]
+    if not both or not both[0][2]["int_earned"]:
+        return rows
+    d, f, e = both[0]
+    k = f["int_earned"] / e["int_earned"]
+    if abs(1 - k) <= 0.05:
+        return rows
+    filed["fee_split"] = {"k": k, "year": fy(d)}
+    return [{**r, "int_earned": r["int_earned"] * k, "other_income": r["other_income"] + r["int_earned"] * (1 - k)}
+            for r in rows]
 
 
 def data_checks(co):
@@ -213,6 +245,36 @@ def data_checks(co):
     issues += [f"{fy(b)}: period is {(b - a).days} days (year-end change?), its growth/ratios are distorted"
                for a, b in zip(d, d[1:]) if not 330 <= (b - a).days <= 400]
     return issues
+
+
+MERGER_GROWTH = 0.40  # total assets up more than this in a year: a merger (HDFC Bank FY2024: +47%)
+TAX_ODD = (0.18, 0.40)  # tax / PBT outside this: a write-back or a write-down (HDFC Bank FY2024: 14.2%)
+
+
+def merger_years(hist, labels_):
+    """Years whose total assets grew more than MERGER_GROWTH: their averages mix pre- and post-merger books."""
+    # ponytail: also catches an NBFC's organic hyper-growth year; only an offer and a skipped comparison base
+    return {labels_[i] for i in range(1, len(hist))
+            if hist[i - 1]["total_assets"] > 0 and hist[i]["total_assets"] / hist[i - 1]["total_assets"] - 1 > MERGER_GROWTH}
+
+
+def oneoffs(hist, labels_):
+    """model.detect_oneoffs' shape for a lender, by rules: a merger year and a tax-rate outlier, offered for leaving
+    out of the defaults."""
+    out, m = [], merger_years(hist, labels_)
+    for i, h in enumerate(hist):
+        y = labels_[i]
+        if y in m:
+            g = h["total_assets"] / hist[i - 1]["total_assets"] - 1
+            out.append({"year": y, "metric": "total_assets", "value": g, "typical": None,
+                        "note": f"{y} total assets grew {model._pct(g)}: a merger (or hyper-growth) year, whose NIM, credit cost and fee "
+                                "income sit on a pre-merger opening book"})
+        t = _div(h["tax"], h["pbt"]) if h["pbt"] > 0 else None
+        if t is not None and not TAX_ODD[0] <= t <= TAX_ODD[1]:
+            out.append({"year": y, "metric": "tax_rate", "value": t, "typical": 0.25,
+                        "note": f"{y} tax rate was {model._pct(t)}, against about 25% normally (a write-back or a "
+                                "write-down)"})
+    return out
 
 
 # ---------- ratios and defaults ----------
@@ -271,9 +333,12 @@ def defaults(hist, years=3, exclude=(), labels_=None):
     g = [r[i]["adv_growth"] for i in w if r[i]["adv_growth"] is not None]
     last = hist[-1]
     bank = last.get("cet1") is not None
+    nim = ros(pairs(lambda i: hist[i]["nii"], avg_a))
+    if _nim_falling(r, w):
+        nim = r[w[-1]]["nim"]
     return {
         "adv_growth": statistics.median(g) if g else 0.0,
-        "nim": ros(pairs(lambda i: hist[i]["nii"], avg_a)),
+        "nim": nim,
         "oi_pct": ros(pairs(lambda i: hist[i]["other_income"], avg_a)),
         "cost_income": ros([(hist[i]["opex"], hist[i]["total_income"]) for i in full]),
         "credit_cost": ros([(hist[i]["provisions"] or 0.0, avg_adv(i)) for i in full]),
@@ -281,11 +346,28 @@ def defaults(hist, years=3, exclude=(), labels_=None):
         "payout": ros(pairs(lambda i: hist[i]["dividend"] or 0.0, lambda i: hist[i]["pat"] if hist[i]["pat"] > 0 else 0)),
         "adv_assets": last["advances"] / last["total_assets"],
         # CET1 capital ~ net worth (ponytail: it is net worth less intangibles and deductions, so this density is
-        # an effective one that makes the first projected ratio read the reported CET1); NBFC: loans at 100% weight
+        # an effective one that makes the first projected ratio read the reported CET1; where the bank files total
+        # CRAR in the CET1 field, the forecast ratio and the floor read on that CRAR-like basis); NBFC: loans at 100%
         "rwa_density": last["equity"] / (last["cet1"] * last["total_assets"]) if bank
         else last["advances"] / last["total_assets"],
         "cet1_min": CET1_FLOOR[0] if bank else CET1_FLOOR[1],
     }
+
+
+def _nim_falling(r, w):
+    """NIM in the window's last year down by the forensic low tier (NIM_DOWN) or more against its first: the 3-year
+    mean would lift NIM back up at once, against the compression flag, so the default holds the last year's."""
+    xs = [r[i]["nim"] for i in w[-3:]]
+    return len(xs) == 3 and None not in xs and xs[0] - xs[-1] >= NIM_DOWN[2] - 1e-12
+
+
+def default_notes(hist, exclude=(), labels_=None):
+    """Where a default isn't the usual rule's: {driver: words} for the Forecast page (NIM held at a falling last year)."""
+    keep = [i for i in range(1, len(hist)) if not labels_ or labels_[i] not in exclude]
+    w = keep[-3:] or list(range(1, len(hist)))
+    if not _nim_falling(ratios(hist), w):
+        return {}
+    return {"nim": f"{labels_[w[-1]] if labels_ else 'last year'} (NIM falling)"}
 
 
 # ---------- projection ----------
@@ -519,7 +601,10 @@ def forensic(hist, labels_, notes=None):
             f"Credit cost {pc(b)} in {y1} (median {pc(med)})",
             f"Provisions ran at {pc(b)} of average advances in {y1}, against a median of {pc(med)} in the three years "
             "before.", rule)
-    # NIM compression, and the yield / cost-of-funds spread behind it
+    # NIM compression, and the yield / cost-of-funds spread behind it; a merger year's average assets start from the
+    # pre-merger book, so it isn't a base: the year after it is
+    merged = merger_years(hist, labels_)
+    base = lambda xs: (xs[-2], f"; {xs[-3][0]} merger year skipped") if xs[-3][0] in merged else (xs[-3], "")  # noqa: E731
     nims = [(labels_[i], x["nim"]) for i, x in enumerate(r) if x["nim"] is not None]
     rule = (f"NIM (NII / average assets) against 2 years before: down {NIM_DOWN[2] * 1e4:.0f} bps low, "
             f"{NIM_DOWN[1] * 1e4:.0f} medium, {NIM_DOWN[0] * 1e4:.0f} high")
@@ -527,9 +612,9 @@ def forensic(hist, labels_, notes=None):
         add("nim", "NIM compression", "not_checked", None, None, [x for x, _ in nims], "Needs 4 years",
             "Needs four reported years (NIM uses average assets).", rule)
     else:
-        (y0, a), (y1, b) = nims[-3], nims[-1]
+        ((y0, a), skip), (y1, b) = base(nims), nims[-1]
         add("nim", "NIM compression", model._sev(a - b, NIM_DOWN), b, None, [x for x, _ in nims[-3:]],
-            f"NIM {pc(b)} in {y1} ({bps(b - a)} vs {y0})",
+            f"NIM {pc(b)} in {y1} ({bps(b - a)} vs {y0}{skip})",
             f"NII was {pc(b)} of average assets in {y1}, against {pc(a)} in {y0}.", rule)
     sp = [(labels_[i], x["yield"] - x["cof"]) for i, x in enumerate(r) if x["yield"] is not None and x["cof"] is not None]
     rule = (f"Yield on assets less cost of funds (interest expended / average deposits + borrowings), against 2 years "
@@ -538,10 +623,10 @@ def forensic(hist, labels_, notes=None):
         add("spread", "Yield vs cost of funds", "not_checked", None, None, [x for x, _ in sp], "Needs 4 years",
             "Needs four reported years with interest expended.", rule)
     else:
-        (y0, a), (y1, b) = sp[-3], sp[-1]
+        ((y0, a), skip), (y1, b) = base(sp), sp[-1]
         i1, i0 = len(r) - 1, labels_.index(y0)
         add("spread", "Yield vs cost of funds", model._sev(a - b, SPREAD_DOWN), b, None, [x for x, _ in sp[-3:]],
-            f"Spread {pc(b)} in {y1} ({bps(b - a)} vs {y0})",
+            f"Spread {pc(b)} in {y1} ({bps(b - a)} vs {y0}{skip})",
             f"Yield on assets {pc(r[i1]['yield'])} against cost of funds {pc(r[i1]['cof'])} in {y1}; "
             f"{pc(r[i0]['yield'])} against {pc(r[i0]['cof'])} in {y0}.", rule)
     # loans outrunning deposits (banks)
@@ -555,16 +640,17 @@ def forensic(hist, labels_, notes=None):
             f"Credit-deposit ratio {pc(cd)} in {y}",
             f"Advances were {pc(cd)} of deposits in {y}.", rule)
     # capital
-    rule = f"CET1 ratio: under {pc(CET1_LOW[2])} low, {pc(CET1_LOW[1])} medium, {pc(CET1_LOW[0])} high (RBI minimum 8% incl. buffer)"
+    rule = (f"CET1 ratio as filed: under {pc(CET1_LOW[2])} low, {pc(CET1_LOW[1])} medium, {pc(CET1_LOW[0])} high (RBI "
+            "minimum 8% incl. buffer). Some banks (HDFC Bank, Kotak) file total CRAR in this field, which reads higher")
     if last.get("cet1") is None:
         add("capital", "Thin capital", "not_checked", None, None, [], "CET1 not filed",
             "Banks file CET1 in their results; NBFCs file capital adequacy (CRAR) only in the annual report, which isn't read for it yet.", rule)
     else:
         c1 = last["cet1"]
-        add("capital", "Thin capital", model._sev(c1, CET1_LOW, below=True), c1, CET1_LOW[1], [y], f"CET1 {pc(c1)} in {y}",
-            f"Common equity was {pc(c1)} of risk-weighted assets in {y}"
-            + (f"; AT1 bonds add {pc(last['at1'])} (they can be written down, as Yes Bank's were in 2020)." if last.get("at1")
-               else "."), rule)
+        add("capital", "Thin capital", model._sev(c1, CET1_LOW, below=True), c1, CET1_LOW[1], [y],
+            f"CET1 / CRAR {pc(c1)} in {y}",
+            f"The capital ratio filed as CET1 was {pc(c1)} of risk-weighted assets in {y}; some banks file total CRAR "
+            "there, so the core-equity ratio can be lower.", rule)
     # earnings mix
     rule = f"Fee & other income / net total income: above {OI_SHARE[1]:.0%} medium, {OI_SHARE[0]:.0%} high"
     s = last["other_income"] / last["total_income"] if last["total_income"] > 0 else None
@@ -609,7 +695,8 @@ PEERS = (  # key, label, kind, direction (model.PEERS)
     ("mcap", "Market cap, Rs crore", "num", 1), ("pb", "P/B", "x", -1), ("pe", "P/E", "x", -1),
     ("advances", "Advances, Rs crore", "num", 1), ("g3", "Loan growth, 3 years", "pct", 1),
     ("nim", "NIM", "pct", 1), ("cost_income", "Cost-to-income", "pct", -1), ("credit_cost", "Credit cost", "pct", -1),
-    ("roa", "RoA", "pct", 1), ("roe", "RoE", "pct", 1), ("gnpa_pct", "GNPA %", "pct", -1), ("cet1", "CET1", "pct", 1),
+    ("roa", "RoA", "pct", 1), ("roe", "RoE", "pct", 1), ("gnpa_pct", "GNPA %", "pct", -1),
+    ("cet1", "CET1 / CRAR (as filed)", "pct", 1),
 )
 
 

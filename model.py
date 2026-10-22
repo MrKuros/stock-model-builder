@@ -542,7 +542,9 @@ def parse_xbrl(file, mappings=None, company=None):
             nature = nature or text.lower()
         elif tag in LEASE_DESC:
             desc[cid] = text
-        elif e.get("unitRef") and e.get("{http://www.w3.org/2001/XMLSchema-instance}nil") != "true":
+        # the older banking format files PercentageOfNpa (and some other ratios) with no unitRef: kept for a ratio tag
+        elif ((e.get("unitRef") or tags.get(tag) in LENDER_RATIOS)
+              and e.get("{http://www.w3.org/2001/XMLSchema-instance}nil") != "true"):
             try:
                 v = float(text)
                 if not math.isfinite(v):
@@ -550,7 +552,7 @@ def parse_xbrl(file, mappings=None, company=None):
             except ValueError:
                 check(f"{tag} is a number", False, f"{text[:40]!r} in context {cid} isn't a number; skipped")
                 continue
-            nums.append((tag, cid, v, e.get("unitRef")))
+            nums.append((tag, cid, v, e.get("unitRef") or ""))
 
     consolidated = (not nature.startswith(("standalone", "non"))) if nature else None
     if consolidated is None and any(c["basis"] is not None for c in ctx.values()):

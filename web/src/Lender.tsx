@@ -48,7 +48,7 @@ export function lenderWords(parsed: Parsed, projection: Projection | null): { an
     : <>{at} is within the bear–bull fair-value range ({V(bear!)}–{V(bull!)}); {g} to base-case {V(value)}.</>
   const r = parsed.ratios[parsed.ratios.length - 1]?.roe ?? null, end = projection!.years[projection!.years.length - 1]
   const second = v.implied_roe == null ? null
-    : <> Market-implied steady-state <T k="roe_l" /> {pc(v.implied_roe)} vs {pc(sv.roe_t)} in our base case ({fy(end)}){r != null ? <> and {pc(r)} reported in {fy(parsed.years[parsed.years.length - 1])}</> : null}.</>
+    : <> Market-implied <T k="roe_ss">steady-state RoE</T> {pc(v.implied_roe)} vs {pc(sv.roe_t)} in our base case ({fy(end)} PAT on opening book){r != null ? <> and {pc(r)} reported <T k="roe_l" /> in {fy(parsed.years[parsed.years.length - 1])}</> : null}.</>
   return { answer: <>{first}{second}</>, fix: null }
 }
 
@@ -94,7 +94,7 @@ export function LenderValuationPage({ parsed, doc, setDoc, projection }: Props) 
           <div className="table-wrap" tabIndex={0} role="region" aria-label="Fair value by scenario">
             <table className="val-table">
               <thead><tr><th scope="col">Scenario</th><th scope="col">FV/share (Rs)</th><th scope="col">Upside/(downside)</th>
-                <th scope="col">Steady-state <T k="roe_l" /></th><th scope="col"><T k="jpb" /></th><th scope="col">P/B at FV</th></tr></thead>
+                <th scope="col"><T k="roe_ss" /></th><th scope="col"><T k="jpb" /></th><th scope="col">P/B at FV</th></tr></thead>
               <tbody>{ORDER.map(s => {
                 const x = v.scenarios[s]
                 return <tr key={s} className={s === active ? 'is-active' : undefined}><th scope="row">{NAMES[s]}</th>
@@ -198,25 +198,26 @@ export function LenderImpliedPage({ parsed, doc, projection }: Omit<Props, 'setD
   const answer: ReactNode = !v ? 'Running the valuation…'
     : value == null || value <= 0 ? lenderWords(parsed, projection).answer
     : price == null || v.implied_roe == null ? <>No CMP, so nothing to solve for.</>
-    : <><T k="cmp" /> {P} at {xx(v.pb)} <T k="pb" /> implies a steady-state <T k="roe_l" /> of <b className="num mkt">{pc(v.implied_roe)}</b> at Ke {pc(v.ke)} and
-      g {pc(v.g)}, vs {pc(sv!.roe_t)} in our base case ({end}){last != null ? <> and {pc(last)} reported ({fy(parsed.years[parsed.years.length - 1])})</> : null}.
+    : <><T k="cmp" /> {P} at {xx(v.pb)} <T k="pb" /> implies a <T k="roe_ss">steady-state RoE</T> of <b className="num mkt">{pc(v.implied_roe)}</b> at Ke {pc(v.ke)} and
+      g {pc(v.g)}, vs {pc(sv!.roe_t)} in our base case ({end} PAT on opening book){last != null ? <> and {pc(last)} reported <T k="roe_l" /> on average book ({fy(parsed.years[parsed.years.length - 1])})</> : null}.
       {v.implied_ke != null && <> At our base-case RoE the price implies a Ke of {pc(v.implied_ke)}.</>}</>
   const imp = v?.note?.impact ?? []
   return (
     <>
       <PageHead label="Analysis · Implied RoE" title="Implied RoE"
-        purpose={<>Implied expectations for a lender: the steady-state <T k="roe_l" /> at which the justified P/B, (RoE − g) ÷ (Ke − g), equals P/B
+        purpose={<>Implied expectations for a lender: the <T k="roe_ss">steady-state RoE</T> at which the justified P/B, (RoE − g) ÷ (Ke − g), equals P/B
           at CMP. The reverse DCF’s counterpart; fair value is on <a href={href('valuation')}>Valuation</a>.</>}
         answer={answer} />
       {v && value != null && value > 0 && price != null && v.implied_roe != null && <>
         <section className="blk" aria-labelledby="ir-h">
           <h2 id="ir-h">RoE: implied vs ours vs reported</h2>
-          <Bars rows={[['Implied by CMP', v.implied_roe, 'mkt'], [`Base case ${end}`, sv!.roe_t ?? 0, 'ink'],
-            ...(last != null ? [[`Reported ${fy(parsed.years[parsed.years.length - 1])}`, last, 'ink'] as const] : []),
-            ...(med3 != null && roe.length >= 3 ? [['Median, last 3 yrs', med3, 'ink'] as const] : [])]} />
+          <Bars rows={[['Implied by CMP', v.implied_roe, 'mkt'], ['Base case (steady state)', sv!.roe_t ?? 0, 'ink'],
+            ...(last != null ? [[`Reported ${fy(parsed.years[parsed.years.length - 1])} (avg book)`, last, 'ink'] as const] : []),
+            ...(med3 != null && roe.length >= 3 ? [['Median, last 3 yrs (avg book)', med3, 'ink'] as const] : [])]} />
           <p className="small muted">{v.implied_roe > (sv!.roe_t ?? 0) + 0.02 ? 'The price needs a markedly higher RoE than the base case delivers.'
             : v.implied_roe < (sv!.roe_t ?? 0) - 0.02 ? 'The price needs less RoE than the base case delivers.' : 'The price and the base case roughly agree on RoE.'}
-            {' '}Single-stage: it reads today’s book at a steady RoE; growth before the steady state is on Valuation.</p>
+            {' '}Single-stage: it reads today’s book at a steady RoE; growth before the steady state is on Valuation. Steady-state RoE is on
+            opening book, so it runs above the forecast and reported RoE on average book by about half the book growth.</p>
         </section>
         {v.note?.roe_scale && <section className="blk" aria-labelledby="sc-h">
           <h2 id="sc-h">Fair value at a steady RoE</h2>
@@ -284,9 +285,9 @@ export function LenderFinancials({ parsed }: { parsed: Parsed }) {
       says: gnpa.some(fin) ? <><T k="gnpa" /> and <T k="nnpa" /> % of advances; <T k="pcr" /> {pc(pcr[n - 1])}.</>
         : <>No GNPA in the XBRL results for this lender (NBFCs don’t file it there); the annual report has it.</>,
       chart: <Plot years={years} kind="lines" lines={[{ v: gnpa, name: 'GNPA' }, { v: nnpa, cls: 'alt', name: 'NNPA' }]} show={pc} label="GNPA and NNPA % by year" /> },
-    { id: 'capital', title: 'Capital (CET1) and net worth', big: cet1[n - 1] != null ? pc(cet1[n - 1]) : `Rs ${money(eq[n - 1])} cr`, to: st('balance-sheet', 'equity'), table: 'Balance sheet', lit: lit('capital'),
+    { id: 'capital', title: 'Capital (CET1 / CRAR as filed) and net worth', big: cet1[n - 1] != null ? pc(cet1[n - 1]) : `Rs ${money(eq[n - 1])} cr`, to: st('balance-sheet', 'equity'), table: 'Balance sheet', lit: lit('capital'),
       says: cet1.some(fin) ? <><T k="cet1" /> as filed; net worth Rs {money(eq[n - 1])} cr.</> : <>No CET1 in the XBRL results; net worth Rs {money(eq[n - 1])} cr ({pc(rc('equity_assets')[n - 1])} of assets).</>,
-      chart: cet1.some(fin) ? <Plot years={years} kind="lines" lines={[{ v: cet1 }]} show={pc} label="CET1 by year" />
+      chart: cet1.some(fin) ? <Plot years={years} kind="lines" lines={[{ v: cet1 }]} show={pc} label="CET1 / CRAR as filed, by year" />
         : <Plot years={years} kind="bars" lines={[{ v: eq }]} show={money} label="Net worth by year, Rs cr" /> },
   ]
   const growthRows: [ReactNode, (number | null)[]][] = [['Advances', adv], ['Deposits', dep], [<T k="nii" key="n" />, nii], [<T k="pat" key="p" />, pat], ['Net worth', eq]]
@@ -400,16 +401,13 @@ export function ImpliedCard({ parsed, projection }: { parsed: Parsed; projection
     <article className="acard" aria-labelledby="q2">
       <h2 id="q2">Implied RoE</h2>
       {!v || sv?.per_share == null || v.price == null || v.implied_roe == null ? <p className="serif">No fair value or no CMP, so nothing to solve for.</p> : <>
-        <p className="serif">CMP at {xx(v.pb)} P/B implies a steady-state RoE of {pc(v.implied_roe)} (Ke {pc(v.ke)}, g {pc(v.g)}).</p>
-        <Bars rows={[['Implied', v.implied_roe, 'mkt'], ['Base case', sv.roe_t ?? 0, 'ink'], ...(last != null ? [['Last reported', last, 'ink'] as const] : [])]} />
+        <p className="serif">CMP at {xx(v.pb)} P/B implies a <T k="roe_ss">steady-state RoE</T> of {pc(v.implied_roe)} (Ke {pc(v.ke)}, g {pc(v.g)}).</p>
+        <Bars rows={[['Implied', v.implied_roe, 'mkt'], ['Base case (steady state)', sv.roe_t ?? 0, 'ink'], ...(last != null ? [['Last reported (avg book)', last, 'ink'] as const] : [])]} />
       </>}
       <a className="go" href={href('reverse-dcf')}>Implied expectations</a>
     </article>
   )
 }
-
-/** Summary's quick sensitivity for a lender is the drivers that move value most; edited on Forecast. */
-export const LENDER_TRY: [string, string][] = [['adv_growth', 'Loan growth'], ['credit_cost', 'Credit cost']]
 
 /** Forecast output for a lender: advances, PAT and the RoE path, and the equity raised to hold the floor. */
 export function LenderReadout({ parsed, projection, active, n }: { parsed: Parsed; projection: Projection | null; active: Scenario; n: number }) {

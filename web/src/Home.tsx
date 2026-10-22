@@ -221,7 +221,7 @@ function AutoChecks() {
   return (
     <p className="small muted auto-line">
       <span>Scheduled checks {a.enabled ? 'on' : 'off'}{a.running ? ': checking now…'
-        : l ? <>: last {clock(l.done_at)}, {l.new.length ? <>new results for {l.new.map((r, i) => <span key={r.id}>{i ? ', ' : ''}<a href={pathOf(slugOf(r.id), 'tracking')}>{properName(r.company)}</a></span>)}</> : 'nothing new'}{l.failed ? `, ${l.failed} couldn’t be reached` : ''}{a.next_at ? `; next ${clock(a.next_at)}` : ''}</>
+        : l ? <>: last {clock(l.done_at)}, {l.new.length ? <>new results for {l.new.map((r, i) => <span key={r.id}>{i ? ', ' : ''}<a href={pathOf(slugOf(r.id), 'tracking')}>{properName(r.company)}</a></span>)}</> : 'nothing new'}{l.failed < 0 ? ', the run stopped early' : l.failed ? `, ${l.failed} couldn’t be reached` : ''}{a.next_at ? `; next ${clock(a.next_at)}` : ''}</>
         : a.enabled ? ': first run shortly after the app starts' : ''}.</span>{' '}
       <button type="button" className="link" onClick={flip} aria-describedby="auto-why">{a.enabled ? 'Turn off' : 'Turn on'}</button>
       <span id="auto-why" className="sr"> Checks NSE once a day for prices and new results, adds them and keeps your assumptions.</span>

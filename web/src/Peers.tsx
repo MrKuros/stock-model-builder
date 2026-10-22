@@ -273,8 +273,8 @@ function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; sho
       </table>
     </div>
     {lender ? <p className="small-note">Lenders: each bank’s or NBFC’s standalone NSE results filings (XBRL, by rules). P/B and P/E at NSE prices
-      {' '}{ago(at)}; {short} at this model’s CMP. NIM on average total assets; credit cost on average advances. GNPA and CET1 as filed by banks
-      (NBFCs don’t file them in XBRL: blank).</p>
+      {' '}{ago(at)}; {short} at this model’s CMP. NIM on average total assets; credit cost on average advances. GNPA and the capital ratio as filed by banks
+      (NBFCs don’t file them in XBRL: blank); some banks file total CRAR in the CET1 field, so that column compares only roughly.</p>
     : <p className="small-note">Financials from each company’s NSE results filings (XBRL, by rules); older years from an Excel export of
       that company when available (hover a name for sources). Market cap and multiples at NSE prices {ago(at)}; {short} at this model’s CMP.
       Growth: revenue CAGR. ROCE = EBIT ÷ average capital employed. Cash conversion = CFO ÷ PAT, 3 years. EV = market cap + borrowings − cash −
@@ -294,7 +294,7 @@ const PLAIN: Record<string, [string, string]> = {
   nd_ebitda: ['Net debt/EBITDA', '↓ safer'],
   advances: ['Advances, Rs cr', '↑ larger'], nim: ['NIM', '↑ better'], cost_income: ['Cost-to-income', '↓ better'],
   credit_cost: ['Credit cost', '↓ better'], roa: ['RoA', '↑ better'], roe: ['RoE', '↑ better'], gnpa_pct: ['GNPA', '↓ better'],
-  cet1: ['CET1', '↑ stronger'],
+  cet1: ['CET1 / CRAR', '↑ stronger'],
 }
 
 /** Why these peers: when and how the set was approved, then the reason per pick (the AI's, with its basis, or yours). */

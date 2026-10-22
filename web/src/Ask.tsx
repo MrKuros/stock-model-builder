@@ -4,14 +4,14 @@ import { inputName } from './Model'
 import { path } from './Draft'
 import { Next, PageHead, Sheet } from './Shell'
 import { navigate, useHref } from './route'
-import { DOC_KINDS, NAMES, api, isAnnual, postJson, when, type Check, type DocKind, type Drafted, type Kind, type ModelDoc, type Parsed, type Proposal } from './lib'
+import { docLabel, NAMES, api, isAnnual, postJson, when, type Check, type DocKind, type Drafted, type Kind, type ModelDoc, type Parsed, type Proposal } from './lib'
 import { isLender } from './Lender'
 
 /** A page of an attached document: what the answer cites, or a page the rules picked. */
-interface Cite { report: string; file: string; year: string; kind: DocKind; page: number; quote?: string }
+interface Cite { report: string; file: string; year: string; kind: DocKind; date?: string | null; page: number; quote?: string }
 interface Hit extends Cite { score: number; snippet: string }
 export interface Answer {
-  id: string; question: string; status: 'answered' | 'failed' | 'not_found'; answer: string | null; citations: Cite[]
+  id: string; question: string; status: 'answered' | 'partial' | 'failed' | 'not_found'; answer: string | null; citations: Cite[]
   checks: Check[]; rounds: number; asked_at: string; pages: Cite[]; proposal: Proposal | null
 }
 interface Reply { hits: Hit[]; answer: Answer | null; message: string; missing: string[] }
@@ -34,8 +34,9 @@ const SUGGESTED_LENDER: [string, string][] = [
   ['Risks', 'Which risks and headwinds does management call out?'],
 ]
 
-const docName = (c: { year: string; kind?: DocKind }) => `${c.year} ${DOC_KINDS[c.kind ?? 'annual'].toLowerCase()}`
-const STATUS = { answered: 'Answered from the filings', failed: 'Couldn’t answer from the filings', not_found: 'Couldn’t answer from the filings' }
+const docName = docLabel
+const STATUS = { answered: 'Answered from the filings', partial: 'Partly answered from the filings', failed: 'Couldn’t answer from the filings', not_found: 'Couldn’t answer from the filings' }
+const shown = (a: Answer) => a.status === 'answered' || a.status === 'partial'
 
 /** The company's saved answers, newest first; `add` puts a new one on top. */
 export function useAnswers(slug: string) {
@@ -82,8 +83,8 @@ export default function AskPage({ parsed, doc, setDoc, slug }: Props) {
         <h2 id="asked-h">Asked before <span className="small dim">({list.length})</span></h2>
         <ul className="ask-list">{list.map(a => <li key={a.id}>
           <details>
-            <summary><span className="aq">{a.question}</span> <span className={`small ${a.status === 'answered' ? 'muted' : 'bad'}`}>
-              {a.status === 'answered' ? `${a.citations.length} citation${a.citations.length === 1 ? '' : 's'}` : 'not answered'} · {when(a.asked_at)}</span></summary>
+            <summary><span className="aq">{a.question}</span> <span className={`small ${shown(a) ? 'muted' : 'bad'}`}>
+              {shown(a) ? `${a.status === 'partial' ? 'partly answered · ' : ''}${a.citations.length} citation${a.citations.length === 1 ? '' : 's'}` : 'not answered'} · {when(a.asked_at)}</span></summary>
             <AnswerCard a={a} doc={doc} setDoc={setDoc} onOpen={setOpen} onDelete={() => answers.remove(a)} />
           </details></li>)}</ul>
       </section>}
@@ -186,13 +187,15 @@ function AnswerCard({ a, doc, setDoc, onOpen, onDelete }: {
     <article className={`ask-card${a.status === 'answered' ? '' : ' is-bad'}`} aria-label={`Answer: ${a.question}`}>
       <p className="label">{STATUS[a.status]} <span className="ai-tag">AI reads · rules check</span></p>
       {!onDelete && <p className="aq-h">{a.question}</p>}
-      {a.status === 'answered' ? <p className="serif ans">{a.answer}</p>
+      {shown(a) ? <p className="serif ans">{a.answer}</p>
         : <p className="small">{a.status === 'not_found' ? 'The best-matching pages don’t answer this. Try narrower words, or attach the document that would.'
           : <>The answer failed the rules twice{failed ? `: ${failed.detail}` : ''} It isn’t shown as an answer.</>}</p>}
-      {a.status === 'answered' && <ol className="ask-cites">{a.citations.map((c, i) => <li key={i}>
+      {a.status === 'partial' && <p className="small">Not all of it is on the {a.pages.length} pages read: try other words, or attach the
+        document that would answer the rest.</p>}
+      {shown(a) && <ol className="ask-cites">{a.citations.map((c, i) => <li key={i}>
         <button type="button" className="link" onClick={() => onOpen(c)} aria-label={`Open ${docName(c)} page ${c.page}`}>{docName(c)}, p.{c.page}</button>
         {c.quote && <q className="quote">{c.quote}</q>}</li>)}</ol>}
-      {a.status === 'answered' && a.proposal && <Driver p={a.proposal} doc={doc} setDoc={setDoc} toForecast={href('forecast', 'draft')} />}
+      {shown(a) && a.proposal && <Driver p={a.proposal} doc={doc} setDoc={setDoc} toForecast={href('forecast', 'draft')} />}
       <div className="ask-foot small">
         {a.checks.length > 0 && <details><summary>{failed ? <span className="bad-t">✗ {failed.name}</span> : <span className="ok-t">✓ {passed} rule checks passed</span>}
           {a.rounds > 1 ? ' on the retry' : ''}</summary><Checks checks={a.checks} /></details>}

@@ -363,9 +363,9 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
       const since = company.source?.fetched_at ?? doc.saved_at
       const scored = latestScored(tracking)
       const qt = proj?.quarter
-      const qline = qt && quarterWords({ ...qt, rev: qt.lines.find(l => l.key === 'revenue')?.gap ?? null, pat: qt.lines.find(l => l.key === 'pat')?.gap ?? null })
+      const qline = qt && quarterWords({ ...qt, rev: qt.lines.find(l => l.key === 'revenue')?.gap ?? null, pat: qt.lines.find(l => l.key === 'pat')?.gap ?? null, lines: qt.lines })
       page = <>
-        <PageHead label="Analysis · Results tracking" title="Results tracking" purpose="Reported results vs this model’s forecast: quarters against the current year’s run-rate, variance by line and driver, forecast hit rate, and the effect on fair value."
+        <PageHead label="Analysis · Results tracking" title="Results tracking" purpose={`Reported results vs this model’s forecast: quarters against the current year’s run-rate, variance by line and driver${scored ? ', forecast hit rate, and the effect on fair value' : ''}.`}
           answer={scored ? <><Changed doc={doc} setDoc={setDoc} projection={proj} answerOnly />{qline ? ` ${qline}.` : ''}</>
             : qline ? <>{qline}.</>
             : <>No new results since the model was built{since ? ` (${when(since).replace(/ \d{4}$/, '')})` : ''}. Latest filed: {lastQ ? qfy(lastQ) : fy(histYears[nHist - 1])}.</>} />

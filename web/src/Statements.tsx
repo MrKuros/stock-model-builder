@@ -80,7 +80,7 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
           year these are split as filed.</p>}
         {tab === 'RATIOS' && lender && <p className="muted small">
           NIM, fee income and the RoA tree on average total assets; credit cost on average advances; cost of funds on average deposits and
-          borrowings. CET1 (forecast) = net worth ÷ RWA, with equity raised at year end below the floor. GNPA, NNPA and CET1 as filed by the
+          borrowings. CET1 (forecast) = net worth ÷ RWA, with equity raised at year end below the floor. GNPA, NNPA and CET1 (or the CRAR some banks file in its place) as filed by the
           bank (not filed by NBFCs in XBRL). Excel-export years hold provisions inside operating expenses. – means not available.</p>}
         {tab === 'RATIOS' && !lender && (
           <p className="muted small">

@@ -3,7 +3,7 @@ import { Checks } from './Sources'
 import { inputName } from './Model'
 import type { AiStatus as Ai } from './Sources'
 import {
-  NAMES, api, DOC_KINDS, fmt, isAnnual, postJson, SCENARIOS, type Drafted, type Kind, type ModelDoc, type Parsed, type Path,
+  NAMES, api, DOC_KINDS, docLabel, fmt, postJson, SCENARIOS, type Drafted, type Kind, type ModelDoc, type Parsed, type Path,
   type Proposal, type Scenario,
 } from './lib'
 
@@ -16,7 +16,7 @@ export const path = (p: Path | undefined, kind: Kind) => (p == null ? '–' : p.
   ? `${fmt(p.start, kind)} → ${fmt(p.end, kind)}` : fmt(p.start, kind))
 const docName = (doc: ModelDoc, p: Proposal) => {
   const r = doc.reports.find(x => x.id === p.report)
-  return r ? `${r.year} ${isAnnual(r) ? 'annual report' : DOC_KINDS[r.kind ?? 'annual'].toLowerCase()}` : p.source.file ?? 'a document'
+  return r ? docLabel(r) : p.source.file ?? 'a document'
 }
 /** The latest draft: its proposals, one per driver. */
 export const latest = (doc: ModelDoc) => {

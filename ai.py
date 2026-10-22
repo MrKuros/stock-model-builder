@@ -45,9 +45,19 @@ def llm(prompt: str) -> str:
     return r.stdout
 
 
+def _finite(x):
+    """parse_constant / parse_float for replies: NaN, Infinity and 1e999 aren't numbers a page prints (and can't be
+    saved or served as JSON)."""
+    v = float(x)
+    if not math.isfinite(v):
+        raise ValueError(f"{x} is not a number")
+    return v
+
+
 def first_json(text):
-    """The first JSON object or array in a reply (models wrap JSON in prose or code fences); ValueError if none."""
-    dec = json.JSONDecoder()
+    """The first JSON object or array in a reply (models wrap JSON in prose or code fences); ValueError if none.
+    A reply with NaN or Infinity in it has no usable JSON."""
+    dec = json.JSONDecoder(parse_constant=_finite, parse_float=_finite)
     for i, ch in enumerate(text):
         if ch in "[{":
             try:
@@ -320,8 +330,8 @@ TOPICS = {
                   "demerged or moved into a joint venture, or is held for sale or shown as a discontinued operation: its "
                   "revenue from operations for the year (an item whose label starts with \"Revenue\") and, if printed, "
                   "its EBITDA or operating profit before depreciation (an item whose label starts with \"EBITDA\"), and, if "
-                  "the report prints them for the business at the year end, its total assets (label starts with "
-                  "\"Assets\") and its borrowings (label starts with \"Borrowings\"); after the word, name the business and what happened to it, e.g. \"Revenue: XYZ Ltd, moved into a joint venture\"",
+                  "the report prints them for the business at the year end, its net block or property, plant and equipment "
+                  "(label starts with \"Net block\"; not its total assets) and its borrowings (label starts with \"Borrowings\"); after the word, name the business and what happened to it, e.g. \"Revenue: XYZ Ltd, moved into a joint venture\"",
                   (("discontinued operation", 4), ("deconsolidat", 4), ("held for sale", 4), ("loss of control", 4),
                    ("demerger", 4), ("slump sale", 4), ("ceased to be a subsidiary", 4), ("disposal of", 3),
                    ("divestment", 3), ("joint venture", 1))),
@@ -1242,6 +1252,17 @@ _ASK_STOP = _STOP | set("how why the and for are was were has had does did its o
                         "company management what's give tell said says about".split())
 
 
+# ponytail: a hand-kept list of analyst synonyms, applied to the question only; not stemming or embeddings
+SYNONYMS = {"headcount": ("employee",), "workforce": ("employee",), "staff": ("employee",), "attrition": ("turnover",),
+            "tcv": ("deal", "order"), "capex": ("expenditure",), "guidance": ("outlook",)}
+
+
+def question_terms(question):
+    """terms() of a question, with SYNONYMS added (a 'headcount' question finds the page that says 'Employees')."""
+    q = terms(question)
+    return q + [x for w in q for x in SYNONYMS.get(w, ())]
+
+
 def terms(text):
     """Search terms: lower-case words and numbers (norm), stop words out, a plural's trailing s dropped.
     ponytail: no stemming past plurals; "margins" finds "margin" but "expanding" doesn't find "expansion"."""
@@ -1256,7 +1277,7 @@ def terms(text):
 def search_pages(docs, question, k=ASK_PAGES):
     """docs [(label, pages)] -> [(score, label, page number)], best first: BM25 over every page of every document.
     A page must hold at least one of the question's terms."""
-    q = set(terms(question))
+    q = set(question_terms(question))
     if not q:
         return []
     rows = []
@@ -1280,7 +1301,7 @@ def search_pages(docs, question, k=ASK_PAGES):
 
 def snippet(text, question, width=260):
     """The line of a page holding most of the question's terms, with its neighbours, cut to `width` characters."""
-    q = set(terms(question))
+    q = set(question_terms(question))
     lines = [x.strip() for x in text.splitlines() if x.strip()]
     if not lines:
         return ""
@@ -1304,9 +1325,10 @@ def ask_prompt(name, question, pages, drivers=(), why=None):
             "the direct answer first. Write every figure exactly as it is printed on a page you cite (same number, same "
             "unit); don't convert or compute. Cite every page you rely on, each with a quote of 5 to 60 words copied "
             "character for character from that page. If the pages don't answer the question, set \"answer\" to null "
-            "and \"citations\" to []. Don't say whether to buy or sell." + drv + "\n"
-            'Answer as a JSON object: {"answer": "...", "citations": [{"doc": "D1", "page": 12, "quote": "..."}], '
-            '"driver": null}.' + (f"\n\nYour previous answer failed these checks:\n{why}\nAnswer again." if why else ""))
+            "and \"citations\" to []. Set \"complete\" to false when the pages answer only part of the question (say "
+            "which part they don't), else true. Don't say whether to buy or sell." + drv + "\n"
+            'Answer as a JSON object: {"answer": "...", "complete": true, "citations": [{"doc": "D1", "page": 12, '
+            '"quote": "..."}], "driver": null}.' + (f"\n\nYour previous answer failed these checks:\n{why}\nAnswer again." if why else ""))
 
 
 def _ask_shape(v):
@@ -1318,6 +1340,8 @@ def _ask_shape(v):
         return 'each citation must be {"doc": "D1", "page": number, "quote": string}'
     if isinstance(v.get("answer"), str) and v["answer"].strip() and not cs:
         return "an answer needs at least one citation"
+    if not isinstance(v.get("complete", True), bool):
+        return '"complete" must be true or false'
     d = v.get("driver")
     if d is not None and not (isinstance(d, dict) and isinstance(d.get("key"), str) and isinstance(d.get("value"), (int, float))
                               and not isinstance(d.get("value"), bool) and isinstance(d.get("citation"), int)):
