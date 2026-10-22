@@ -11,7 +11,7 @@ import ValuationPage, { PricedIn } from './Valuation'
 import { PeersSection, peerWords } from './Peers'
 import { BottomBar, CHECK, Confirm, DL, Next, PageHead, PhoneTop, Rail, Scale, Sheet, Verdict, openFinder, slugOf, type Here, type RailNote } from './Shell'
 import { ago, pendingMerge, streamFetch } from './Fetch'
-import { Accuracy, Changed, latestScored, unreviewed } from './Tracking'
+import { Accuracy, Changed, QuarterCard, latestScored, quarterWords, unreviewed } from './Tracking'
 import { path } from './Draft'
 import { HrefCtx, PAGES, REPORTED, STATEMENTS, pathOf, placed, type Href, type Page, type Route } from './route'
 import type { SaveState } from './App'
@@ -348,10 +348,14 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     case 'tracking': {
       const since = company.source?.fetched_at ?? doc.saved_at
       const scored = latestScored(tracking)
+      const qt = proj?.quarter
+      const qline = qt && quarterWords({ ...qt, rev: qt.lines.find(l => l.key === 'revenue')?.gap ?? null, pat: qt.lines.find(l => l.key === 'pat')?.gap ?? null })
       page = <>
-        <PageHead label="Analysis · Results tracking" title="Results tracking" purpose="Reported results vs this model’s forecast: variance by line and driver, forecast hit rate, and the effect on fair value."
-          answer={scored ? <Changed doc={doc} setDoc={setDoc} projection={proj} answerOnly />
+        <PageHead label="Analysis · Results tracking" title="Results tracking" purpose="Reported results vs this model’s forecast: quarters against the current year’s run-rate, variance by line and driver, forecast hit rate, and the effect on fair value."
+          answer={scored ? <><Changed doc={doc} setDoc={setDoc} projection={proj} answerOnly />{qline ? ` ${qline}.` : ''}</>
+            : qline ? <>{qline}.</>
             : <>No new results since the model was built{since ? ` (${when(since).replace(/ \d{4}$/, '')})` : ''}. Latest filed: {lastQ ? qfy(lastQ) : fy(histYears[nHist - 1])}.</>} />
+        {qt && <QuarterCard q={qt} />}
         {scored
           ? <><Changed doc={doc} setDoc={setDoc} projection={proj} full />
               <section className="blk" id="by-input" tabIndex={-1}><Accuracy doc={doc} setDoc={setDoc} projection={proj} /></section>

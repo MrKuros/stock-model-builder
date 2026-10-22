@@ -2155,6 +2155,67 @@ def track(records, co):
                                          for k, (h, n) in tally.items() if n]}
 
 
+# quarterly tracking: (key, label, quarters row, tolerance). Revenue and PAT as a share of the FY E figure, EBITDA
+# margin in pp; within tolerance = in line (revenue 2%, margin 1 pp as TRACK; PAT 5%, since tax and other income swing)
+Q_TRACK = (("revenue", "Revenue", "sales", 0.02), ("ebitda_margin", "EBITDA margin", "op_profit", 0.01),
+           ("pat", "PAT", "net_profit", 0.05))
+Q_PERIOD = {1: "Q1", 2: "H1", 3: "9M", 4: "FY"}
+
+
+def quarter_track(co, proj):
+    """The quarters filed in the first forecast year against the base case's run-rate for that year, by rules: {year,
+    through, quarter, period (Q1 / H1 / 9M), quarters, basis, lines: [{key, label, ytd, need, fy, gap, yoy, fy_growth,
+    status}], status}, or None before a quarter of it is filed. The run-rate is FY E x the share of last year that
+    the same quarters made ("seasonal": revenue and PAT, when last year's quarters are filed and positive), else
+    FY E x quarters / 4 ("straight"). EBITDA margin is YTD against FY E, in pp. status: ahead / in_line / behind
+    (overall: behind when revenue or PAT is behind, ahead when one is ahead and none behind).
+    ponytail: one basis for the year (no restated quarters), and quarterly PAT is the filing's owners' share"""
+    q, hist = co.get("quarters") or {}, co["hist"]
+    ds = [_iso(d) if isinstance(d, str) else d for d in q.get("dates") or []]
+    if not proj or not ds:
+        return None
+    end, nxt = co["dates"][-1], projected_dates(co, 1)[0]
+    cur = [i for i, d in enumerate(ds) if end < d <= nxt]
+    if not cur:
+        return None
+    at = {(d.year, d.month): i for i, d in enumerate(ds)}
+    ly = [at.get((ds[i].year - 1, ds[i].month)) for i in cur]
+    rows = q.get("rows") or {}
+    total = lambda k, ix: None if any(i is None for i in ix) or any(rows.get(k, [None] * len(ds))[i] is None for i in ix)         else sum(rows[k][i] for i in ix)  # noqa: E731
+    k, f = len(cur), proj[0]
+    fy_e = {"revenue": f["revenue"], "op_profit": f["ebitda"], "pat": f["pat"]}
+    lines, basis = [], "seasonal"
+    for key, label, row, tol in Q_TRACK:
+        ytd, prev = total(row, cur), total(row, ly)
+        if key == "ebitda_margin":
+            rev = total("sales", cur)
+            m = ytd / rev if ytd is not None and rev else None
+            fm = f["ebitda"] / f["revenue"] if f["revenue"] else None
+            gap = None if m is None or fm is None else m - fm
+            lines.append({"key": key, "label": label, "ytd": m, "need": fm, "fy": fm, "gap": gap, "yoy": None,
+                          "fy_growth": None, "status": None if gap is None else
+                          "in_line" if abs(gap) <= tol + 1e-12 else "ahead" if gap > 0 else "behind"})
+            continue
+        fy_key = "revenue" if key == "revenue" else "pat"
+        last_fy = hist[-1][fy_key]
+        seasonal = prev is not None and prev > 0 and last_fy > 0
+        basis = basis if seasonal else "straight"
+        share = prev / last_fy if seasonal else k / 4
+        need = fy_e["revenue" if key == "revenue" else "pat"] * share
+        gap = ytd / need - 1 if ytd is not None and need > 0 else None
+        lines.append({"key": key, "label": label, "ytd": ytd, "need": need, "fy": need / share if share else None,
+                      "gap": gap, "yoy": ytd / prev - 1 if ytd is not None and prev and prev > 0 else None,
+                      "fy_growth": f[fy_key] / last_fy - 1 if last_fy > 0 else None,
+                      "status": None if gap is None else "in_line" if abs(gap) <= tol + 1e-12 else "ahead" if gap > 0 else "behind"})
+    st = {x["key"]: x["status"] for x in lines}
+    main = [st["revenue"], st["pat"]]
+    d = ds[cur[-1]]
+    return {"year": fy(nxt), "through": d.date().isoformat(), "quarter": f"Q{min(4, max(1, round((d - end).days / 91.3)))} {fy(nxt)}",
+            "period": Q_PERIOD.get(k, f"{k}Q"), "quarters": k, "basis": basis, "lines": lines,
+            "status": None if all(x is None for x in main) else "behind" if "behind" in main
+            else "ahead" if "ahead" in main else "in_line"}
+
+
 def track_proposals(scored, records, base, defaults, unusual=()):
     """Rules proposals after new results: for each driver the latest results missed (outside its step) where the rule
     default, now with those results in, moves your base toward what came in, by at least half a step. Never applied

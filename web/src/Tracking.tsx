@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { useHref } from './route'
 import { AiOffNote, useAi } from './Sources'
 import {
-  NAMES, SCENARIOS, api, fmt, fy, money, postJson, rs, when,
-  type ModelDoc, type Projection, type Scenario, type ThesisNote, type Tracking, type TrackProposal,
+  NAMES, SCENARIOS, api, fmt, fy, money, postJson, qfy, rs, when,
+  type ModelDoc, type Projection, type QStatus, type QuarterTrack, type Scenario, type ThesisNote, type Tracking, type TrackProposal,
 } from './lib'
+import { T } from './Term'
 
 /** Tracking new results (5.3): your saved forecast against what was reported, by rules. Nothing here changes a number
  * by itself: a missed input becomes a proposal you accept or keep; the note is rewritten only when you press the button. */
@@ -39,6 +40,51 @@ export function forecastOf(t: Tracking | null | undefined, key: string): Record<
     if (l) out[y.year] = l.forecast
   }
   return out
+}
+
+export const Q_WORD: Record<QStatus, string> = { ahead: 'Ahead of run-rate', in_line: 'In line with run-rate', behind: 'Behind run-rate' }
+const gapOf = (key: string, g: number | null) => g == null ? '–' : key === 'ebitda_margin'
+  ? `${g >= 0 ? '+' : '−'}${Math.round(Math.abs(g) * 10000)} bps` : `${g >= 0 ? '+' : '−'}${(Math.abs(g) * 100).toFixed(1)}%`
+
+/** "H1 FY27: revenue 2.1% behind run-rate", for the answer line, Summary and the coverage list. */
+export function quarterWords(q: Pick<QuarterTrack, 'quarter' | 'period' | 'year' | 'status'> & { rev: number | null; pat: number | null }): string {
+  const fyq = fy(q.quarter.split(' ')[1] ?? q.year)
+  const part = (label: string, g: number | null) => g == null ? null : `${label} ${(Math.abs(g) * 100).toFixed(1)}% ${g >= 0 ? 'ahead of' : 'behind'}`
+  const bits = [part('revenue', q.rev), part('PAT', q.pat)].filter(Boolean)
+  return `${q.period} ${fyq}${bits.length ? `: ${bits.join(', ')} ${fy(q.year)}E run-rate` : ''}`
+}
+
+/** Results tracking, first: the quarters filed in the current forecast year (YTD) against the base case's FY E,
+ * seasonally adjusted by last year's same quarters. Rules only; nothing changes an input. */
+export function QuarterCard({ q }: { q: QuarterTrack }) {
+  const href = useHref()
+  const fyq = fy(q.year)
+  return (
+    <section className="provenance trk" id="quarter" aria-labelledby="q-h" tabIndex={-1}>
+      <h2 id="q-h">{q.period} {fyq} vs {fyq}E run-rate <span className="cnt">{q.quarters} quarter{q.quarters > 1 ? 's' : ''} to {qfy(q.through)}</span></h2>
+      <p className="serif">{q.status ? <b>{Q_WORD[q.status]}.</b> : null} Run-rate = base-case {fyq}E × the share of last year the same
+        {q.quarters > 1 ? ` ${q.quarters} quarters` : ' quarter'} made{q.basis === 'straight' ? <> (last year’s quarters aren’t all filed, so {q.quarters} of 4 is used)</> : null}.</p>
+      <div className="scroll" tabIndex={0} role="region" aria-label={`${q.period} ${fyq} against the ${fyq}E run-rate`}>
+        <table className="mini-t">
+          <thead><tr><th scope="col">Rs cr</th><th scope="col" className="r">{q.period} actual</th><th scope="col" className="r">Run-rate</th>
+            <th scope="col" className="r">Variance</th><th scope="col" className="r"><T k="yoy" /> vs {fyq}E</th><th scope="col">Status</th></tr></thead>
+          <tbody>{q.lines.map(l => {
+            const pct = l.key === 'ebitda_margin'
+            return <tr key={l.key} className={l.status === 'behind' ? 'miss' : undefined}>
+              <th scope="row">{l.key === 'ebitda_margin' ? <T k="ebitda_margin" /> : l.key === 'pat' ? <T k="pat" /> : l.label}</th>
+              <td className="r num">{pct ? fmt(l.ytd, 'pct') : money(l.ytd)}</td>
+              <td className="r num ours">{pct ? `${fmt(l.need, 'pct')} (${fyq}E)` : money(l.need)}</td>
+              <td className="r num">{gapOf(l.key, l.gap)}</td>
+              <td className="r num">{l.yoy == null ? '–' : `${fmt(l.yoy, 'pct')} vs ${fmt(l.fy_growth, 'pct')}`}</td>
+              <td>{l.status ? (l.status === 'behind' ? <b>Behind</b> : l.status === 'ahead' ? 'Ahead' : 'In line') : '–'}</td>
+            </tr>
+          })}</tbody>
+        </table>
+      </div>
+      <p className="small-note">In line: revenue within 2%, PAT within 5%, EBITDA margin within 100 bps of the run-rate. Quarterly PAT is
+        the owners’ share as filed. Assumptions unchanged; to revise, open <a href={href('forecast', 'growth')}>Forecast</a>.</p>
+    </section>
+  )
 }
 
 /** Accepting moves base to the proposed value and bull and bear by the same step (so their spread stays), fades too. */

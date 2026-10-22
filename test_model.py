@@ -376,6 +376,29 @@ def quarters_check(tmp, co):
     assert model.ttm(gap) is None and model.ttm(gap, 3) is not None, "a missing quarter breaks the run of four"
     # the four quarters up to the last year end add up to about its annual Sales (the synthetic file is built so)
     assert abs(sum(r["sales"][3:7]) / co["hist"][-1]["revenue"] - 1) < 0.01
+    # quarterly tracking: 9M FY2026 (Jun-Dec 2025) against the base case's FY2026E, seasonal by last year's same quarters
+    d0 = model.default_assumptions(co["hist"])
+    proj = model.project(co["hist"], d0, 3)
+    qt = model.quarter_track(co, proj)
+    assert (qt["year"], qt["quarter"], qt["period"], qt["quarters"], qt["basis"]) == ("FY2026", "Q3 FY2026", "9M", 3, "seasonal"), qt
+    lines = {x["key"]: x for x in qt["lines"]}
+    rv = lines["revenue"]
+    share = sum(r["sales"][3:6]) / co["hist"][-1]["revenue"]  # Jun-Dec 2024 of FY2025 (quarters 3-5; 7-9 are FY2026)
+    assert abs(rv["ytd"] - sum(r["sales"][7:10])) < 1e-9 and abs(rv["need"] - proj[0]["revenue"] * share) < 1e-9, rv
+    assert abs(rv["gap"] - (rv["ytd"] / rv["need"] - 1)) < 1e-12 and abs(rv["yoy"] - (sum(r["sales"][7:10]) / sum(r["sales"][3:6]) - 1)) < 1e-12
+    mg = lines["ebitda_margin"]
+    assert abs(mg["ytd"] - sum(r["op_profit"][7:10]) / sum(r["sales"][7:10])) < 1e-12 and abs(mg["fy"] - proj[0]["ebitda"] / proj[0]["revenue"]) < 1e-12
+    assert mg["status"] == ("in_line" if abs(mg["gap"]) <= 0.01 else "ahead" if mg["gap"] > 0 else "behind")
+    st = [lines["revenue"]["status"], lines["pat"]["status"]]
+    assert qt["status"] == ("behind" if "behind" in st else "ahead" if "ahead" in st else "in_line"), (qt["status"], st)
+    hot = model.project(co["hist"], {**d0, "growth": 0.6}, 3)  # a forecast far above the run-rate: behind
+    assert model.quarter_track(co, hot)["status"] == "behind" and {x["key"]: x for x in model.quarter_track(co, hot)["lines"]}["revenue"]["gap"] < -0.2
+    # without last year's quarters: a straight run-rate (3 of 4 quarters), and no quarter of the year filed: None
+    short = {**co, "quarters": {"dates": q["dates"][7:], "rows": {k: v[7:] for k, v in r.items()}}}
+    s_rv = model.quarter_track(short, proj)["lines"][0]
+    assert model.quarter_track(short, proj)["basis"] == "straight" and abs(s_rv["need"] - proj[0]["revenue"] * 0.75) < 1e-9
+    early = {**co, "quarters": {"dates": q["dates"][:6], "rows": {k: v[:6] for k, v in r.items()}}}
+    assert model.quarter_track(early, proj) is None and model.quarter_track({**co, "quarters": None}, proj) is None
     p = tmp / "no_quarters.xlsx"
     fake_export(p, quarters=False)
     bare = model.parse_export(p)
@@ -3107,6 +3130,20 @@ def track_check(server, root, co, data):
         client.post("/api/models", json=dict(back, reviewed_at="2099-01-01T00:00:00"))
         assert next(m for m in server.list_models(root) if m["id"] == sid)["new_results"] is None, "reviewed since"
         server.delete_model(sid, root)
+        # a new quarter alone: no forecast recorded, the time it came in kept, the run-rate scored, "new results" listed
+        qs = full["quarters"]
+        early = dict(full, name="Quarter Synth", quarters={"dates": qs["dates"][:8], "rows": {k: v[:8] for k, v in qs["rows"].items()}})
+        qdoc = dict(doc, company=early, scenarios=data["scenarios"], track=[], reviewed_at="2026-01-01T00:00:00")
+        assert client.post("/api/project", json=qdoc).json()["quarter"]["period"] == "Q1", "Jun 2025: one quarter of FY2026"
+        a = client.post("/api/track/apply", json={"doc": qdoc, "company": dict(full, name="Quarter Synth")}).json()
+        assert a["years"] == [] and a["quarter"] == "2025-12-31" and a["doc"]["track"] == [], a
+        assert a["doc"]["company"]["source"]["quarter_added"]["end"] == "2025-12-31" and a["doc"]["reviewed_at"] is None
+        p9 = client.post("/api/project", json=a["doc"]).json()["quarter"]
+        assert (p9["quarter"], p9["period"], p9["year"]) == ("Q3 FY2026", "9M", "FY2026"), p9
+        qid = client.post("/api/models", json=a["doc"]).json()["id"]
+        row = next(m for m in server.list_models(root) if m["id"] == qid)
+        assert row["new_results"] == ["Q3 FY2026"] and row["quarter"]["period"] == "9M" and "revenue" in row["quarter"], row
+        server.delete_model(qid, root)
         assert client.post("/api/project", json=dict(doc, track=[{}] * 21)).status_code == 422, "at most 20 forecasts"
     finally:
         server.MODELS, ai.llm = models, llm

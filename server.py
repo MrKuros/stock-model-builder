@@ -1412,7 +1412,8 @@ def project(req: ModelRequest):
     co, sc, n, out = req.projection()
     v = req.dcf(co, sc, n, out)
     return {"years": [model.fy(d, True) for d in model.projected_dates(co, n)], "scenarios": out,
-            "valuation": v, "inputs_hash": inputs_hash(req), "peers": req.peer_table(co), "tracking": tracking(req, co, v)}
+            "valuation": v, "inputs_hash": inputs_hash(req), "peers": req.peer_table(co), "tracking": tracking(req, co, v),
+            "quarter": model.quarter_track(co, out["base"])}
 
 
 @app.post("/api/export")
@@ -1753,6 +1754,9 @@ def with_results(doc: "ModelDoc", company, filings=(), now=None):
     if years and not any(r.get("last") == model.labels(doc.company.dates)[-1] for r in d.track):
         d.track = [*d.track, track_record(doc, years, now)][-model.MAX_TRACK:]
     d.company = new.model_copy(update={"name": doc.company.name})  # the library keeps one row per company
+    if q and not years:  # a new quarter alone: when it came in, so the list can say "new results" until you review
+        d.company.source = {**(d.company.source or {}), "quarter_added": {"end": q.date().isoformat(),
+                                                                          "at": (now or datetime.now()).isoformat(timespec="seconds")}}
     d.reviewed_at = None  # new numbers: back to draft, as any change of filings does in the app
     ids = {f.id for f in d.filings}
     d.filings = [*d.filings, *(Filing.model_validate(f) for f in filings if f["id"] not in ids)]
@@ -2178,6 +2182,8 @@ def list_models(root=None):
             cover = _coverage(projs, co, ex, doc.valuation.model_dump())
             rec = doc.track[-1] if doc.track else {}
             q = co.get("quarters") or {}
+            qt = model.quarter_track(co, projs["base"])
+            qa = (doc.company.source or {}).get("quarter_added") or {}
         except Exception:  # noqa: BLE001
             continue  # ponytail: skip any unreadable file, never fail the whole list
         out.append({"id": model_id, "company": doc.company.name, "active": doc.active, "n": n,
@@ -2188,7 +2194,12 @@ def list_models(root=None):
                     "symbol": sym, "price_saved": doc.company.market.price,
                     "price_at": _ago(live["age"]) if live else (doc.company.source or {}).get("price_at"),
                     "price_live": bool(live), "results_to": max([str(co["dates"][-1])[:10], *[str(d)[:10] for d in (q.get("dates") or [])[-1:]]]),
-                    "new_results": rec.get("new_years") if rec and _before(doc.reviewed_at, rec.get("recorded_at")) else None,
+                    "new_results": rec.get("new_years") if rec and _before(doc.reviewed_at, rec.get("recorded_at"))
+                    else [qt["quarter"] if qt and qt["through"] == qa.get("end") else qa.get("end")]
+                    if qa.get("end") and _before(doc.reviewed_at, qa.get("at")) else None,
+                    # the quarters filed this year against the base case's run-rate (model.quarter_track), in brief
+                    "quarter": qt and {k: qt[k] for k in ("year", "quarter", "period", "status")} | {
+                        x["key"]: x["gap"] for x in qt["lines"]},
                     **cover})
     # ponytail: parses and projects every file per listing; fine for hundreds, add an index file past that
     return sorted(out, key=lambda m: m["saved_at"] or "", reverse=True)

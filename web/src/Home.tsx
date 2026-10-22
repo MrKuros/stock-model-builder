@@ -3,7 +3,8 @@ import { Confirm, Menu, Scale, ScaleHead, ScaleKey, Verdict, latestOf, slugOf } 
 import { pathOf, placed } from './route'
 import { api, clock, fmt, properName, rs, gap, verdict, type ModelSummary, type VerdictKind, type WatchList } from './lib'
 import { ago, streamFetch } from './Fetch'
-import { qfy } from './lib'
+import { fy, qfy } from './lib'
+import { Q_WORD, quarterWords } from './Tracking'
 import { T } from './Term'
 import { Prices, Spark, WatchSection } from './Watch'
 import AddPage, { type BuildApi, type OnAdd } from './Add'
@@ -173,6 +174,9 @@ function Row({ m, hist, versions, onDelete }: { m: ModelSummary; hist?: Paramete
       <div className="c-look">
         <a href={pathOf(slug, 'risks')} className={signs ? 'warn' : undefined}>{m.flags == null ? 'Red flags' : signs ? `${signs} red flag${signs > 1 ? 's' : ''}` : 'No red flags'}</a>
         {m.results_to && <span>Results to {qfy(m.results_to)}{m.new_results?.length ? <b> · new results</b> : null}</span>}
+        {m.quarter?.status && <a href={pathOf(slug, 'tracking', '', null, 'quarter')} className={m.quarter.status === 'behind' ? 'warn' : undefined}
+          title={quarterWords({ ...m.quarter, rev: m.quarter.revenue, pat: m.quarter.pat })}>
+          {m.quarter.period} {fy(m.quarter.year)}: {Q_WORD[m.quarter.status].toLowerCase()}</a>}
       </div>
       <Menu label={`More for ${m.company}`} items={[
         { label: 'Open', href: pathOf(slug, 'summary') },

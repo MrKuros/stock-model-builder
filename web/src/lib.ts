@@ -252,6 +252,12 @@ export interface Tracking {
   was: Pick<TrackRecord, 'last' | 'made_at' | 'recorded_at' | 'new_years' | 'values' | 'price' | 'implied' | 'flags' | 'note'>
   now: { values: Record<Scenario, number | null>; price: number | null; implied: number | null; flags: { id: string; name: string }[] }
 }
+/** model.quarter_track: the quarters filed in the first forecast year against the base case's run-rate for it. */
+export type QStatus = 'ahead' | 'in_line' | 'behind'
+export interface QuarterLine { key: 'revenue' | 'ebitda_margin' | 'pat'; label: string; ytd: number | null; need: number | null; fy: number | null
+  gap: number | null; yoy: number | null; fy_growth: number | null; status: QStatus | null }
+export interface QuarterTrack { year: string; through: string; quarter: string; period: string; quarters: number
+  basis: 'seasonal' | 'straight'; lines: QuarterLine[]; status: QStatus | null }
 /** What a sentence of the note rests on: a computed fact's key, a citation id ("C1"), or a quote the model gave. */
 export type NoteRef = string | { file: string; page: number; quote: string }
 /** An approved quote the note writer was given (server._thesis_facts): what it backs, where it is. */
@@ -312,6 +318,8 @@ export interface ModelSummary {
   new_results?: string[] | null // 5.3: years reported since you last marked it reviewed
   // 5.4: price is today's NSE price from the cache when there is one (values recomputed at it), price_saved the model's own
   price_saved?: number | null; price_at?: string | null; price_live?: boolean; results_to?: string
+  // quarters filed this year against the base case's run-rate: gaps by line (revenue, PAT a share; margin in pp)
+  quarter?: (Pick<QuarterTrack, 'year' | 'quarter' | 'period' | 'status'> & Record<QuarterLine['key'], number | null>) | null
 }
 /** GET /api/watch: tickers watched without a model, and the daily [date, price, bear, base, bull] per company slug. */
 export interface Watched { symbol: string; name: string; added_at: string; price: number | null; at: string | null; industry: string | null }
@@ -323,6 +331,7 @@ export interface Projection {
   inputs_hash?: string // what the numbers come from (server.inputs_hash); a note with another hash is stale
   peers?: PeerTable | null // null until peers are compared
   tracking?: Tracking | null // null until new results have come in after a forecast
+  quarter?: QuarterTrack | null // null until a quarter of the first forecast year is filed
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

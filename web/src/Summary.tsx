@@ -6,7 +6,7 @@ import { yearSources } from './Documents'
 import { ago } from './Fetch'
 import { qfy } from './lib'
 import { growth } from './Statements'
-import { latestScored, unreviewed } from './Tracking'
+import { latestScored, quarterWords, unreviewed } from './Tracking'
 import { useAi } from './Sources'
 import { Next, PageHead, Scale, Stepper, Verdict } from './Shell'
 import { useHref } from './route'
@@ -46,6 +46,8 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
   const vs = (e: number | null | undefined) => (e == null ? '' : `Revenue ${pc(Math.abs(e))} ${e >= 0 ? 'ahead of' : 'behind'} forecast.`)
   const since = company.source?.fetched_at ?? doc.saved_at
   const lastQ = company.quarters?.dates.at(-1)
+  const qt = projection?.quarter
+  const qline = qt && quarterWords({ ...qt, rev: qt.lines.find(l => l.key === 'revenue')?.gap ?? null, pat: qt.lines.find(l => l.key === 'pat')?.gap ?? null })
   const c = sevCounts(parsed.forensic)
   const tn = doc.note
   const w = useWrite(doc, setDoc)
@@ -102,6 +104,7 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
           {fresh ? <p className="serif">New results: {fy(s!.year.year)}. {vs(rev?.err)}</p>
             : <p className="serif">No new results since the model was built{since ? ` (${when(since).replace(/ \d{4}$/, '')})` : ''}.
               {' '}Latest filed: {lastQ ? qfy(lastQ) : fy(years[years.length - 1])}.</p>}
+          {qline && <p className="small"><a href={href('tracking', 'quarter')}>{qline}</a>.</p>}
           {!fresh && <div className="acard-act">{check}</div>}
           {checkMsg && <p className="small" role="status">{checkMsg}</p>}
           <a className="go" href={href('tracking')}>Results vs forecast</a>
