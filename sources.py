@@ -27,7 +27,7 @@ HOSTS = frozenset({"www.nseindia.com", "nsearchives.nseindia.com"})
 SYMBOL = re.compile(r"[A-Z0-9&-]{1,20}")  # NSE symbols: TCS, M&M, BAJAJ-AUTO
 QUERY = re.compile(r"[A-Za-z0-9&.\- ]{1,40}")
 PRICE_AGE, LIST_AGE = 15 * 60, 6 * 3600  # seconds a cached quote / list stays fresh; a downloaded file never expires
-MAX_JSON, MAX_XBRL, MAX_PDF = 8 << 20, 5 << 20, 60 << 20
+MAX_JSON, MAX_XBRL, MAX_PDF = 8 << 20, 20 << 20, 60 << 20  # a bank's integrated filing runs past 5 MB (ICICI FY2026)
 GAP, TIMEOUT = 1.0, 20  # seconds between requests (one client per library, shared by every request); per request
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 HEADERS = {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", "Accept-Encoding": "gzip, deflate"}

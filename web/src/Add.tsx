@@ -163,7 +163,7 @@ export function SearchBox({ models, onBuild, onWatch, busy }: {
       </div>
       <p className="small muted" id={`${id}-hint`} aria-live="polite">
         {error ? <span className="bad">{error} </span> : searching ? 'Looking on NSE… ' : text.length >= 2 && none && !saved.length ? `NSE has no listed share called “${text}”. Check the spelling or try the symbol. ` : null}
-        Use <kbd>↑</kbd> <kbd>↓</kbd> to pick, <kbd>Enter</kbd> to build, <kbd>W</kbd> to watch. Banks, NBFCs and insurers aren’t supported yet; the app says so as soon as you pick one.
+        Use <kbd>↑</kbd> <kbd>↓</kbd> to pick, <kbd>Enter</kbd> to build, <kbd>W</kbd> to watch. Banks and NBFCs build on the lender template; insurers aren’t supported, and the app says so as soon as you pick one.
       </p>
       <dl className="add-what">
         <div><dt>Build model</dt><dd>Filings, CMP, documents, three-statement model, DCF and forensic checks. About a minute.</dd></div>

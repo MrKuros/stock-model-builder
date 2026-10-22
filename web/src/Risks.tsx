@@ -44,6 +44,15 @@ const PLAIN: Record<string, { title: string; why: string; gloss: string }> = {
   related: { title: 'Large related-party transactions', why: 'RPTs can transfer value away from minority shareholders.', gloss: 'Related-party transactions' },
   pledge: { title: 'Promoter pledge', why: 'Lenders can sell pledged shares in a falling market, adding pressure on the price.', gloss: 'Promoter pledge %' },
   auditor: { title: 'Audit qualification or auditor change', why: 'A modified opinion or abrupt auditor change can signal disagreement over the accounts.', gloss: 'Auditor’s opinion and auditor change' },
+  // lenders (lender.forensic)
+  gnpa: { title: 'Gross NPAs rising', why: 'Bad loans build before provisions catch up, so a rising GNPA leads credit cost and capital.', gloss: 'GNPA %' },
+  pcr: { title: 'Provision coverage falling', why: 'Lower coverage flatters today’s profit and leaves more of the bad book to provide for later.', gloss: 'Provision coverage (PCR)' },
+  credit_cost: { title: 'Credit cost spike', why: 'Provisions jumping over their run-rate are the P&L shadow of fresh slippages.', gloss: 'Credit cost vs run-rate' },
+  nim: { title: 'NIM compression', why: 'A falling NIM squeezes the main earnings line; growth then has to come from volume or fees.', gloss: 'NIM trend' },
+  spread: { title: 'Yield vs cost of funds narrowing', why: 'A narrowing spread behind a steady NIM is held up by funding mix or fees, which can reverse.', gloss: 'Yield − cost of funds' },
+  cd_ratio: { title: 'Loans outrunning deposits', why: 'Growth past the deposit base leans on costlier wholesale funding that runs off faster.', gloss: 'Credit-deposit ratio' },
+  capital: { title: 'Thin capital', why: 'Low CET1 limits growth and invites a dilutive raise.', gloss: 'CET1 ratio' },
+  oi_share: { title: 'Profit leaning on other income', why: 'Treasury gains and one-offs inside other income reverse when rates rise.', gloss: 'Other income ÷ net total income' },
 }
 const plain = (f: Forensic) => {
   const p = PLAIN[f.key] ?? { title: f.title, why: '', gloss: f.title }
@@ -57,13 +66,30 @@ const NUMBERS: Record<string, [sub: string, row: string]> = {
   cwip: ['balance-sheet', 'cwip'], other_income: ['profit-and-loss', 'other_income'], tax: ['profit-and-loss', 'tax'],
   debt: ['balance-sheet', 'borrowings'], cover: ['ratios', 'int_cover'], nwc: ['balance-sheet', 'receivables'], mscore: ['ratios', 'roce'],
 }
+const L_NUMBERS: Record<string, [sub: string, row: string]> = {
+  gnpa: ['ratios', 'gnpa_pct'], pcr: ['ratios', 'pcr'], credit_cost: ['ratios', 'credit_cost'], nim: ['ratios', 'nim'], spread: ['ratios', 'cof'],
+  cd_ratio: ['ratios', 'cd_ratio'], capital: ['ratios', 'cet1'], oi_share: ['profit-and-loss', 'other_income'],
+}
+const L_INPUT: Record<string, [key: string, words: string]> = {
+  credit_cost: ['credit_cost', 'credit cost'], nim: ['nim', 'NIM'], spread: ['nim', 'NIM'], capital: ['cet1_min', 'CET1 floor'],
+  oi_share: ['oi_pct', 'fee and other income'], gnpa: ['credit_cost', 'credit cost'], pcr: ['credit_cost', 'credit cost'],
+}
 const INPUT: Record<string, [key: string, words: string]> = {
   dso: ['dso', 'debtor days'], dio: ['dio', 'inventory days'], other_income: ['oi_pct', 'other income'], tax: ['tax_rate', 'tax rate'],
 }
 const div = (a: number | null | undefined, b: number | null | undefined) => (a != null && b ? a / b : null)
 /** The series a rule reads, one value per reported year, for its small chart (null: no chart). */
-function seriesOf(key: string, hist: Row[], ratios: Row[]): { v: (number | null)[]; show: (x: number) => string } | null {
+function seriesOf(key: string, hist: Row[], ratios: Row[], lender = false): { v: (number | null)[]; show: (x: number) => string } | null {
   const pct = (x: number) => fmt(x, 'pct')
+  if (lender) switch (key) {
+    case 'gnpa': return { v: hist.map(h => h.gnpa_pct ?? null), show: pct }
+    case 'pcr': return { v: hist.map(h => h.pcr ?? null), show: pct }
+    case 'capital': return { v: hist.map(h => h.cet1 ?? null), show: pct }
+    case 'credit_cost': case 'nim': case 'cd_ratio': return { v: ratios.map(r => r[key] ?? null), show: pct }
+    case 'spread': return { v: ratios.map(r => (r.yield != null && r.cof != null ? r.yield - r.cof : null)), show: pct }
+    case 'oi_share': return { v: hist.map(h => div(h.other_income, h.total_income)), show: pct }
+    default: return null
+  }
   switch (key) {
     case 'dso': case 'dio': return { v: ratios.map(r => r[key] ?? null), show: x => `${Math.round(x)} days` }
     case 'cash': case 'cash5': return { v: hist.map(h => (h.pat && h.pat > 0 ? div(h.cfo, h.pat) : null)), show: x => `${x.toFixed(2)}x` }
@@ -118,6 +144,7 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
   const oneoffYears = Object.entries(parsed.oneoffs.reduce<Record<string, OneOff[]>>((g, o) => ({ ...g, [o.year]: [...(g[o.year] ?? []), o] }), {}))
   const used = years.filter(y => !doc.excluded_years.includes(y)).slice(-3) // mirrors default_assumptions(years=3)
   const needAr = waiting.filter(f => f.needs)
+  const lender = parsed.kind === 'lender' || company.kind === 'lender'
 
   // the real blocker for the checks that wait on the annual report
   const blocker: { text: ReactNode; act: ReactNode } = !ar
@@ -129,7 +156,7 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
     : { text: <>{ar.year} annual report attached, not read yet.</>, act: <a className="btn" href={href('documents', 'reading')}>Read with AI</a> }
 
   const card = (f: Forensic) => {
-    const p = plain(f), s = seriesOf(f.key, hist, parsed.ratios), num = NUMBERS[f.key], inp = INPUT[f.key]
+    const p = plain(f), s = seriesOf(f.key, hist, parsed.ratios, lender), num = (lender ? L_NUMBERS : NUMBERS)[f.key], inp = (lender ? L_INPUT : INPUT)[f.key]
     return (
       <li key={f.key} id={`a-${f.key}`} tabIndex={-1} className={`risk-card s-${f.severity}`} aria-labelledby={`rk-${f.key}`}>
         <div className="rk-main">
@@ -144,8 +171,8 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
             {num && <a className="btn" href={href('statements', num[1], num[0])}>Statement line</a>}
             {inp && <a className="btn" href={href('forecast', inp[0])}>{cap(inp[1])} in Forecast</a>}
           </div>
-          <FlagExplain flag={f} company={company} filings={doc.filings} notes={doc.notes} reports={annual}
-            proposals={doc.proposals} note={doc.flag_notes.find(x => x.key === f.key)} ai={ai} onProposals={onProposals} />
+          {!lender && <FlagExplain flag={f} company={company} filings={doc.filings} notes={doc.notes} reports={annual}
+            proposals={doc.proposals} note={doc.flag_notes.find(x => x.key === f.key)} ai={ai} onProposals={onProposals} />}
         </div>
         {s && <MiniBars years={years} v={s.v} show={s.show} flagged={f.years} sev={f.severity} title={p.title} />}
       </li>
@@ -155,7 +182,10 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
   return (
     <>
       <PageHead label="Analysis" title="Risks & forensics"
-        purpose={<>Fifteen fixed forensic rules on {short}’s reported financials: cash conversion (<T k="cfo_pat" />), working capital,
+        purpose={lender ? <>Fixed lender rules on {short}’s reported numbers: asset quality (<T k="gnpa" />, <T k="pcr" />), credit cost spikes,
+          <T k="nim" /> and the yield–cost-of-funds spread, the <T k="cd_ratio" />, <T k="cet1" /> capital and the earnings mix; related parties
+          from the annual report.</>
+          : <>Fifteen fixed forensic rules on {short}’s reported financials: cash conversion (<T k="cfo_pat" />), working capital,
           <T k="cwip" />, other income vs <T k="pbt" />, leverage, <T k="mscore" />, disclosures. AI can explain a flag from the annual report;
           it never changes a number.</>}
         answer={riskWords(parsed.forensic)} />
@@ -184,7 +214,7 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
 
       {waiting.length > 0 && <section className="blk" id="waiting" tabIndex={-1} aria-labelledby="waiting-h">
         <h2 id="waiting-h">Not tested <span className="cnt">{waiting.length}</span></h2>
-        <p className="why">{waiting.map(f => plain(f).gloss).join(', ').replace(/, (?=[^,]*$)/, ' and ')}: {needAr.length ? 'disclosed only in the annual report’s notes.' : 'not enough reported years.'}</p>
+        <p className="why">{(needAr.length ? needAr : waiting).map(f => plain(f).gloss).join(', ').replace(/, (?=[^,]*$)/, ' and ')}: {needAr.length ? 'disclosed only in the annual report’s notes.' : 'not enough reported years.'}</p>
         {needAr.length > 0 && <div className="wait-box"><p className="serif">{blocker.text}</p><div className="rk-act">{blocker.act}</div></div>}
         {waiting.length > needAr.length && <p className="small-note">{waiting.filter(f => !f.needs).map(f => plain(f).gloss).join(', ')}: not enough reported years for the rule.</p>}
       </section>}
@@ -193,7 +223,7 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
         <ul className="passed">{passed.map(f => <li key={f.key} id={`a-${f.key}`} tabIndex={-1}><Sev level="ok" /> <span>{plain(f).gloss}</span> <span className="num dim">{fy(f.fact)}</span></li>)}</ul>
       </More></div>}
 
-      <section className="blk" id="unusual" tabIndex={-1} aria-labelledby="odd-h">
+      {!lender && <section className="blk" id="unusual" tabIndex={-1} aria-labelledby="odd-h">
         <h2 id="odd-h">Outlier years (not flags) <span className="cnt">{oneoffYears.length}</span></h2>
         <p className="why">Years far from {short}’s own median (robust z-score on median and MAD). Not counted as red flags. Exclude one
           from the rule defaults, or have AI explain it from that year’s report.</p>
@@ -214,7 +244,7 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
             </li>
           )
         })}</ul> : <p className="small-note">No outlier year in other income, tax rate, capex or EBITDA margin.</p>}
-      </section>
+      </section>}
 
       <More title="Methodology">
         <p className="small">Each rule runs on the reported years with the same thresholds for every company. Severity is <b>High</b>,
@@ -224,9 +254,9 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
         {flags.find(f => f.parts) && <MParts f={flags.find(f => f.parts)!} />}
       </More>
 
-      <Next lead={needAr.length && !ar ? 'Disclosure checks need the annual report.' : 'The research note discusses these flags.'}>
+      <Next lead={needAr.length && !ar ? 'Disclosure checks need the annual report.' : lender ? 'What these mean for the value.' : 'The research note discusses these flags.'}>
         {needAr.length && !ar ? <a className="primary" href={href('documents', 'add')}>Attach annual report</a>
-          : <a className="primary" href={href('note')}>Research note</a>}
+          : lender ? <a className="primary" href={href('valuation')}>Valuation</a> : <a className="primary" href={href('note')}>Research note</a>}
       </Next>
     </>
   )

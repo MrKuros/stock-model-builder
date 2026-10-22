@@ -247,7 +247,8 @@ function AddPeer({ onAdd, example }: { onAdd: (c: PeerCandidate) => void; exampl
 
 /** The comparison: the company (highlighted), each peer, the peers' median and the company's rank per measure. */
 function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; short: string; reading: boolean; retry: (s: string) => void }) {
-  const cols = t.columns.map(([k, label, kind, way]) => [k, PLAIN[k]?.[0] ?? label, kind, way, PLAIN[k]?.[1]] as const)
+  const lender = t.columns.some(c => c[0] === 'nim')
+  const cols = t.columns.map(([k, label, kind, way]) => [k, lender && k === 'g3' ? 'Loan CAGR 3Y' : PLAIN[k]?.[0] ?? label, kind, way, PLAIN[k]?.[1]] as const)
   const waiting = p.chosen.filter(s => !t.peers.some(r => r.symbol === s))
   const at = t.peers.map(r => r.at).filter(Boolean).sort()[0]
   return <>
@@ -271,15 +272,19 @@ function Table({ t, p, short, reading, retry }: { t: PeerTable; p: PeersDoc; sho
         </tbody>
       </table>
     </div>
-    <p className="small-note">Financials from each company’s NSE results filings (XBRL, by rules); older years from an Excel export of
+    {lender ? <p className="small-note">Lenders: each bank’s or NBFC’s standalone NSE results filings (XBRL, by rules). P/B and P/E at NSE prices
+      {' '}{ago(at)}; {short} at this model’s CMP. NIM on average total assets; credit cost on average advances. GNPA and CET1 as filed by banks
+      (NBFCs don’t file them in XBRL: blank).</p>
+    : <p className="small-note">Financials from each company’s NSE results filings (XBRL, by rules); older years from an Excel export of
       that company when available (hover a name for sources). Market cap and multiples at NSE prices {ago(at)}; {short} at this model’s CMP.
       Growth: revenue CAGR. ROCE = EBIT ÷ average capital employed. Cash conversion = CFO ÷ PAT, 3 years. EV = market cap + borrowings − cash −
-      investments. Blank: insufficient years or a negative base. Leases count as debt only where the source includes them.</p>
+      investments. Blank: insufficient years or a negative base. Leases count as debt only where the source includes them.</p>}
   </>
 }
 
 /** Columns whose header carries a glossary definition. */
-const TERM: Record<string, TermKey> = { mcap: 'mcap', pe: 'pe', ev_ebitda: 'ev_ebitda', pb: 'pb', roce: 'roce', cash_conv: 'cfo_pat', ebitda_margin: 'ebitda_margin' }
+const TERM: Record<string, TermKey> = { mcap: 'mcap', pe: 'pe', ev_ebitda: 'ev_ebitda', pb: 'pb', roce: 'roce', cash_conv: 'cfo_pat', ebitda_margin: 'ebitda_margin',
+  nim: 'nim', cost_income: 'cost_income', credit_cost: 'credit_cost', roa: 'roa', roe: 'roe_l', gnpa_pct: 'gnpa', cet1: 'cet1' }
 const PLAIN: Record<string, [string, string]> = {
   mcap: ['Mcap, Rs cr', '↑ larger'], pe: ['P/E', '↓ cheaper'],
   ev_ebitda: ['EV/EBITDA', '↓ cheaper'], pb: ['P/B', '↓ cheaper'],
@@ -287,6 +292,9 @@ const PLAIN: Record<string, [string, string]> = {
   ebitda_margin: ['EBITDA margin', '↑ better'], net_margin: ['PAT margin', '↑ better'],
   roce: ['ROCE', '↑ better'], cash_conv: ['CFO/PAT 3Y', '↑ better'],
   nd_ebitda: ['Net debt/EBITDA', '↓ safer'],
+  advances: ['Advances, Rs cr', '↑ larger'], nim: ['NIM', '↑ better'], cost_income: ['Cost-to-income', '↓ better'],
+  credit_cost: ['Credit cost', '↓ better'], roa: ['RoA', '↑ better'], roe: ['RoE', '↑ better'], gnpa_pct: ['GNPA', '↓ better'],
+  cet1: ['CET1', '↑ stronger'],
 }
 
 /** Why these peers: when and how the set was approved, then the reason per pick (the AI's, with its basis, or yours). */
@@ -310,7 +318,9 @@ function Why({ p }: { p: PeersDoc }) {
 export function peerWords(t: PeerTable, read: number, short: string) {
   const bit = (k: string, what: string, kind: 'pct' | 'x', cheap = false) => t.rank[k] == null || t.median[k] == null ? null
     : `${cheap && t.rank[k] === 1 ? 'lowest' : `${ordinal(t.rank[k]!)}${cheap ? ' lowest' : ''}`} of ${t.of[k]} on ${what} (${fmt(t.own.metrics?.[k], kind)} vs median ${fmt(t.median[k], kind)})`
-  const parts = [bit('roce', 'ROCE', 'pct'), bit('g3', '3-year revenue CAGR', 'pct'), bit('pe', 'P/E', 'x', true)].filter(Boolean) as string[]
+  const lender = t.columns.some(c => c[0] === 'nim')
+  const parts = (lender ? [bit('roe', 'RoE', 'pct'), bit('roa', 'RoA', 'pct'), bit('pb', 'P/B', 'x', true)]
+    : [bit('roce', 'ROCE', 'pct'), bit('g3', '3-year revenue CAGR', 'pct'), bit('pe', 'P/E', 'x', true)]).filter(Boolean) as string[]
   return `Relative to ${read} peer${read > 1 ? 's' : ''}, ${short} ranks ${parts.length
     ? parts.join(parts.length > 2 ? ', ' : ' and ').replace(/, (?=[^,]*$)/, ' and ') : 'on too few metrics to say'}.`
 }

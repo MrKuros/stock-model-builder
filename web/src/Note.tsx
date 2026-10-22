@@ -1,3 +1,4 @@
+import { lenderWords } from './Lender'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import Ruler from './Ruler'
 import { bySeverity } from './Risks'
@@ -98,6 +99,7 @@ export interface Fix { page: 'forecast' | 'valuation'; anchor: string; label: st
  * revenue CAGR against the base case and the last three years. Summary and the research note both open with it. */
 export function verdictWords(parsed: Parsed, projection: Projection | null): { answer: ReactNode; fix: Fix | null } {
   const v = projection?.valuation ?? null
+  if (v?.kind === 'lender') return lenderWords(parsed, projection)
   if (!v) return { answer: <>Running the DCF…</>, fix: null }
   const sv = v.scenarios.base, value = sv.per_share, price = v.price
   const bear = v.scenarios.bear.per_share, bull = v.scenarios.bull.per_share

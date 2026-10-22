@@ -134,7 +134,7 @@ export default function Home({ models, error, build, onAdd, onWatch, watch, setW
       <WatchSection list={watch} models={latest} onChange={setWatch} />
       {watchMsg && <p className="small" role="status">{watchMsg}</p>}
       <footer className="foot">
-        <p>Non-financial companies only; banks, NBFCs and insurers aren’t supported yet.
+        <p>Banks and NBFCs use the lender template (residual income, P/B); insurers aren’t supported.
           Models autosave to the <code>models</code> folder next to the app. Numbers are rule-computed; recalculation never calls AI.</p>
       </footer>
       <Confirm open={!!gone} onClose={() => setGone(null)} onYes={() => gone && remove(gone)} yes="Delete"
@@ -192,6 +192,8 @@ function Row({ m, hist, versions, onDelete }: { m: ModelSummary; hist?: Paramete
 function assumes(m: ModelSummary): ReactNode {
   const ours = m.growth != null ? <> vs <span className="num">{fmt(m.growth, 'pct')}</span> base case</> : null
   if (m.price == null) return 'No CMP yet.'
+  if (m.implied_kind === 'roe') return m.implied == null ? <>No implied RoE.</>
+    : <>Implied RoE <b className="num">{fmt(m.implied, 'pct')}</b>{ours}.</>
   if (m.implied == null) return <>Implied growth outside −30% to +80%{ours}.</>
   return <>Implied revenue growth <b className="num">{fmt(m.implied, 'pct')}</b>{ours}.</>
 }

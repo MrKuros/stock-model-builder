@@ -17,7 +17,7 @@ export const cagrOf = (v: S, k: number) => {
   const n = v.length, a = v[n - 1 - k], b = v[n - 1]
   return k >= 1 && n - 1 >= k && fin(a) && fin(b) && a > 0 && b > 0 ? (b / a) ** (1 / k) - 1 : null
 }
-const med = (v: S) => {
+export const med = (v: S) => {
   const s = v.filter(fin).sort((a, b) => a - b), m = s.length >> 1
   return !s.length ? null : s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
 }
@@ -40,7 +40,7 @@ function series(parsed: Parsed) {
 interface Line { v: S; cls?: 'alt' | 'out' | 'flag'; name?: string }
 /** A small chart drawn at its real width: bars (one or two series side by side) or lines from zero, an optional dashed
  * median, every year's value in the accessible name. */
-function Plot({ years, lines, kind, show, refLine, label, neg, marks }: {
+export function Plot({ years, lines, kind, show, refLine, label, neg, marks }: {
   years: string[]; lines: Line[]; kind: 'bars' | 'lines'; show: (x: number) => string; refLine?: number | null; label: string; neg?: boolean
   marks?: S // pencil ticks: what you forecast for a year before it was reported (5.3)
 }) {

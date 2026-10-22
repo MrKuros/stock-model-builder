@@ -26,6 +26,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, model_serializer, model_validator
 
 import ai
+import lender
 import model
 import sources
 
@@ -137,6 +138,7 @@ class Company(BaseModel):
     # fetched by ticker (5.1): {symbol, exchange, basis, fetched_at, price_at, industry, years {FY2024: "NSE filing" |
     # "Excel export"}, missing, mismatches, notes, documents}; words and dates only, no number reads it. None = an upload
     source: dict | None = None
+    kind: Literal["lender"] | None = None  # 6.1: a bank or NBFC (lender.py's lines and engine); None = everyone else
 
     @model_validator(mode="before")
     @classmethod
@@ -147,8 +149,9 @@ class Company(BaseModel):
     def _no_empty_pl(self, handler):
         """A company without P&L-only years saves exactly as before they were read."""
         d = handler(self)
-        if d.get("pl_only") is None:
-            d.pop("pl_only", None)
+        for k in ("pl_only", "kind"):  # saved exactly as before 6.1 unless it is a lender
+            if d.get(k) is None:
+                d.pop(k, None)
         return d
 
     @model_validator(mode="after")
@@ -157,7 +160,8 @@ class Company(BaseModel):
         if len(self.hist) < 2 or len(self.dates) != len(self.hist):
             raise ValueError("company needs at least two reported years, with one date per year")
         for i, row in enumerate(self.hist):
-            bad = [k for k in REQUIRED if not isinstance(row.get(k), float) or not math.isfinite(row[k])]
+            bad = [k for k in (lender.REQUIRED if self.kind else REQUIRED)
+                   if not isinstance(row.get(k), float) or not math.isfinite(row[k])]
             if bad:
                 raise ValueError(f"company.hist[{i}] is missing numbers for {', '.join(bad)}")
         return self
@@ -295,7 +299,7 @@ class ModelRequest(BaseModel):
         """Scenarios saved before 3.4 get COGS % revenue at its default (0 for them: their company has no COGS
         line, so inventory days stay on revenue) and payable days at 0: their other-liabilities % still includes
         payables, so a default would count them twice. Their numbers stay exactly as they were."""
-        if all(k in a for a in self.scenarios.values() for k in NEW_DRIVERS):
+        if self.company.kind or all(k in a for a in self.scenarios.values() for k in NEW_DRIVERS):
             return self
         d = model.default_assumptions(self.upgraded()["hist"])
         for a in self.scenarios.values():
@@ -304,8 +308,15 @@ class ModelRequest(BaseModel):
         return self
 
     def upgraded(self):
-        """The company with what the attached filings and approved capex notes add (model.upgrade), as the engine uses it."""
+        """The company with what the attached filings and approved capex notes add (model.upgrade), as the engine uses it.
+        A lender's filings are its years already: nothing to add."""
+        if self.company.kind:
+            return self.company.model_dump()
         return upgraded(self.company.model_dump(), [f.model_dump() for f in self.filings], self.notes)
+
+    @property
+    def lender(self):
+        return self.company.kind == "lender"
 
     def args(self):
         if not 1 <= self.n <= 15:
@@ -313,7 +324,7 @@ class ModelRequest(BaseModel):
         if len(self.scenarios) != len(model.SCENARIOS):
             raise HTTPException(422, f"Need all three scenarios: {list(model.SCENARIOS)}")
         for s, a in self.scenarios.items():
-            missing = {k for k, _, _ in model.DRIVERS} - a.keys()
+            missing = {k for k, _, _ in (lender.DRIVERS if self.lender else model.DRIVERS)} - a.keys()
             if missing:
                 raise HTTPException(422, f"Missing assumptions in {s}: {sorted(missing)}")
         sc = {s: {k: v.model_dump() for k, v in a.items()} for s, a in self.scenarios.items()}
@@ -321,7 +332,8 @@ class ModelRequest(BaseModel):
 
     def projection(self):
         co, sc, n = self.args()
-        out = {s: model.project(co["hist"], model.expand(sc[s], n), n) for s in model.SCENARIOS}
+        run = lender.project if self.lender else model.project
+        out = {s: run(co["hist"], model.expand(sc[s], n), n) for s in model.SCENARIOS}
         for s, proj in out.items():
             if any(v is not None and not math.isfinite(v) for row in proj for v in row.values()):
                 raise HTTPException(422, f"Those {s} assumptions make the numbers too large to project. "
@@ -334,14 +346,17 @@ class ModelRequest(BaseModel):
         if not (self.peers and self.peers.rows):
             return None
         m, v = co.get("market") or {}, self.valuation
+        eng = lender if self.lender else model
         own = {"name": co["name"], "symbol": self.peers.symbol or (co.get("source") or {}).get("symbol"),
                "year": model.labels(co["dates"])[-1],
-               "metrics": model.peer_metrics(co["hist"], v.price or m.get("price"), v.shares or m.get("shares"))}
-        return model.peer_table(own, [r.model_dump() for r in self.peers.rows])
+               "metrics": eng.peer_metrics(co["hist"], v.price or m.get("price"), v.shares or m.get("shares"))}
+        return model.peer_table(own, [r.model_dump() for r in self.peers.rows], eng.PEERS)
 
     def dcf(self, co, sc, n, out):
         ex = {s: model.expand(sc[s], n) for s in model.SCENARIOS}
-        v = model.valuation(out, co["hist"], self.valuation.model_dump(), ex["base"], co["market"], inputs=ex, note=True)
+        v = (lender.valuation(out, co["hist"], self.valuation.model_dump(), co["market"], inputs=ex, note=True)
+             if self.lender else
+             model.valuation(out, co["hist"], self.valuation.model_dump(), ex["base"], co["market"], inputs=ex, note=True))
         try:  # extreme but finite inputs (shares 1e-320, rates 1e308) can overflow; JSON can't carry inf/NaN
             json.dumps(v, allow_nan=False)
         except ValueError:
@@ -422,9 +437,32 @@ def upgraded(co, filings=(), notes=None):
     return model.upgrade(co, filings, ar_capex(notes), moved_out(notes, co))
 
 
+def _lender_payload(co, excluded=(), notes=None):
+    """_company_payload for a bank or NBFC (lender.py): the same keys, lender content."""
+    labels, h = model.labels(co["dates"]), co["hist"]
+    radar = lender.forensic(h, labels, notes)
+    checks = lender.data_checks(co)
+    return {
+        "kind": "lender",
+        "company": {"name": co["name"], "kind": "lender", "dates": [d.isoformat() for d in co["dates"]], "hist": h,
+                    "market": co.get("market") or Market().model_dump(), "quarters": None, "source": co.get("source"),
+                    "pl_only": None},
+        "ttm": None, "ttm_prev": None, "years": labels, "hist": h, "sources": None,
+        "ratios": lender.ratios(h),
+        "defaults": lender.defaults(h, exclude=set(excluded), labels_=labels), "default_ends": {},
+        "checks": checks, "share_gap": None, "oneoffs": [],
+        "forensic": radar, "rule_checks": model.rule_checks(h, labels, [], checks, notes, radar),
+        "key_numbers": lender.key_numbers(h, labels),
+        "cagrs": {n: lender.cagrs(h, labels, int(n)) for n in ("3", "5")},
+        "valuation": model.VALUATION, "drivers": lender.DRIVERS, "layout": lender.LAYOUT,
+    }
+
+
 def _company_payload(co, excluded=(), filings=(), notes=None):
     """What the dashboard derives from the company. Ratios, defaults and one-offs use the upgraded history (with the
     filings' payables, leases and cash-flow capex); "company" stays as parsed, for the document."""
+    if co.get("kind") == "lender":
+        return _lender_payload(co, excluded, notes)
     labels, q, up = model.labels(co["dates"]), co.get("quarters"), upgraded(co, filings, notes)
     # P&L-only years still older than the first full year (an export added later covers them instead)
     first = co["dates"][0] if isinstance(co["dates"][0], str) else co["dates"][0].date().isoformat()
@@ -637,6 +675,17 @@ def keep_report(data, name, year, kind):
     return {"id": rid, "file": name[:200], "year": year[:20], "pages": len(pages), "kind": kind}
 
 
+NOT_FOR_LENDERS = ("Not for banks and NBFCs yet: this reads the non-financial model's lines. The lender template's "
+                   "numbers, valuation and checks are all by rules.")
+
+
+def _no_lender(co, what=None):
+    """422 for an AI step that reads the non-financial model's lines (drafted assumptions, the written note,
+    explaining flags and one-offs); a lender's numbers, valuation and checks are rules only (6.1)."""
+    if co.kind == "lender":
+        raise HTTPException(422, what or NOT_FOR_LENDERS)
+
+
 class ExplainRequest(BaseModel):
     company: Company
     filings: list[Filing] = []
@@ -669,6 +718,7 @@ def _numbers(rows, lines):
 
 @app.post("/api/oneoffs/explain")
 def explain(req: ExplainRequest):
+    _no_lender(req.company)
     """A words-only proposal (kind oneoff_note) for a year detect_oneoffs flags. With a report, rules pick the pages
     and check that the quote is on the cited page (a quote that isn't comes back rejected); without, it is marked
     as read from the numbers only. Approving it only pins the words: no number uses it."""
@@ -726,6 +776,7 @@ FLAG_LINES = NOTE_LINES + (("cfo", "Cash from operations"), ("receivables", "Rec
 
 @app.post("/api/flags/explain")
 def explain_flag(req: FlagRequest):
+    _no_lender(req.company)
     """A words-only proposal (kind flag_note) for a lit forensic flag. Rules re-run the radar (a flag that isn't lit is a
     422), pick the report's pages and check the quote is on the cited page and that every number in the words is one
     the app computed or one in the quote; a failure comes back rejected. Approving pins the words; no number reads them."""
@@ -876,6 +927,7 @@ def _checked(items, ctx, base):
 
 @app.post("/api/assumptions/draft")
 def draft(req: DraftRequest):
+    _no_lender(req.company)
     """Every driver for base, bull and bear: from the attached documents where the LLM finds them, each with a page and
     quote and checked by rules, else the rule default ("from history"). Without LLM_CMD or documents, all from
     history with a message. The client shows them against the current values; nothing changes until accepted."""
@@ -915,6 +967,7 @@ def draft(req: DraftRequest):
 
 @app.post("/api/assumptions/check")
 def assumptions_check(req: DraftRequest):
+    _no_lender(req.company)
     """Before accepting: the rules again on each proposal, from its saved reply and the stored page text (no LLM call),
     with the consistency checks run on the base case the accepted values would make. History ones come back with
     today's rule default."""
@@ -963,6 +1016,8 @@ class NotesRequest(BaseModel):
 def _against(req, topic, i):
     """What a topic's sum must tie to, [(label, Rs crore)], from the export and the filings (rules)."""
     y = req.report.year
+    if req.company.kind:  # ponytail: a lender's notes tie to nothing yet; the quote checks are their guard
+        return None
     h, up = req.company.hist[i], model.upgrade(req.company.model_dump(), [f.model_dump() for f in req.filings])
     u = up["hist"][i]
     if topic == "segments":
@@ -980,12 +1035,14 @@ def _ar_note(req, topic, reply, sent, pages):
     A failed check comes back rejected (kept for audit)."""
     i, end = req.year()
     h, r = req.company.hist[i], req.report
+    if req.company.kind and topic in ("moved_out", "capex"):
+        raise HTTPException(422, f"{ai.TOPICS[topic][0]} isn't read for banks and NBFCs.")
     ag = _against(req, topic, i)
     rows, total, checks = ai.note_checks(topic, reply, pages, sent, end, ag)
     if topic == "moved_out":
         checks += _moved_checks(rows, h, r.year, model.labels(req.company.dates)[-1])
-    ref = {"contingent": ("Net worth", h["share_cap"] + h["reserves"]), "related": ("Revenue", h["revenue"]),
-           "moved_out": ("Revenue", h["revenue"])}.get(topic)
+    top = ("Net total income", h["total_income"]) if req.company.kind else ("Revenue", h["revenue"])
+    ref = {"contingent": ("Net worth", h["share_cap"] + h["reserves"]), "related": top, "moved_out": top}.get(topic)
     against = (ag or [None])[0] or ref
     first = rows[0]
     ok = all(c["pass"] is not False for c in checks)
@@ -1317,6 +1374,7 @@ def _track_facts(doc, co, v):
 
 @app.post("/api/note/write")
 def write_note(req: ModelDoc):
+    _no_lender(req.company)
     """The note's words. The LLM gets only the computed facts and the approved quotes (_thesis_facts); rules check
     every number, reference and quote and the wording (ai.thesis_checks); a failure is sent back once with the reasons,
     then returned as rejected with what failed. Only this endpoint calls the LLM for the note; nothing reads the
@@ -1392,6 +1450,7 @@ class RestatedRequest(DefaultsRequest):
 
 @app.post("/api/restated")
 def restated(req: RestatedRequest):
+    _no_lender(req.company, "A lender's years aren't compared for restatement yet.")
     """One click: a year a later filing restated, switched to the restated numbers (or back), by rules from the two
     rows the merge kept (model.use_restated). The dashboard payload for the new company; the client saves it."""
     try:
@@ -1412,15 +1471,18 @@ def project(req: ModelRequest):
     co, sc, n, out = req.projection()
     v = req.dcf(co, sc, n, out)
     return {"years": [model.fy(d, True) for d in model.projected_dates(co, n)], "scenarios": out,
-            "valuation": v, "inputs_hash": inputs_hash(req), "peers": req.peer_table(co), "tracking": tracking(req, co, v),
-            "quarter": model.quarter_track(co, out["base"])}
+            "valuation": v, "inputs_hash": inputs_hash(req), "peers": req.peer_table(co),
+            # ponytail: results tracking isn't scored for lenders yet (no forecast record of NII, provisions, PAT)
+            "tracking": None if req.lender else tracking(req, co, v),
+            "quarter": None if req.lender else model.quarter_track(co, out["base"])}
 
 
 @app.post("/api/export")
 def export(req: ModelRequest):
     co, sc, n, _ = req.projection()
     safe = re.sub(r"[^\w\- ]+", "", co["name"], flags=re.ASCII).strip() or "company"  # headers are latin-1
-    return Response(model.to_excel(co, sc, n, req.active, req.valuation.model_dump(), req.peer_table(co)),
+    return Response((lender if req.lender else model).to_excel(co, sc, n, req.active, req.valuation.model_dump(),
+                                                                 req.peer_table(co)),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{safe} model.xlsx"'})
 
@@ -1548,6 +1610,7 @@ def _saved_company(name, root=None):
 # NSE's basic industries (or industries) of lenders and insurers, which this model doesn't fit. ponytail: by NSE's
 # names; not the "Financial Services" sector, which also holds exchanges, depositories, AMCs and brokers that fit.
 LENDER = re.compile(r"\bbanks?\b|non banking|housing finance|microfinance|\b(life|general) insurance\b|financial institution", re.I)
+INSURER = re.compile(r"\b(life|general) insurance\b", re.I)  # refused: lender.py models banks and NBFCs only
 
 
 def _spans(years):
@@ -1591,9 +1654,11 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
             q = sources.bse_quote(c, code)
     name = q["name"]
     kind = q.get("basic_industry") or q.get("industry") or ""
-    if LENDER.search(kind):
-        raise model.Lender(f"{name} is a lender or insurer ({kind}). Banks, NBFCs and insurers aren’t supported yet, "
-                           "because their accounts don’t fit this model, so an Excel export won’t work either.")
+    if INSURER.search(kind):
+        raise model.Lender(f"{name} is an insurer ({kind}). {lender.INSURER} An Excel export won’t work either.")
+    # 6.1: a bank, NBFC or housing financier takes the lender template, read standalone (banks file asset quality and
+    # CET1 only there, and a consolidated bank carries its insurance arm's policyholder funds); no quarters yet
+    bank = bool(LENDER.search(kind))
     yield {"step": f"Listing {name}’s results filings{' on BSE' if exch == 'BSE' else ''}…"}
     if exch == "BSE":  # BSE's list doesn't say the period or basis: each file is read for them below
         fs, ann, qtr, basis = sources.bse_filings(c, code, fresh, today)[:BSE_FILINGS], [], [], ""
@@ -1601,9 +1666,11 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
         fs = sources.filings(c, sym, fresh)
         annual = [f for f in fs if f["kind"] == "annual"]
         cons = bool(annual) and any(f["consolidated"] for f in annual if f["end"] == annual[0]["end"])
+        if bank and any(not f["consolidated"] for f in annual if f["end"] == annual[0]["end"]):
+            cons = False
         basis = "consolidated" if cons else "standalone"
         ann = [f for f in annual if f["consolidated"] == cons][:years]
-        qtr = [f for f in fs if f["kind"] == "quarter" and f["consolidated"] == cons][:quarters]
+        qtr = [] if bank else [f for f in fs if f["kind"] == "quarter" and f["consolidated"] == cons][:quarters]
     notes, read, mappings = [], [], load_mappings(MODELS)
 
     def grab(f, label):
@@ -1645,18 +1712,26 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
 
     prev = (old or {}).get("source") or {}  # a refreshed model that was fetched before keeps saying where years came from
     twin = None if old else _saved_company(name)
+    if twin and (twin.get("kind") == "lender") != bank:  # an upload read as the other kind of company: not its years
+        twin = None
     other, whose = (old, "this model") if old else (None if separate else twin, "your earlier Excel upload")
     local = False
     if other is None and local_source is not None:
         label = getattr(local_source, "LABEL", "a local source")
         yield {"step": f"Reading older years from {label}…"}
         try:
-            other, whose, local = local_source.company(sym, MODELS / CACHE), label, True
+            other, whose, local = (local_source.company(sym, MODELS / CACHE, standalone=True) if bank
+                                   else local_source.company(sym, MODELS / CACHE)), label, True
+            if (other.get("kind") == "lender") != bank:
+                notes.append(f"{label[:1].upper()}{label[1:]} reads as {'a non-lender' if bank else 'a lender'}, "
+                             "so its years weren’t used.")
+                other = None
         except Exception as e:  # noqa: BLE001  ponytail: optional local source; any failure only means no older years
             notes.append(f"{label[:1].upper()}{label[1:]} couldn’t be read: "
                          f"{e if isinstance(e, (sources.Offline, ValueError)) else f'its layout looks different ({type(e).__name__})'}")
     try:
-        filed, skipped = model.from_filings(name, read, quarters + read, q, least=1 if other else 2)
+        filed, skipped = (lender.from_filings(name, read, q, least=1 if other else 2) if bank else
+                          model.from_filings(name, read, quarters + read, q, least=1 if other else 2))
         why = None
     except model.Lender:
         raise
@@ -1665,7 +1740,13 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
     listed = sources._date((q.get("listed") or "")[:11])
     yield {"step": "Putting the history together…"}
     filled, mism, merged = [], [], []
-    if filed and other:
+    if filed and other and bank:
+        co, filled, mism = lender.merge(filed, other)
+        if filled:
+            merged.append(f"{lender.EXPORT_NOTE} ({', '.join(filled)}).")
+        if not local:
+            co["name"] = other["name"]
+    elif filed and other:
         co, filled, mism, merged = model.merge(filed, other)
         if not local:
             co["name"] = other["name"]  # the saved model keeps its name, so the library keeps one row for the company
@@ -1683,7 +1764,7 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
         raise ValueError(" ".join([*more, "Upload an Excel export instead."]))
     notes += merged
     # older filings with a P&L but no balance sheet fill the P&L history where nothing else has those years
-    co["pl_only"] = model.pl_only(read, co["dates"]) or None
+    co["pl_only"] = None if bank else model.pl_only(read, co["dates"]) or None
     labels = model.labels(co["dates"])
     have = set(labels)
     no_bs = {s["year"] for s in skipped}
@@ -1715,7 +1796,7 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
     if separate and (twin or any(_norm(m["company"]) == _norm(co["name"]) for m in latest_models(MODELS))):
         co["name"] = f"{co['name']} (NSE)"
     payload = _company_payload(co, (), read)
-    restated = restatements(co, MODELS)
+    restated = None if bank else restatements(co, MODELS)
     payload["restated"], payload["fetched"] = restated, {"filings": read}
     yield {"company": payload}
     if not documents:
@@ -1823,7 +1904,7 @@ def with_results(doc: "ModelDoc", company, filings=(), now=None):
     if not years and not q:
         return None, [], None
     d = doc.model_copy(deep=True)
-    if years and not any(r.get("last") == model.labels(doc.company.dates)[-1] for r in d.track):
+    if years and not doc.lender and not any(r.get("last") == model.labels(doc.company.dates)[-1] for r in d.track):
         d.track = [*d.track, track_record(doc, years, now)][-model.MAX_TRACK:]
     d.company = new.model_copy(update={"name": doc.company.name})  # the library keeps one row per company
     if q and not years:  # a new quarter alone: when it came in, so the list can say "new results" until you review
@@ -2258,7 +2339,8 @@ def peer_rows(symbols):
                 yrs.setdefault(w, []).append(y)
             yield {"row": {"symbol": sym, "name": co["name"], "year": payload["years"][-1], "price": m.get("price"),
                            "at": src["price_at"], "source": "; ".join(f"{_spans_text(v)}: {w}" for w, v in yrs.items()),
-                           "metrics": model.peer_metrics(payload["hist"], m.get("price"), m.get("shares"))}}
+                           "metrics": (lender if co.get("kind") == "lender" else model).peer_metrics(
+                               payload["hist"], m.get("price"), m.get("shares"))}}
         except (sources.Offline, ValueError) as e:  # fetch_company's upload advice is for adding a company, not a peer
             yield {"row": {"symbol": sym, "name": sym, "error": str(e).replace(" Upload an Excel export instead.", "")[:500]}}
 
@@ -2359,13 +2441,14 @@ def list_models(root=None):
         try:
             doc = load_model(model_id, root)
             co, sc, n = doc.args()
+            eng = lender if doc.lender else model
             ex = {s: model.expand(sc[s], n) for s in model.SCENARIOS}
-            projs = {s: model.project(co["hist"], ex[s], n) for s in model.SCENARIOS}
-            last = projs[doc.active][-1]["revenue"]
+            projs = {s: eng.project(co["hist"], ex[s], n) for s in model.SCENARIOS}
+            last = projs[doc.active][-1]["total_income" if doc.lender else "revenue"]
             labels = model.labels(co["dates"])
             # warning signs as the open model counts them: the radar on the upgraded history (args() upgrades it);
             # unusual years and data notes are never counted
-            radar = model.forensic(co["hist"], labels, doc.notes)
+            radar = eng.forensic(co["hist"], labels, doc.notes)
             sym = (doc.company.source or {}).get("symbol")
             live = _live(root, sym)
             if live and doc.valuation.price is None:  # today's price, from the cache only (a typed price stays)
@@ -2373,7 +2456,7 @@ def list_models(root=None):
             cover = _coverage(projs, co, ex, doc.valuation.model_dump())
             rec = doc.track[-1] if doc.track else {}
             q = co.get("quarters") or {}
-            qt = model.quarter_track(co, projs["base"])
+            qt = None if doc.lender else model.quarter_track(co, projs["base"])
             qa = (doc.company.source or {}).get("quarter_added") or {}
         except Exception:  # noqa: BLE001
             continue  # ponytail: skip any unreadable file, never fail the whole list
@@ -2408,7 +2491,16 @@ def _before(a, b):
 
 def _coverage(projs, co, ex, val):
     """The landing row: price, bear/base/bull value per share, base's reverse DCF against its own average growth,
-    or why there's no value. Only base gets the reverse DCF (about 50 runs), not the grids or the note."""
+    or why there's no value. Only base gets the reverse DCF (about 50 runs), not the grids or the note. A lender: the
+    residual-income values, and the market-implied RoE against the base case's steady-state RoE (implied_kind "roe")."""
+    if co.get("kind") == "lender":
+        v = lender.valuation(projs, co["hist"], val, co["market"])
+        sv = v["scenarios"]
+        pos = {s: sv[s]["per_share"] if (sv[s]["per_share"] or 0) > 0 else None for s in model.SCENARIOS}
+        return {"price": v["price"], "values": pos, "implied": v["implied_roe"], "growth": sv["base"]["roe_t"],
+                "implied_kind": "roe",
+                "why": None if pos["base"] is not None else "no share count" if not v["shares"] else
+                "Ke doesn't clear terminal growth" if v["error"] else "equity value is negative on these inputs"}
     v = model.valuation(projs, co["hist"], val, ex["base"], co["market"], inputs={"base": ex["base"]})
     sv = v["scenarios"]
     g = ex["base"]["growth"]
@@ -2442,7 +2534,7 @@ def restatements(co, root=None):
         changes = [{"year": y, "line": line, "old": o[k], "new": h[k]}
                    for y, d, h in zip(model.labels(co["dates"]), co["dates"], co["hist"]) if (o := old.get(d.date()))
                    for k, line in RESTATED
-                   if o.get(k) is not None and abs(h[k] - o[k]) > max(RESTATE_TOL * abs(o[k]), 0.01)]
+                   if o.get(k) is not None and h.get(k) is not None and abs(h[k] - o[k]) > max(RESTATE_TOL * abs(o[k]), 0.01)]
         # what was attached, proposed and approved there carries over, so re-importing never loses it
         carry = {k: [x.model_dump(mode="json") if isinstance(x, BaseModel) else x for x in getattr(doc, k)]
                  for k in ("filings", "proposals", "reports")} | {"notes": doc.notes}

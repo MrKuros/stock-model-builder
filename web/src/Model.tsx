@@ -6,6 +6,7 @@ import DraftPanel, { failing, latest, path, useDraft } from './Draft'
 import { Checks, useAi } from './Sources'
 import { Confirm, Next, PageHead, Src, Stepper } from './Shell'
 import { shortName } from './Note'
+import { LenderReadout, isLender } from './Lender'
 import { useHref } from './route'
 import { T } from './Term'
 import {
@@ -31,6 +32,34 @@ export const PLAIN: Record<string, [string, string]> = {
   oca_pct: ['Other current assets % of sales', 'advances, deposits'],
   ol_pct: ['Other liabilities % of sales', 'provisions, advances received'],
   debt_change: ['Net debt change', 'Rs cr a year; funding gaps are borrowed regardless'],
+  // lenders (lender.DRIVERS)
+  adv_growth: ['Loan growth', 'YoY growth in advances'],
+  nim: ['NIM', 'NII ÷ average total assets'],
+  cost_income: ['Cost-to-income', 'opex ÷ (NII + fee and other income)'],
+  credit_cost: ['Credit cost', 'provisions ÷ average advances'],
+  adv_assets: ['Advances % of total assets', 'sets total assets from the loan book'],
+  rwa_density: ['RWA % of total assets', 'risk-weighted assets, for the capital ratio'],
+  cet1_min: ['CET1 floor', 'equity is raised at year end below it'],
+}
+/** A lender's drivers in the same three tiers, and their rules (lender.defaults). */
+const L_TOP = ['adv_growth', 'nim', 'credit_cost']
+const L_ALSO = ['cost_income', 'oi_pct', 'tax_rate', 'payout']
+const L_RULE: Record<string, string> = {
+  adv_growth: 'Median of the last 3 years’ loan growth (a merger year doesn’t set it)',
+  nim: '3-yr ratio of sums: NII ÷ average total assets',
+  oi_pct: '3-yr ratio of sums: fee and other income ÷ average total assets',
+  cost_income: '3-yr ratio of sums: opex ÷ net total income (years with provisions split out)',
+  credit_cost: '3-yr ratio of sums: provisions ÷ average advances (years with provisions split out)',
+  tax_rate: '3-yr ratio of sums: tax ÷ PBT',
+  payout: '3-yr ratio of sums: dividends paid ÷ PAT',
+  adv_assets: 'Last reported year, so total assets start where the books end',
+  rwa_density: 'Last reported year: net worth ÷ (CET1 × total assets) for a bank, so the first forecast CET1 is the reported one; advances ÷ assets (100% risk weight) for an NBFC',
+  cet1_min: 'Bank: 12% (RBI’s 8% incl. buffer plus a 4 pp cushion). NBFC: 15% (RBI’s CRAR minimum), on net worth',
+}
+/** A lender's names where a key means something else there (lender.DRIVERS). */
+const L_PLAIN: Record<string, [string, string]> = {
+  oi_pct: ['Fee & other income', '% of average total assets'],
+  payout: ['Dividend payout', '% of PAT; equity is raised if CET1 would breach the floor'],
 }
 export const inputName = (k: string, fallback = k) => PLAIN[k]?.[0] ?? fallback
 const TOP = ['growth', 'ebitda_margin']
@@ -45,7 +74,7 @@ const RULE: Record<string, string> = {
   payout: '3-yr ratio of sums: dividend ÷ PAT, bounded 0–100%',
   mi_pct: '3-yr ratio of sums, bounded −50% to 50%',
 }
-const ruleOf = (k: string) => RULE[k] ?? '3-yr ratio of sums (each year weighted by its size)'
+const ruleOf = (k: string, lender = false) => (lender ? L_RULE[k] : RULE[k]) ?? '3-yr ratio of sums (each year weighted by its size)'
 // payout, other income, interest and minorities don't move a cash-flow-to-firm value (model.IMPACT)
 const NO_VALUE = new Set(['payout', 'oi_pct', 'int_rate', 'mi_pct', 'debt_change'])
 // defaults an attached annual filing or an approved note can move (payables, cash-flow capex, a business moved out);
@@ -64,14 +93,15 @@ const METRICS: [string, string, (r: Row) => number | null][] = [
 ]
 
 /** "−Rs 87 per 1 pp": the base fair value's slope from the one-step runs (model.drivers_impact), in the input's unit. */
-export function perStep(k: string, impact: Impact[] | undefined, kind: Kind): string | null {
-  if (NO_VALUE.has(k)) return 'no effect on FCFF'
+export function perStep(k: string, impact: Impact[] | undefined, kind: Kind, lender = false): string | null {
+  if (!lender && NO_VALUE.has(k)) return 'no effect on FCFF'
   const d = impact?.find(x => x.key === k)
   if (!d || d.down == null || d.up == null) return null
-  const unit = kind === 'pct' ? 0.01 : 10
+  const bps = lender && (k === 'nim' || k === 'credit_cost') // a margin quoted in bps: per 10 bps, not per 1 pp
+  const unit = bps ? 0.001 : kind === 'pct' ? 0.01 : 10
   const s = ((d.up - d.down) / (2 * d.step)) * unit
   if (Math.abs(s) < 0.5) return '< Rs 0.5/share per step'
-  return `${s < 0 ? '−' : '+'}Rs ${Math.abs(s) >= 10 ? money(Math.round(Math.abs(s))) : rs(Math.abs(s))}/share per ${kind === 'pct' ? '1 pp' : '10 days'}`
+  return `${s < 0 ? '−' : '+'}Rs ${Math.abs(s) >= 10 ? money(Math.round(Math.abs(s))) : rs(Math.abs(s))}/share per ${bps ? '10 bps' : kind === 'pct' ? '1 pp' : '10 days'}`
 }
 
 interface Props {
@@ -85,6 +115,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
   const href = useHref()
   const ai = useAi()
   const { company, years: histYears, ratios, defaults, drivers } = parsed
+  const lender = isLender(parsed)
   const { n, active, scenarios } = doc
   const a = scenarios[active]
   const setA = (f: (p: Paths) => Paths) =>
@@ -130,7 +161,8 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
     const s = srcOf(k), p = propOf(s), kind = kindOf(k)
     if (p) return <Src kind="you">Edited · from {docOf(p)} p. {p.source.page}</Src>
     if (s === 'manual' || (s !== 'history' && isYou(k))) return <Src kind="you">Edited · default {path(seeded[active][k], kind)}</Src>
-    return <Src kind="rule">Default: {k === 'debt_change' ? 'zero' : k === 'growth' ? '3-yr CAGR' : '3-yr history'}</Src>
+    return <Src kind="rule">Default: {k === 'debt_change' ? 'zero' : k === 'growth' ? '3-yr CAGR' : lender && ['adv_assets', 'rwa_density'].includes(k) ? 'last year'
+      : k === 'cet1_min' ? 'regulatory floor + cushion' : k === 'adv_growth' ? '3-yr median' : '3-yr history'}</Src>
   }
   const impact = v?.note?.impact
   const be = v?.note?.breakevens ?? {}
@@ -147,14 +179,15 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
   const resetActive = () => setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [active]: seeded[active] },
     assumption_sources: { ...d.assumption_sources, [active]: {} } }))
   const dioUsed = (ratios[nHist - 1]?.dio ?? 0) >= 1
-  const also = ALSO.filter(k => shown(k) && (k !== 'dio' || dioUsed))
-  const rest = drivers.map(d => d[0]).filter(k => shown(k) && !TOP.includes(k) && !also.includes(k))
+  const top = lender ? L_TOP : TOP
+  const also = (lender ? L_ALSO : ALSO).filter(k => shown(k) && (k !== 'dio' || dioUsed))
+  const rest = drivers.map(d => d[0]).filter(k => shown(k) && !top.includes(k) && !also.includes(k))
   const ownCount = drivers.map(d => d[0]).filter(k => shown(k) && (srcOf(k) === 'manual' || !!propOf(srcOf(k)) || (srcOf(k) !== 'history' && isYou(k)))).length
 
   const row = (k: string, big = false) => (
-    <DriverRow key={k} k={k} big={big} kind={kindOf(k)} open={open === k} onToggle={() => setOpen(o => (o === k ? null : k))}
+    <DriverRow key={k} k={k} big={big} lender={lender} kind={kindOf(k)} open={open === k} onToggle={() => setOpen(o => (o === k ? null : k))}
       value={valueOf(k)} rule={seeded[active][k]} you={!!propOf(srcOf(k)) || srcOf(k) === 'manual' || (srcOf(k) !== 'history' && isYou(k))}
-      src={srcWords(k)} history={ratios.map(r => r[k])} years={histYears} effect={perStep(k, impact, kindOf(k))} need={needOf(k)} name={name}
+      src={srcWords(k)} history={ratios.map(r => r[k])} years={histYears} effect={perStep(k, impact, kindOf(k), lender)} need={needOf(k)} name={name}
       burn={burnOf(k)} onChange={p => setA(prev => ({ ...prev, [k]: p }))} onReset={() => resetOne(k)}>
       <RuleFold k={k} kind={kindOf(k)} rule={seeded[active][k]} active={active} parsed={parsed} doc={doc} />
       {(k === 'growth' || k === 'ebitda_margin') && <MovedOutCard doc={doc} setDoc={setDoc} year={histYears[nHist - 1]} revenue={hist[nHist - 1].revenue ?? 0}
@@ -168,7 +201,9 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
   return (
     <>
       <PageHead label="Model · Forecast" title="Forecast"
-        purpose={<>Three-statement forecast drivers. Defaults are rule-based from {name}’s last three reported years; edits re-run the
+        purpose={lender ? <>Lender forecast drivers: loan growth, <T k="nim" />, <T k="credit_cost" />, <T k="cost_income" /> and a <T k="cet1" /> floor. Defaults are
+          rule-based from {name}’s last three reported years; edits re-run the balance sheet, P&amp;L and residual-income value instantly. Recalculation never calls AI.</>
+          : <>Three-statement forecast drivers. Defaults are rule-based from {name}’s last three reported years; edits re-run the
           model and DCF instantly. Recalculation never calls AI.</>}
         answer={v && (v.scenarios[active].per_share ?? 0) > 0
           ? <>{NAMES[active]}-case fair value <span className="num ours">Rs {rs(v.scenarios[active].per_share!)}</span>/share.
@@ -177,8 +212,8 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
 
       <div className="f-tool">
         <p>Editing the <b>{NAMES[active]}</b> scenario <span className="small muted">(switch in the top bar)</span></p>
-        <button type="button" className="btn" aria-expanded={suggest} aria-controls="draft" onClick={() => setSuggest(s => !s)}>
-          Suggest from documents <span className="ai-tag">AI</span></button>
+        {!lender && <button type="button" className="btn" aria-expanded={suggest} aria-controls="draft" onClick={() => setSuggest(s => !s)}>
+          Suggest from documents <span className="ai-tag">AI</span></button>}
       </div>
       <p className="status-line" aria-live="polite">
         {proj && offIdx < 0 && <span className="ok">Balance sheet balances in all forecast years</span>}
@@ -197,23 +232,25 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
         </div>
       )}
 
-      {suggest && <div id="draft"><DraftPanel parsed={parsed} doc={doc} d={draft} ai={ai} href={href('documents', 'add')} /></div>}
+      {suggest && !lender && <div id="draft"><DraftPanel parsed={parsed} doc={doc} d={draft} ai={ai} href={href('documents', 'add')} /></div>}
 
       <section className="f-tier" aria-labelledby="t1-h" id="inputs">
         <h2 id="t1-h">Key value drivers</h2>
-        <p className="why">Revenue growth and EBITDA margin carry most of the fair-value sensitivity.</p>
-        <ul className="drows big">{TOP.filter(shown).map(k => row(k, true))}</ul>
+        <p className="why">{lender ? 'Loan growth, NIM and credit cost carry most of the fair-value sensitivity.'
+          : 'Revenue growth and EBITDA margin carry most of the fair-value sensitivity.'}</p>
+        <ul className="drows big">{top.filter(shown).map(k => row(k, true))}</ul>
       </section>
       <section className="f-tier" aria-labelledby="t2-h">
         <h2 id="t2-h">Other drivers <span className="cnt">{also.length}</span></h2>
         <ul className="drows">{also.map(k => row(k))}</ul>
       </section>
       <details className="fold f-more" open={rest.includes(open ?? '') || undefined}>
-        <summary><span><b>Balance-sheet and other items ({rest.length})</b> · {rest.map(k => inputName(k)).join(', ')}</span></summary>
+        <summary><span><b>{lender ? 'Balance sheet and capital' : 'Balance-sheet and other items'} ({rest.length})</b> · {rest.map(k => inputName(k)).join(', ')}</span></summary>
         <ul className="drows">{rest.map(k => row(k))}</ul>
       </details>
       <details className="fold f-more">
-        <summary><span><b>Copy or reset scenarios</b> · bear/bull = base ∓/±3 pp revenue growth, ∓/±1.5 pp EBITDA margin</span></summary>
+        <summary><span><b>Copy or reset scenarios</b> · bear/bull = base {lender ? '∓/±3 pp loan growth, ∓/±15 bps NIM, ±/∓25 bps credit cost'
+          : '∓/±3 pp revenue growth, ∓/±1.5 pp EBITDA margin'}</span></summary>
         <div className="next-act">
           <button type="button" className="btn" onClick={() => copyBase(setDoc, scenarios)}>Re-seed bear and bull from base</button>
           <button type="button" className="btn" onClick={() => setResetAsk(true)}>Reset {NAMES[active].toLowerCase()} to rule defaults</button>
@@ -223,19 +260,22 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
         body={<>Every driver in this scenario reverts to its rule default{ownCount ? <>, including {ownCount} edited</> : null}. Undo is available straight after.</>}
         yes="Reset to defaults" onYes={resetActive} onClose={() => setResetAsk(false)} />
 
-      <Produces parsed={parsed} projection={projection} active={active} n={n} borrowed={borrowed} />
-      <Next lead="Full projected P&L, balance sheet and cash flow."><a className="btn" href={href('statements')}>Statements</a></Next>
+      {lender ? <section className="f-tier" aria-labelledby="proj-h" id="projection">
+        <h2 id="proj-h">Forecast output</h2>
+        <LenderReadout parsed={parsed} projection={projection} active={active} n={n} />
+      </section> : <Produces parsed={parsed} projection={projection} active={active} n={n} borrowed={borrowed} />}
+      <Next lead={lender ? 'Full projected P&L, balance sheet and ratios.' : 'Full projected P&L, balance sheet and cash flow.'}><a className="btn" href={href('statements')}>Statements</a></Next>
     </>
   )
 }
 
 /** One driver: closed, a row (name, history, value and its source, FV sensitivity); open, the editor in place. */
-function DriverRow({ k, big, kind, open, onToggle, value, rule, you, src, history, years, effect, need, burn, name, onChange, onReset, children }: {
-  k: string; big: boolean; kind: Kind; open: boolean; onToggle: () => void; value: Path; rule: Path; you: boolean; src: ReactNode
+function DriverRow({ k, big, lender, kind, open, onToggle, value, rule, you, src, history, years, effect, need, burn, name, onChange, onReset, children }: {
+  k: string; big: boolean; lender: boolean; kind: Kind; open: boolean; onToggle: () => void; value: Path; rule: Path; you: boolean; src: ReactNode
   history: (number | null)[]; years: string[]; effect: string | null; need: number | null; burn: number | null; name: string
   onChange: (p: Path) => void; onReset: () => void; children: ReactNode
 }) {
-  const [label, sub] = PLAIN[k] ?? [k, '']
+  const [label, sub] = (lender && L_PLAIN[k]) || PLAIN[k] || [k, '']
   const gradual = value.end != null
   const changed = gradual !== (rule.end != null) || Math.abs(value.start - rule.start) > 1e-9 || (gradual && Math.abs((value.end ?? 0) - (rule.end ?? 0)) > 1e-9)
   const known = history.map((x, i) => [x, years[i]] as const).filter((p): p is readonly [number, string] => p[0] != null && Number.isFinite(p[0]))
@@ -347,8 +387,8 @@ function RuleFold({ k, kind, rule, active, parsed, doc }: { k: string; kind: Kin
   return (
     <details className="sub-fold">
       <summary>Default {path(rule, kind)}: method</summary>
-      <p className="small">{sources?.drivers[k] ?? ruleOf(k)}.</p>
-      {k !== 'debt_change' && <p className="arith num">
+      <p className="small">{sources?.drivers[k] ?? ruleOf(k, parsed.kind === 'lender')}.</p>
+      {!['debt_change', 'cet1_min', 'adv_assets', 'rwa_density'].includes(k) && <p className="arith num">
         {(k === 'growth' ? histYears.slice(-4) : used).map(y => {
           const i = histYears.indexOf(y)
           return <span key={y}>{y} {k === 'growth' ? money(hist[i].revenue) : fmt(ratios[i][k], kind)}</span>

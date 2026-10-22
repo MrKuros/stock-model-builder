@@ -1254,6 +1254,11 @@ details.fold .fgrid { margin-top: 4px; }
 .statements td.pl-only { color: var(--ink-2); background: var(--ground); }
 .statements thead th:first-child, .statements thead tr.mark td:first-child { position: sticky; left: 0; z-index: 2; background: var(--panel); text-align: left; padding-left: 16px; }
 .statements tbody th { z-index: 1; }
+/* a lender's ratios tab: drivers, returns, capital and asset quality under their own heads */
+.statements tr.sub-h th { position: sticky; left: 0; text-align: left; padding: 14px 16px 4px; font: 600 10.5px/1.2 var(--ui); letter-spacing: .06em;
+  text-transform: uppercase; color: var(--ink-3); background: var(--panel); border-bottom: 1px solid var(--rule); }
+/* Lender valuation: the shared scale at a readable size */
+.lv-scale { margin: 6px 0 14px; } .lv-scale .scale.row { width: 100%; }
 @media (max-width: 760px) { .stmt-tabs { display: none; } .stmt-sel { display: block; } .stmt-sel .sel { margin-left: 6px; min-height: 44px; } }
 
 /* Documents and sources */

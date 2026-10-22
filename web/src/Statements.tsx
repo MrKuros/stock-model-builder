@@ -4,7 +4,7 @@ import { STATEMENTS, navigate, useHref } from './route'
 import { fmt, fy, money, properName, qfy, type LayoutLine, type LineKind, type ModelDoc, type Parsed, type Projection, type Quarters, type Row, type Ttm } from './lib'
 import { T } from './Term'
 
-const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf', 'fcf', 'fcff'])
+const TOTALS = new Set(['ebitda', 'pat', 'total_liab', 'total_assets', 'net_cf', 'fcf', 'fcff', 'nii', 'ppop', 'equity'])
 
 /** The quarterly tab's inputs: the export's quarters, TTM (and a year earlier), the last reported year (and the one before). */
 export interface QuarterProps { quarters: Quarters; ttm: Ttm | null; ttmPrev: Ttm | null; year: string; last: Row; prev: Row | null }
@@ -16,7 +16,9 @@ import { NAMES } from './lib'
 export default function StatementsPage({ parsed, doc, projection, sub, excel }: { parsed: Parsed; doc: ModelDoc; projection: Projection | null; sub: string; excel: ReactNode }) {
   const href = useHref()
   const { company, years: histYears, layout } = parsed
-  const hist = parsed.hist ?? company.hist
+  const lender = parsed.kind === 'lender' || company.kind === 'lender'
+  // a lender's ratios tab reads the drivers as they were (parsed.ratios) beside the reported lines
+  const hist = lender ? company.hist.map((h, i) => ({ ...parsed.ratios[i], ...h })) : parsed.hist ?? company.hist
   const nHist = hist.length
   const n = doc.n, active = doc.active
   const proj = projection?.scenarios[active].length === n ? projection.scenarios[active] : null
@@ -28,7 +30,7 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
     quarters: company.quarters, ttm: parsed.ttm ?? null, ttmPrev: parsed.ttm_prev ?? null,
     year: histYears[nHist - 1], last: hist[nHist - 1], prev: nHist > 1 ? hist[nHist - 2] : null,
   } : null
-  const tabs = STATEMENTS.filter(t => t[0] !== 'quarters' || quarterly || sub === 'quarters')
+  const tabs = STATEMENTS.filter(t => (t[0] !== 'quarters' || quarterly || sub === 'quarters') && !(lender && t[0] === 'cash-flow'))
   const cur = STATEMENTS.find(t => t[0] === sub) ?? STATEMENTS[0]
   const tab = cur[2] as string
   const moved = parsed.sources?.moved_out
@@ -42,6 +44,9 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
         purpose={tab === 'QUARTERS'
           ? <>Last ten quarters as reported by {properName(parsed.company.name).replace(/\s+(ltd\.?|limited)$/i, '')}, the last full year, and <T k="ttm" />,
             with <T k="yoy" /> and QoQ growth.</>
+          : tab === 'RATIOS' && lender ? <>The drivers as reported (loan growth, <T k="nim" />, <T k="cost_income" />, <T k="credit_cost" />…), returns, capital and asset quality,
+            every year. Reported in black; forecast in blue, marked E.</>
+          : tab === 'CASH FLOW' && lender ? <>Lenders aren’t modelled on cash flow: deposits and loans are the operating business.</>
           : tab === 'RATIOS' ? <>Margins, growth, returns, working-capital days, cash conversion and leverage, every year. Reported in black; forecast in blue, marked E.</>
           : <>Every line, every year. Reported in black; forecast in blue, marked E. Rs cr.</>}
         answer={tab === 'QUARTERS' ? (quarterly ? <>Quarters to {qfy(quarterly.quarters.dates[quarterly.quarters.dates.length - 1])}.</> : <>No quarterly data in this file.</>)
@@ -59,7 +64,7 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
             : <p className="val-empty">No quarterly data in this Excel export. Exports with the Quarters block show the last ten quarters
                 and TTM here.</p>
           : <StatementTable layout={layout} section={tab} years={years} rows={rows} nPl={nPl} nHist={nHist} hide={hide} shares={shares}
-              cogs={parsed.sources?.basis === 'cogs'} />}
+              cogs={parsed.sources?.basis === 'cogs'} lender={lender} />}
         {tab !== 'QUARTERS' && nPl > 0 && <p className="muted small">
           {fy(pl[0].year)}{nPl > 1 ? `–${fy(pl[nPl - 1].year)}` : ''}: P&amp;L from NSE’s annual results filings, which carry no
           balance sheet or cash flow in XBRL, so those lines are blank. These years fill the P&amp;L and the revenue <T k="cagr" /> track
@@ -69,7 +74,15 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
           Forecast base is Rs {money((hist[nHist - 1].revenue ?? 0) - moved.revenue_out)} cr, not the reported Rs {money(hist[nHist - 1].revenue ?? 0)} cr:
           Rs {money(moved.revenue_out)} cr of {histYears[nHist - 1]} revenue ({moved.reason || 'divested business'}) deconsolidated, so the step down
           into {projection!.years[0]} is deliberate. <a href={href('forecast', 'growth')}>Edit in Forecast</a></p>}
-        {tab === 'RATIOS' && (
+        {lender && tab !== 'RATIOS' && hist.some(h => h.provisions == null) && <p className="muted small">
+          {fy(histYears[hist.findIndex(h => h.provisions == null)])}–{fy(histYears[nHist - 1 - [...hist].reverse().findIndex(h => h.provisions == null)])}{' '}
+          come from the export: provisions sit inside operating expenses (PPOP blank) and advances include other assets. From the first filed
+          year these are split as filed.</p>}
+        {tab === 'RATIOS' && lender && <p className="muted small">
+          NIM, fee income and the RoA tree on average total assets; credit cost on average advances; cost of funds on average deposits and
+          borrowings. CET1 (forecast) = net worth ÷ RWA, with equity raised at year end below the floor. GNPA, NNPA and CET1 as filed by the
+          bank (not filed by NBFCs in XBRL). Excel-export years hold provisions inside operating expenses. – means not available.</p>}
+        {tab === 'RATIOS' && !lender && (
           <p className="muted small">
             ROE = PAT ÷ average equity. ROCE = EBIT ÷ average (equity + borrowings + lease liabilities), EBIT = PBT +
             interest. Asset turnover = revenue ÷ average total assets. Averages use opening and closing balances; the
@@ -107,16 +120,19 @@ function cell(key: string, v: number | null | undefined, kind: LineKind): string
   return fmt(v, kind)
 }
 
-function StatementTable({ layout, section, years, rows, nPl, nHist: nRep, hide, shares, cogs }: {
+function StatementTable({ layout, section, years, rows, nPl, nHist: nRep, hide, shares, cogs, lender }: {
   layout: LayoutLine[]; section: string; years: string[]; rows: Row[]; nPl: number; nHist: number; hide?: Set<string>
-  shares: (number | null)[]; cogs: boolean
+  shares: (number | null)[]; cogs: boolean; lender?: boolean
 }) {
   let lines: Line[] = []
   let at = ''
+  // a lender's ratios tab: its drivers, returns, capital and asset quality, each under its own head
+  const sections = lender && section === 'RATIOS' ? ['ASSUMPTIONS', 'RATIOS', 'CAPITAL', 'ASSET QUALITY (reported)'] : [section]
+  const HEADS: Record<string, string> = { ASSUMPTIONS: 'Drivers', RATIOS: 'Returns and funding', CAPITAL: 'Capital', 'ASSET QUALITY (reported)': 'Asset quality (reported)' }
   for (const [label, key, kind] of layout) {
-    if (kind === 'head') at = label
-    else if (key && at === section && !hide?.has(key) && !(OPTIONAL.has(key) && rows.every(r => !r[key])))
-      lines.push([LABEL[key] ?? label, key, kind as LineKind, r => r[key]])
+    if (kind === 'head') { at = label; if (sections.length > 1 && sections.includes(label)) lines.push([HEADS[label], `h-${label}`, 'num', () => undefined]) }
+    else if (key && sections.includes(at) && !hide?.has(key) && !(OPTIONAL.has(key) && rows.every(r => !r[key])))
+      lines.push([(lender ? null : LABEL[key]) ?? label, key, kind as LineKind, r => r[key]])
   }
   // UI-only rows, from lines already here (no engine number changes)
   const eps = (i: number) => div(rows[i].pat, shares[i])
@@ -126,7 +142,7 @@ function StatementTable({ layout, section, years, rows, nPl, nHist: nRep, hide, 
     const at = lines.findIndex(l => l[1] === 'pat') + 1
     lines.splice(at, 0, [<><T k="eps" /> (Rs)</>, 'eps', 'num', (_, i) => eps(i)])
   }
-  if (section === 'RATIOS') {
+  if (section === 'RATIOS' && !lender) {
     const base = (r: Row) => (cogs ? r.cogs : r.revenue)
     const lead: Line[] = [
       [<T k="ebitda_margin" />, 'ebitda_margin', 'pct', r => div(r.ebitda, r.revenue)],
@@ -164,7 +180,9 @@ function StatementTable({ layout, section, years, rows, nPl, nHist: nRep, hide, 
           </tr>
         </thead>
         <tbody>
-          {lines.map(([label, key, kind, get]) => (
+          {lines.map(([label, key, kind, get]) => key.startsWith('h-')
+            ? <tr key={key} className="sub-h"><th scope="rowgroup" colSpan={rows.length + 1}>{label}</th></tr>
+            : (
             <tr key={key} id={key} tabIndex={-1} className={TOTALS.has(key) ? 'total' : undefined}>
               <th scope="row">{label}</th>
               {rows.map((r, i) => {

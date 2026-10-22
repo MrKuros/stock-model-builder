@@ -8,6 +8,7 @@ import { qfy } from './lib'
 import { growth } from './Statements'
 import { latestScored, quarterWords, unreviewed } from './Tracking'
 import { useAi } from './Sources'
+import { ImpliedCard, LenderKeyFinancials, isLender } from './Lender'
 import { Next, PageHead, Scale, Stepper, Verdict } from './Shell'
 import { useHref } from './route'
 import { T } from './Term'
@@ -54,11 +55,13 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
   const peers = doc.peers
   const read = peers?.approved_at ? projection?.peers?.peers.filter(r => r.metrics && peers.chosen.includes(r.symbol ?? '')).length ?? 0 : 0
   const fixLink = fix && <a className="primary" href={href(fix.page, fix.anchor)}>{fix.label}</a>
+  const lender = isLender(parsed)
 
   return (
     <>
       <PageHead label="Summary" title={properName(company.name).replace(/\s+(ltd\.?|limited)$/i, '').trim()}
-        purpose="Valuation, implied expectations, forensics, latest results and peers."
+        purpose={lender ? 'Lender template: residual-income valuation, implied RoE, asset-quality and capital checks, and peers.'
+          : 'Valuation, implied expectations, forensics, latest results and peers.'}
         answer={answer} />
       {fixLink && <p className="fix-line">{fixLink}</p>}
       {doc.active !== 'base' && <p className="small-note">This page shows the base case. {NAMES[doc.active]}-case fair value:
@@ -67,7 +70,7 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
       {fresh && <div className="banner new" role="status"><p><b>New results: {fy(s!.year.year)}.</b> {vs(rev?.err)}</p>
         <div className="banner-act"><a className="btn" href={href('tracking')}>Results tracking</a></div></div>}
 
-      <KeyFinancials parsed={parsed} projection={projection} />
+      {lender ? <LenderKeyFinancials parsed={parsed} projection={projection} /> : <KeyFinancials parsed={parsed} projection={projection} />}
       <div className="cards">
         <article className="acard" aria-labelledby="q1">
           <h2 id="q1">Valuation</h2>
@@ -77,10 +80,10 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
             <Scale price={price} bear={values.bear} base={values.base} bull={values.bull} />
             <p className="small dim">Ochre: CMP. Blue band: bear–bull fair-value range; blue line: base.</p>
           </>}
-          <a className="go" href={href('valuation')}>DCF and sensitivity</a>
+          <a className="go" href={href('valuation')}>{lender ? 'Residual income and sensitivity' : 'DCF and sensitivity'}</a>
         </article>
 
-        <article className="acard" aria-labelledby="q2">
+        {lender ? <ImpliedCard parsed={parsed} projection={projection} /> : <article className="acard" aria-labelledby="q2">
           <h2 id="q2">Reverse DCF</h2>
           {noValue || price == null ? <p className="serif">No fair value or no CMP, so nothing to solve for.</p>
             : implied == null ? <p className="serif">No flat revenue growth between −30% and +80% reconciles base-case FV to CMP.</p>
@@ -90,7 +93,7 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
               <Bars rows={[['Implied', implied, 'mkt'], ...(best5 ? [['Best 5-yr', best5.value, 'ink'] as const] : []), ...(l3 != null ? [['Last 3-yr', l3, 'ink'] as const] : [])]} />
             </>}
           <a className="go" href={href('reverse-dcf')}>Implied expectations</a>
-        </article>
+        </article>}
 
         <article className="acard" aria-labelledby="q3">
           <h2 id="q3">Risks & forensics</h2>
@@ -101,7 +104,8 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
 
         <article className="acard" aria-labelledby="q4">
           <h2 id="q4">Results tracking</h2>
-          {fresh ? <p className="serif">New results: {fy(s!.year.year)}. {vs(rev?.err)}</p>
+          {lender ? <p className="serif">Not scored against the forecast for lenders yet. Latest filed: {fy(years[years.length - 1])}.</p>
+            : fresh ? <p className="serif">New results: {fy(s!.year.year)}. {vs(rev?.err)}</p>
             : <p className="serif">No new results since the model was built{since ? ` (${when(since).replace(/ \d{4}$/, '')})` : ''}.
               {' '}Latest filed: {lastQ ? qfy(lastQ) : fy(years[years.length - 1])}.</p>}
           {qline && <p className="small"><a href={href('tracking', 'quarter')}>{qline}</a>.</p>}
@@ -117,9 +121,12 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
           <a className="go" href={href('peers')}>{peers?.approved_at ? 'Relative valuation' : 'Choose peers'}</a>
         </article>
       </div>
-      <TryIt doc={doc} setDoc={setDoc} projection={projection} />
+      <TryIt doc={doc} setDoc={setDoc} projection={projection} lender={lender} />
 
-      <section className="note-x" aria-labelledby="nx-h">
+      {lender ? <section className="note-x" aria-labelledby="nx-h">
+        <h2 id="nx-h">Research note</h2>
+        <p className="serif">The written note isn’t available for banks and NBFCs yet. Valuation, implied RoE and the checks are all by rules.</p>
+      </section> : <section className="note-x" aria-labelledby="nx-h">
         <h2 id="nx-h">Research note <span className="ai-tag">AI-drafted · numbers rule-checked</span></h2>
         {tn ? <>
           <p className="small dim">Written {when(tn.written_at)} from this model’s outputs.</p>
@@ -134,7 +141,7 @@ export default function Summary({ parsed, doc, setDoc, projection, check, checkM
           {w.fail && <p className="error" role="alert">{w.fail.text}{w.fail.checks?.length ? ` ${w.fail.checks.map(x => x.detail).join(' ')}` : ''} Nothing was saved.{' '}
             <button type="button" className="link" onClick={w.write}>Try again</button></p>}
         </>}
-      </section>
+      </section>}
 
       <p className="src-line-s small">Source: {yearSources(company, years).map(([l, y]) => `${l} ${y}`).join(' and ')}
         {company.source?.symbol ? ` · CMP ${ago(company.source.price_at)}` : ''} · <a href={href('documents', 'sources')}>Details</a>
@@ -194,7 +201,7 @@ function KeyFinancials({ parsed, projection }: { parsed: Parsed; projection: Pro
 }
 
 /** Horizontal bars on one scale, the figure written beside each (a negative one says so in its sign and its words). */
-function Bars({ rows }: { rows: readonly (readonly [string, number, 'mkt' | 'ink'])[] }) {
+export function Bars({ rows }: { rows: readonly (readonly [string, number, 'mkt' | 'ink'])[] }) {
   const max = Math.max(...rows.map(r => Math.abs(r[1])), 1e-9)
   return (
     <dl className="hbars">{rows.map(([k, x, tone]) => <div key={k}>
@@ -216,23 +223,24 @@ export function Meter({ c }: { c: Record<Severity, number> }) {
 
 /** Quick sensitivity: the two drivers that move fair value most, as one live line on the active scenario. The same
  * setter as the Forecast rows, so both always agree. A faded path is edited in the forecast instead. */
-function TryIt({ doc, setDoc, projection }: { doc: ModelDoc; setDoc: Props['setDoc']; projection: Projection | null }) {
+function TryIt({ doc, setDoc, projection, lender }: { doc: ModelDoc; setDoc: Props['setDoc']; projection: Projection | null; lender: boolean }) {
   const href = useHref()
   const a = doc.scenarios[doc.active], src = doc.assumption_sources[doc.active] ?? {}
   const value = projection?.scenarios[doc.active].length === doc.n ? projection.valuation.scenarios[doc.active].per_share : null
   const set = (k: string) => (x: number) => setDoc(d => ({ ...d, scenarios: { ...d.scenarios, [d.active]: { ...d.scenarios[d.active], [k]: { start: x, end: null } } } }))
-  const box = (k: 'growth' | 'ebitda_margin', label: string) =>
+  const box = (k: string, label: string) =>
     <Stepper id={`try-${k}`} label={label} kind="pct" value={a[k]?.start ?? 0} onChange={set(k)} you={!!src[k] && src[k] !== 'history'} />
   const fv = <b className="num ours">{value != null && value > 0 ? `Rs ${rs(value)}/share` : 'n/a'}</b>
   // a year-by-year input can't sit in one sentence: say what it does and send it to the forecast
-  const moving = (['growth', 'ebitda_margin'] as const).filter(k => a[k]?.end != null)
+  const keys: [string, string][] = lender ? [['adv_growth', 'Loan growth'], ['credit_cost', 'Credit cost']] : [['growth', 'Revenue growth'], ['ebitda_margin', 'EBITDA margin']]
+  const moving = keys.filter(([k]) => a[k]?.end != null)
   return (
     <section className="try" aria-labelledby="try-h">
       <h2 id="try-h">Quick sensitivity <span className="cnt">{NAMES[doc.active]} case</span></h2>
       {moving.length
-        ? <p className="answer s">{moving.map(k => `${k === 'growth' ? 'Revenue growth' : 'EBITDA margin'} fades ${pc(a[k].start)} → ${pc(a[k].end!)}`).join('; ')};
-            edit in <a href={href('forecast', moving[0])}>Forecast</a>. Fair value {fv}.</p>
-        : <p className="answer s">Revenue growth {box('growth', 'Revenue growth')} a year, EBITDA margin {box('ebitda_margin', 'EBITDA margin')}:
+        ? <p className="answer s">{moving.map(([k, l]) => `${l} fades ${pc(a[k].start)} → ${pc(a[k].end!)}`).join('; ')};
+            edit in <a href={href('forecast', moving[0][0])}>Forecast</a>. Fair value {fv}.</p>
+        : <p className="answer s">{keys[0][1]} {box(keys[0][0], keys[0][1])} a year, {keys[1][1].toLowerCase()} {box(keys[1][0], keys[1][1])}:
             fair value {fv}.</p>}
       <p className="small muted">Same drivers as in <a href={href('forecast')}>Forecast</a>; a change here changes them there.</p>
     </section>

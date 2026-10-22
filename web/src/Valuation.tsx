@@ -17,7 +17,7 @@ const rs = (v: number) => (Math.abs(v) >= 100 ? money(v) : dec2(v))
 const toText = (v: number, unit: Unit) => (unit === '%' ? noNegZero((v * 100).toFixed(2).replace(/\.?0+$/, '')) : String(v))
 
 /** A typed input that commits on blur/Enter (Escape restores). Blank = null where the field has a fallback. */
-function Field({ id, label, term, unit, value, fallback, nullable, onCommit }: {
+export function Field({ id, label, term, unit, value, fallback, nullable, onCommit }: {
   id: string; label: string; term: string; unit: Unit; value: number | null; fallback?: string; nullable?: boolean
   onCommit: (v: number | null) => void
 }) {
@@ -229,11 +229,11 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
 
 
 /** Upside/(downside) in the accounting style of the column head: 12% or (83%). */
-const signed = (g: number) => { const t = noNegZero((Math.abs(g) * 100).toFixed(0)); return g < 0 && t !== '0' ? `(${t}%)` : `${t}%` }
+export const signed = (g: number) => { const t = noNegZero((Math.abs(g) * 100).toFixed(0)); return g < 0 && t !== '0' ? `(${t}%)` : `${t}%` }
 const pp = (d: number) => (d === 0 ? 'base' : `${d > 0 ? '+' : '−'}${Math.abs(d * 100)}`)
 
 /** A 5 × 5 grid: cells at or above CMP get ▲ and an outline; the current cell is boxed and labelled "base". */
-function Grid({ id, title, rowsName, colsName, grid, rows, cols, price }: {
+export function Grid({ id, title, rowsName, colsName, grid, rows, cols, price }: {
   id: string; title: string; rowsName: string; colsName: string; grid: (number | null)[][]; rows: string[]; cols: string[]; price: number | null
 }) {
   const mid = Math.floor(rows.length / 2)

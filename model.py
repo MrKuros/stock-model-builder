@@ -182,9 +182,16 @@ def parse_export(file):
         h["cogs"] = None if c.get("rm") is None else c["rm"] - (c["inv_change"] or 0.0)
         rows.append(h)
     hist = _derive(rows)
-    _not_lender(hist)
-    return {"name": str(name), "dates": dates, "hist": hist, "market": _market(ws, s["pl"]["report date"], dates),
-            "quarters": _quarters(s.get("q"))}
+    co = {"name": str(name), "dates": dates, "hist": hist, "market": _market(ws, s["pl"]["report date"], dates),
+          "quarters": _quarters(s.get("q"))}
+    try:
+        _not_lender(hist)
+    except Lender:
+        import lender  # a bank or NBFC: the lender template (6.1); lender imports this module, so not at the top
+        if lender.is_lender_export(hist):
+            return lender.from_export(co)
+        raise
+    return co
 
 
 def _derive(rows):
@@ -219,8 +226,8 @@ def _not_lender(hist):
     ir = statistics.median(h["interest"] / h["revenue"] for h in rev)
     oca = statistics.median(h["other_ca"] / h["revenue"] for h in rev)
     if all(not h["receivables"] and not h["inventory"] for h in hist) or (ir > 0.3 and wc < 0.05) or oca > 2.0:
-        raise Lender("Looks like a bank/NBFC/insurer (loan book or interest dominates, no receivables/inventory). "
-                     "Financial companies are not supported yet.")
+        raise Lender("Looks like an insurer (no receivables or inventory, little interest). Banks and NBFCs use the "
+                     "lender template; insurers aren’t supported: premiums, reserves and embedded value need their own model.")
 
 
 def _quarters(rows):
@@ -408,12 +415,34 @@ XBRL_CF = {  # the financial year to date (results filings carry it for the half
     "IncreaseDecreaseInCashAndCashEquivalents": "net_change_cash",
 }
 XBRL_TAGS = {**XBRL_PL, **XBRL_BS, **XBRL_CF}
+# Lenders (6.1), read only from a filing that has InterestEarned: the exchanges' banking results format (Schedule III
+# for banks: interest earned / expended, provisions, deposits, advances, GNPA, CET1) and the Ind AS NBFC format
+# (Division III: interest income, finance costs, impairment, loans). lender.filing_row turns them into a lender year.
+LENDER_TAGS = {
+    "InterestEarned": "int_earned", "InterestExpended": "int_expended", "OperatingExpenses": "opex",
+    "EmployeesCost": "employee", "OperatingProfitBeforeProvisionAndContingencies": "ppop",
+    "ProvisionsOtherThanTaxAndContingencies": "provisions", "ImpairmentOnFinancialInstruments": "provisions",
+    "ExceptionalItems": "exceptional", "ProfitLossFromOrdinaryActivitiesBeforeTax": "pbt",
+    "ProfitLossForThePeriod": "profit", "ProfitLossAfterTaxesMinorityInterestAndShareOfProfitLossOfAssociates": "pat",
+    "ShareOfProfitLossOfAssociates": "associates", "ProfitLossOfMinorityInterest": "minority",
+    "Capital": "share_cap", "ReservesAndSurplus": "reserves", "Deposits": "deposits", "Borrowings": "borrowings_lender",
+    "DebtSecurities": "debt_securities", "SubordinatedLiabilities": "subordinated",
+    "OtherLiabilitiesAndProvisions": "other_liab_prov", "CapitalAndLiabilities": "equity_and_liabilities",
+    "CashAndBalancesWithReserveBankOfIndia": "cash", "BalancesWithBanksAndMoneyAtCallAndShortNotice": "bank_balances",
+    "Investments": "investments_lender", "Advances": "advances", "Loans": "advances", "FixedAssets": "fixed_assets",
+    "OtherAssets": "other_assets_lender",
+    "GrossNonPerformingAssets": "gnpa", "NonPerformingAssets": "nnpa", "PercentageOfGrossNpa": "gnpa_pct",
+    "PercentageOfNpa": "nnpa_pct", "CET1Ratio": "cet1", "AdditionalTier1Ratio": "at1",
+}
+LENDER_RATIOS = {"gnpa_pct", "nnpa_pct", "cet1", "at1"}  # filed as a fraction (unit "pure"): 0.0124 = 1.24%
+LENDER_STOCKS = {"deposits", "borrowings_lender", "debt_securities", "subordinated", "other_liab_prov", "reserves",
+                 "advances", "investments_lender", "fixed_assets", "other_assets_lender", "gnpa", "nnpa", *LENDER_RATIOS}
 # Results filings from FY2025 break other financial liabilities into described lines (typed-dimension contexts); the
 # ones described as lease liabilities are leases (TCS FY2026: 9,453 + 1,830 = 11,283 cr, the export's borrowings exactly)
 LEASE_LINES = {"OtherNoncurrentFinancialLiabilities": "lease_noncurrent", "OtherCurrentFinancialLiabilities": "lease_current"}
 LEASE_DESC = {"DescriptionOfOtherNoncurrentFinancialLiabilities", "DescriptionOfOtherCurrentFinancialLiabilities"}
 LEASE_RE = re.compile(r"\blease liabilit", re.I)
-XBRL_STOCKS, XBRL_CASH = set(XBRL_BS.values()) | {"borrowings"}, set(XBRL_CF.values())
+XBRL_STOCKS, XBRL_CASH = set(XBRL_BS.values()) | {"borrowings"} | LENDER_STOCKS, set(XBRL_CF.values())
 XBRL_PER_SHARE = {"eps_basic", "eps_diluted", "face_value"}
 XBRL_MAX_UNMAPPED = 300  # a results filing has ~50 non-zero unknown facts; a full annual-report instance can have 1000s
 _XI = "{http://www.xbrl.org/2003/instance}"
@@ -472,6 +501,8 @@ def parse_xbrl(file, mappings=None, company=None):
         raise ValueError("Not an XBRL instance (the file's root isn't <xbrl>). Download the XBRL link of a financial "
                          "results filing from NSE or BSE.")
     tags = {**(mappings or {}), **XBRL_TAGS}  # an approved mapping never overrides a standard element
+    if any(_local(e.tag) == "InterestEarned" for e in root):  # a bank's or NBFC's results (lender.filing_row)
+        tags.update(LENDER_TAGS)
     blank = lambda: {"start": None, "end": None, "instant": False, "basis": None, "dims": False}  # noqa: E731
     ctx, units = {}, {}
     for c in root.iter(_XI + "context"):
@@ -561,6 +592,8 @@ def parse_xbrl(file, mappings=None, company=None):
         if not ok:
             continue
         scale = _xbrl_scale(uid, units.get(uid, []))
+        if key in LENDER_RATIOS:  # a fraction; a filer that types 19.96 for 19.96% is read as 0.1996
+            scale = ("money", 0.01 if abs(v) > 1 else 1.0)  # ponytail: a real ratio above 100% would read as 1/100th
         if key and scale and (scale[0] == "share") == (key in XBRL_PER_SHARE):
             val = round(v * scale[1], 6)
             fs, sn = (facts, seen) if tag in XBRL_TAGS else (mapped, mseen)
@@ -609,7 +642,7 @@ def parse_xbrl(file, mappings=None, company=None):
               f"Assets {_cr(f['total_assets'])}, equity and liabilities {_cr(f['equity_and_liabilities'])}")
     if skipped_cash:
         check("Cash flow", None, "The cash flow in this filing is for the year to date, not this period, so it isn't kept.")
-    if company and end:
+    if company and end and not company.get("kind"):  # ponytail: a lender's filings aren't tied to an export yet
         checks += _xbrl_ties(f, kind, end, company, consolidated)
     if not f:
         check("Statement lines found", False, "No profit and loss or balance sheet lines this app knows were found.")
@@ -2352,7 +2385,7 @@ def _proj_formula(key, x, cogs=False):
     }[key]
 
 
-def _scenario_sheet(wb, scenarios, n, years, formats, head_fill):
+def _scenario_sheet(wb, scenarios, n, years, formats, head_fill, drivers=None):
     """'Scenarios' sheet: one block of blue per-year input cells per scenario. Returns src(scenario, key, j) -> ref."""
     sc = wb.create_sheet("Scenarios")
     sc["A1"] = "Per-year inputs for each scenario. The Model sheet uses the one picked in its cell B3."
@@ -2366,7 +2399,7 @@ def _scenario_sheet(wb, scenarios, n, years, formats, head_fill):
             sc.cell(r, 1 + j).fill = head_fill
         sc.cell(r, 1, s.upper()).font = Font(bold=True)
         inputs = expand(scenarios[s], n)
-        for key, label, kind in DRIVERS:
+        for key, label, kind in drivers or DRIVERS:
             r += 1
             rows[s, key] = r
             sc.cell(r, 1, label)
@@ -2663,13 +2696,13 @@ def peer_metrics(hist, price=None, shares=None):
             "nd_ebitda": r["nd_ebitda"], **_multiples(mcap, _debt(h) - h["cash"] - h["investments"], h, min(nci, 0.99))}
 
 
-def peer_table(own, peers):
+def peer_table(own, peers, cols=PEERS):
     """The company ({name, symbol, year, metrics}) against its peers (the same, or {symbol, error}): per measure the
     peers' median (the company left out) and the company's rank among everyone that has it, 1 = best (PEERS'
     direction; ties share a rank), `of` = how many were ranked."""
     ok = [p for p in peers if p.get("metrics")]
-    out = {"own": own, "peers": peers, "median": {}, "rank": {}, "of": {}, "columns": PEERS}
-    for k, _, _, way in PEERS:
+    out = {"own": own, "peers": peers, "median": {}, "rank": {}, "of": {}, "columns": cols}
+    for k, _, _, way in cols:
         xs = [x for p in ok if (x := p["metrics"].get(k)) is not None]
         mine = own["metrics"].get(k)
         out["median"][k] = statistics.median(xs) if xs else None
@@ -2679,7 +2712,7 @@ def peer_table(own, peers):
     return out
 
 
-def _peers_sheet(wb, t, at, formats):
+def _peers_sheet(wb, t, at, formats, cols=PEERS):
     """'Peers' sheet: the peer table as values at export (no formulas: the peers' numbers aren't in this workbook)."""
     ps = wb.create_sheet("Peers")
     ps["A1"] = (f"Peers at export, {at:%d %b %Y}: values, not formulas. Each company's last reported year; market cap "
@@ -2688,7 +2721,7 @@ def _peers_sheet(wb, t, at, formats):
                 "cheapest multiple. Median = the peers', this company left out.")
     ps["A1"].font = Font(italic=True, color="808080")
     top, bold = 3, Font(bold=True)
-    for j, h in enumerate(["Company", "Symbol", "Year", *(label for _, label, _, _ in PEERS)]):
+    for j, h in enumerate(["Company", "Symbol", "Year", *(label for _, label, _, _ in cols)]):
         ps.cell(top, 1 + j, h).font = bold
     rows = [t["own"], *t["peers"]]
     for i, p in enumerate(rows):
@@ -2696,19 +2729,19 @@ def _peers_sheet(wb, t, at, formats):
         ps.cell(r, 1, p.get("name") or p.get("symbol")).data_type = "s"
         ps.cell(r, 2, p.get("symbol"))
         ps.cell(r, 3, p.get("year") or p.get("error"))
-        for j, (k, _, kind, _) in enumerate(PEERS):
+        for j, (k, _, kind, _) in enumerate(cols):
             c = ps.cell(r, 4 + j, (p.get("metrics") or {}).get(k))
             c.number_format = formats[kind]
-        for j in range(3 + len(PEERS)):
+        for j in range(3 + len(cols)):
             ps.cell(r, 1 + j).font = Font(bold=i == 0)
     r = top + 1 + len(rows)
     ps.cell(r, 1, "Peer median").font = bold
     ps.cell(r + 1, 1, f"{t['own'].get('name')}: rank").font = bold
-    for j, (k, _, kind, _) in enumerate(PEERS):
+    for j, (k, _, kind, _) in enumerate(cols):
         ps.cell(r, 4 + j, t["median"][k]).number_format = formats[kind]
         ps.cell(r + 1, 4 + j, None if t["rank"][k] is None else f"{t['rank'][k]} of {t['of'][k]}")
     ps.column_dimensions["A"].width = 34
-    for j in range(2 + len(PEERS)):
+    for j in range(2 + len(cols)):
         ps.column_dimensions[get_column_letter(2 + j)].width = 13
     ps.freeze_panes = ps.cell(top + 1, 2)
 

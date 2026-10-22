@@ -192,7 +192,7 @@ def main():
     except ValueError as e:
         assert "two" in str(e)
 
-    for edit, msg in ((_bankify, "bank"), (_no_dimension, None), (_text_cell, "not a number")):
+    for edit, msg in ((_no_dimension, None), (_text_cell, "not a number")):  # a bank's export: lender_check
         p = tmp / f"{edit.__name__}.xlsx"
         fake_export(p)
         edit(p)
@@ -265,6 +265,7 @@ def main():
     review_fixes_check(tmp, co, projs, ex)
     library_check(tmp / "models", co, seeded)
     upgrade_check(tmp, co, excel=bool(shutil.which("soffice")))
+    lender_check(tmp, excel=bool(shutil.which("soffice")))
 
     if not shutil.which("soffice"):
         print("SKIP Excel formula check: soffice not found")
@@ -1596,6 +1597,7 @@ def library_check(root, co, scenarios):
     track_check(server, root, co, data)
     watch_check(server, data)
     auto_check(server)
+    lender_api_check(server)
 
 
 def reimport_check(server, root, co, data):
@@ -3047,7 +3049,7 @@ def net_check(server, co):
                                     "secInfo": {"basicIndustry": basic, "industryInfo": basic}}]}
     d = co["dates"][-1]
     net = {**{quote + f"{s}&symbol=ZZQQX": 404 for s in sources.SERIES}, quote + "EQ&symbol=NEWBE": 404,
-           quote + "BE&symbol=NEWBE": q("New BE Limited"), quote + "EQ&symbol=HDFCBANK": q("HDFC Bank Limited", "Private Sector Bank"),
+           quote + "BE&symbol=NEWBE": q("New BE Limited"), quote + "EQ&symbol=HDFCLIFE": q("HDFC Life Insurance Company Limited", "Life Insurance"),
            quote + "EQ&symbol=BADX": q("Bad X Limited"),
            api + "corporates-financial-results?index=equities&symbol=BADX&period=Annual": [
                {"toDate": f"{d:%d-%b-%Y}", "period": "Annual", "consolidated": "Consolidated", "xbrl": f"{arch}x/BAD.xml"}],
@@ -3078,10 +3080,10 @@ def net_check(server, co):
         lines = lambda sym: [json.loads(x) for x in client.post("/api/nse/fetch", json={"symbol": sym}).text.splitlines()]  # noqa: E731
         e = lines("ZZQQX")[-1]
         assert e["final"] and not e["lender"] and "no company with the symbol" in e["error"], e
-        # a bank stops at the quote: no filings asked for, and no "upload an Excel export" (it won't work either)
+        # an insurer stops at the quote: no filings asked for, and no "upload an Excel export" (it won't work either)
         n = len(calls)
-        e = lines("HDFCBANK")[-1]
-        assert e["lender"] and e["final"] and "Private Sector Bank" in e["error"] and len(calls) == n + 1, (e, calls[n:])
+        e = lines("HDFCLIFE")[-1]
+        assert e["lender"] and e["final"] and "Life Insurance" in e["error"] and len(calls) == n + 1, (e, calls[n:])
         assert not server.LENDER.search("Insurance Distributors") and not server.LENDER.search("Exchange and Data Platform")
         # a filing that comes back as a block page: said, not kept, asked again next time
         e = lines("BADX")
@@ -3144,6 +3146,7 @@ def live_net_check():
         assert x["kind"] == "annual" and x["facts"].get("revenue") and x["facts"].get("pat"), x["kind"]
         assert sources.universe(c), "the sector list"
     print("OK: live NSE shapes (search, quote, filings, one XBRL, sector list)")
+    lender_live_check()
     with tempfile.TemporaryDirectory() as tmp:  # BSE, the fallback: TCS's scrip code, its quote and results files
         b = sources.Client(Path(tmp), sources.BSE_HOSTS, sources.BSE_HOME, name="BSE", api=sources.BSE_HEADERS)
         try:
@@ -3537,6 +3540,322 @@ def watch_check(server, data):
     finally:
         server.MODELS, ai.llm = models, llm
         server._clients.clear()
+
+
+
+
+# ---------- 6.1 lenders ----------
+
+BANK_TAGS = {"int_earned": "InterestEarned", "int_expended": "InterestExpended", "other_income": "OtherIncome",
+             "opex": "OperatingExpenses", "provisions": "ProvisionsOtherThanTaxAndContingencies",
+             "pbt": "ProfitLossFromOrdinaryActivitiesBeforeTax", "tax": "TaxExpense", "pat": "ProfitLossForThePeriod",
+             "share_cap": "Capital", "reserves": "ReservesAndSurplus", "deposits": "Deposits", "borrowings": "Borrowings",
+             "other_liab": "OtherLiabilitiesAndProvisions", "cash": "CashAndBalancesWithReserveBankOfIndia",
+             "investments": "Investments", "advances": "Advances", "fixed_assets": "FixedAssets",
+             "other_assets": "OtherAssets", "total_assets": "Assets", "gnpa": "GrossNonPerformingAssets",
+             "nnpa": "NonPerformingAssets", "gnpa_pct": "PercentageOfGrossNpa", "nnpa_pct": "PercentageOfNpa",
+             "cet1": "CET1Ratio", "at1": "AdditionalTier1Ratio", "dividend": "DividendsPaidClassifiedAsFinancingActivities"}
+BANK_STOCKS = {"share_cap", "reserves", "deposits", "borrowings", "other_liab", "cash", "investments", "advances",
+               "fixed_assets", "other_assets", "total_assets"}
+
+
+def bank_rows(years=5):
+    """A steady synthetic bank: lender years (lender.filing_row's lines) growing 14-15% a year."""
+    rows, adv, ta, eq = [], 1000.0, 1500.0, 150.0
+    for _ in range(years):
+        nii, oi, prov = 0.035 * ta, 0.012 * ta, 0.01 * adv
+        opex = 0.45 * (nii + oi)
+        pbt = nii + oi - opex - prov
+        rows.append({"int_earned": 0.08 * ta, "int_expended": 0.08 * ta - nii, "other_income": oi, "provisions": prov,
+                     "opex": opex, "pbt": pbt, "tax": 0.25 * pbt, "pat": 0.75 * pbt, "dividend": 0.15 * pbt,
+                     "share_cap": 10.0, "reserves": eq - 10, "deposits": (ta - eq) * 0.8, "borrowings": (ta - eq) * 0.15,
+                     "other_liab": (ta - eq) * 0.05, "cash": 0.07 * ta, "investments": 0.22 * ta, "advances": adv,
+                     "fixed_assets": 10.0, "other_assets": ta - adv - 0.29 * ta - 10, "total_assets": ta,
+                     "gnpa": 0.03 * adv, "nnpa": 0.01 * adv, "gnpa_pct": 0.03, "nnpa_pct": 0.01, "cet1": 0.15, "at1": 0.01})
+        adv, ta, eq = adv * 1.15, ta * 1.15, eq + 0.6 * pbt
+    return rows
+
+
+def bank_xml(r, end, standalone=True):
+    """A bank's annual results XBRL (the exchanges' banking format) holding lender row r; ratios as fractions."""
+    ctx = lambda i, p: (f'<xbrli:context id="{i}"><xbrli:entity><xbrli:identifier scheme="x">TESTBANK</xbrli:identifier>'  # noqa: E731
+                        f'</xbrli:entity><xbrli:period>{p}</xbrli:period></xbrli:context>')
+    body = "".join(
+        f'<f:{t} contextRef="{"I" if k in BANK_STOCKS else "D"}" unitRef="{"pure" if k in model.LENDER_RATIOS else "INR"}"'
+        f' decimals="-7">{r[k] if k in model.LENDER_RATIOS else r[k] * 1e7:.4f}</f:{t}>'
+        for k, t in BANK_TAGS.items() if r.get(k) is not None)
+    return ('<?xml version="1.0" encoding="UTF-8"?><xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" '
+            'xmlns:f="http://www.bseindia.com/xbrl/fin/2020-03-31/in-bse-fin">'
+            + ctx("D", f"<xbrli:startDate>{_year_start(end):%Y-%m-%d}</xbrli:startDate><xbrli:endDate>{end:%Y-%m-%d}</xbrli:endDate>")
+            + ctx("I", f"<xbrli:instant>{end:%Y-%m-%d}</xbrli:instant>")
+            + '<xbrli:unit id="INR"><xbrli:measure>iso4217:INR</xbrli:measure></xbrli:unit>'
+            '<xbrli:unit id="pure"><xbrli:measure>xbrli:pure</xbrli:measure></xbrli:unit>'
+            f'<f:NatureOfReportStandaloneConsolidated contextRef="D">{"Standalone" if standalone else "Consolidated"}'
+            '</f:NatureOfReportStandaloneConsolidated>' + body + "</xbrli:xbrl>").encode()
+
+
+BANK_DATES = [datetime(2022 + i, 3, 31) for i in range(5)]
+
+
+def bank_company():
+    co, skipped = model_lender().from_filings("Test Bank Ltd", [model.parse_xbrl(bank_xml(r, d))
+                                                               for r, d in zip(bank_rows(), BANK_DATES)],
+                                              {"price": 50.0, "shares": 10.0, "face_value": 1.0})
+    assert not skipped, skipped
+    return co
+
+
+def model_lender():
+    import lender  # noqa: PLC0415
+    return lender
+
+
+def bank_scenarios(lender, co):
+    d = lender.defaults(co["hist"])
+    base = {k: {"start": v, "end": None} for k, v in d.items()}
+    base["adv_growth"] = {"start": 0.18, "end": 0.10}
+    base["cet1_min"] = {"start": 0.16, "end": None}  # above the bank's 15%: equity is raised in the first years
+    return {"base": base, "bull": {**base, "nim": {"start": d["nim"] + 0.0015, "end": None}},
+            "bear": {**base, "credit_cost": {"start": 0.03, "end": None}}}
+
+
+def lender_check(tmp, excel):
+    """6.1: banks and NBFCs by rules. A bank's and an NBFC's results XBRL become lender years that tie (PBT = NII +
+    other income - opex - provisions); defaults, projection identities, capital raise at the CET1 floor, residual
+    income (value = book + PV of RI + PV of terminal RI; at the implied RoE the justified P/B gives CMP) and the
+    forensic radar; an Excel export of a bank becomes a lender and an insurer stays refused; the workbook's live
+    formulas equal Python in all three scenarios (LibreOffice)."""
+    lender = model_lender()
+    rows = bank_rows()
+    x = model.parse_xbrl(bank_xml(rows[-1], BANK_DATES[-1]))
+    assert x["kind"] == "annual" and x["consolidated"] is False and x["facts"]["cet1"] == 0.15, x["facts"]
+    r = lender.filing_row(x["facts"])
+    for k in ("int_earned", "int_expended", "other_income", "provisions", "opex", "pbt", "pat", "dividend", "deposits",
+              "borrowings", "advances", "other_assets", "gnpa_pct"):
+        assert abs(r[k] - rows[-1][k]) < 1e-4, (k, r[k], rows[-1][k])
+    # an NBFC (Ind AS): finance costs, impairment, fee income inside revenue from operations, loans
+    nb = {"int_earned": 900.0, "revenue": 1000.0, "other_income": 2.0, "exceptional": 8.0, "interest": 400.0,
+          "provisions": 60.0, "total_exp": 700.0, "pbt": 310.0, "tax": 80.0, "pat": 230.0, "share_cap": 10.0,
+          "other_equity": 990.0, "advances": 4000.0, "borrowings_lender": 2500.0, "debt_securities": 1200.0,
+          "deposits": 300.0, "cash": 50.0, "bank_balances": 20.0, "investments_lender": 300.0, "ppe": 40.0,
+          "total_assets": 4500.0}
+    n = lender.filing_row(nb)
+    assert n["int_expended"] == 400 and n["other_income"] == 110 and n["provisions"] == 60 and n["opex"] == 240, n
+    assert n["int_earned"] - n["int_expended"] + n["other_income"] - n["opex"] - n["provisions"] == n["pbt"], n
+    assert n["borrowings"] == 3700 and n["cash"] == 70 and n["fixed_assets"] == 40 and n["gnpa"] is None, n
+    assert lender.filing_row({k: v for k, v in nb.items() if k != "advances"}) is None, "no loan book: not a lender year"
+    # a non-lender's filing never reads lender tags: a tag named Investments or Borrowings stays its own
+    assert "advances" not in model.parse_xbrl(filing_xml({"revenue": 10.0, "pbt": 1.0}, datetime(2025, 4, 1),
+                                                         datetime(2026, 3, 31)))["facts"]
+
+    co = bank_company()
+    h, labels = co["hist"], model.labels(co["dates"])
+    assert co["kind"] == "lender" and len(h) == 5 and labels[-1] == "FY2026"
+    assert abs(h[-1]["nii"] - 0.035 * h[-1]["total_assets"]) < 1e-4 and abs(h[-1]["pcr"] - 2 / 3) < 1e-6, h[-1]
+    assert lender.data_checks(co) == [], lender.data_checks(co)
+    rt = lender.ratios(h)
+    assert rt[0]["nim"] is None and abs(rt[-1]["adv_growth"] - 0.15) < 1e-6 and abs(rt[-1]["cost_income"] - 0.45) < 1e-6
+    d = lender.defaults(h)
+    assert abs(d["adv_growth"] - 0.15) < 1e-6 and abs(d["cost_income"] - 0.45) < 1e-6 and abs(d["tax_rate"] - 0.25) < 1e-6, d
+    assert abs(d["payout"] - 0.2) < 1e-6 and d["cet1_min"] == lender.CET1_FLOOR[0], d
+    assert abs(d["rwa_density"] * 0.15 * h[-1]["total_assets"] - h[-1]["equity"]) < 1e-6, "first CET1 = the reported one"
+    # a merger year doesn't set loan growth: the median of the last three years' growth
+    jump = [dict(x) for x in h]
+    jump[-2]["advances"] *= 1.6
+    assert abs(lender.defaults(lender.derive(jump))["adv_growth"] - 0.15) < 1e-6
+
+    sc = bank_scenarios(lender, co)
+    ex = {s: model.expand(sc[s], 5) for s in model.SCENARIOS}
+    projs = {s: lender.project(h, ex[s], 5) for s in model.SCENARIOS}
+    p = projs["base"]
+    assert abs(p[0]["advances"] - h[-1]["advances"] * 1.18) < 1e-6 and all(abs(c["chk_bs"]) < 1e-6 for c in p)
+    assert p[0]["raised"] > 0 and abs(p[0]["cet1"] - 0.16) < 1e-9, "equity raised to the floor"
+    assert all(c["cet1"] >= 0.16 - 1e-9 for c in p) and p[-1]["raised"] == 0, [c["cet1"] for c in p]
+    c = p[1]
+    assert abs(c["pat"] - (c["total_income"] - c["opex"] - c["provisions"] - c["tax"])) < 1e-6
+    assert abs(c["roe"] - c["pat"] / ((p[0]["equity"] + c["equity"]) / 2)) < 1e-12
+    v = lender.valuation(projs, h, None, co["market"], inputs=ex, note=True)
+    sv = v["scenarios"]["base"]
+    assert v["kind"] == "lender" and abs(v["ke"] - 0.135) < 1e-12 and abs(v["book"] - h[-1]["equity"]) < 1e-9, v["ke"]
+    assert abs(sv["equity"] - (v["book"] + sv["pv_sum"] + sv["pv_tv"])) < 1e-6
+    assert abs(sv["grid"][2][2] - sv["per_share"]) < 1e-9, "the grid's centre is the fair value"
+    assert abs((v["implied_roe"] - v["g"]) / (v["ke"] - v["g"]) * v["bvps"] - 50.0) < 1e-9, "implied RoE prices CMP"
+    assert abs(v["pabv"] - 50.0 / ((h[-1]["equity"] - h[-1]["nnpa"]) / 10)) < 1e-12
+    assert v["scenarios"]["bull"]["per_share"] > sv["per_share"] > v["scenarios"]["bear"]["per_share"]
+    assert {i["key"] for i in v["note"]["impact"]} == {"adv_growth", "nim", "cost_income", "credit_cost"}
+    bad = lender.valuation(projs, h, {"wacc_override": 0.054, "g": 0.05}, co["market"])
+    assert "0.5 pp" in bad["error"] and bad["scenarios"]["base"]["per_share"] is None, bad["error"]
+    # forensic: a steady bank lights nothing; GNPA up 1 pp and coverage down lights both
+    radar = {f["key"]: f for f in lender.forensic(h, labels)}
+    assert all(f["severity"] in ("ok", "not_checked") for f in radar.values()), radar
+    assert radar["related"]["needs"] == "annual report" and radar["capital"]["severity"] == "ok"
+    worse = [dict(x) for x in h]
+    worse[-1].update(gnpa_pct=0.045, gnpa=0.045 * worse[-1]["advances"], nnpa=0.03 * worse[-1]["advances"])
+    radar = {f["key"]: f["severity"] for f in lender.forensic(lender.derive(worse), labels)}
+    assert radar["gnpa"] == "high" and radar["pcr"] == "high", radar
+    spike = [dict(x) for x in h]
+    spike[-1]["provisions"] *= 3
+    assert {f["key"]: f["severity"] for f in lender.forensic(spike, labels)}["credit_cost"] == "high"
+    # an Excel export of a bank: the lender template (provisions inside opex); an insurer stays refused
+    p_ = tmp / "bank.xlsx"
+    fake_export(p_)
+    _bankify(p_)
+    b = model.parse_export(p_)
+    assert b["kind"] == "lender" and b["hist"][-1]["provisions"] is None and b["hist"][-1]["deposits"] is None, b["hist"][-1]
+    assert abs(b["hist"][-1]["int_expended"] - 500) < 1e-9 and b["quarters"] is None
+    bd = lender.defaults(b["hist"])
+    assert bd["credit_cost"] == 0.0 and bd["cet1_min"] == lender.CET1_FLOOR[1], bd
+    p_ = tmp / "insurer.xlsx"
+    fake_export(p_)
+    _edit_rows(p_, lambda label, row: label in ("Receivables", "Inventory") and [setattr(c, "value", None) for c in row[1:]])
+    try:
+        model.parse_export(p_)
+        raise AssertionError("an insurer must stay refused")
+    except model.Lender as e:
+        assert "insurer" in str(e), e
+    # filings win, the export fills older years
+    older = {**b, "dates": [datetime(2016 + i, 3, 31) for i in range(len(b["dates"]))]}
+    m, filled, mism = lender.merge(co, older)
+    assert filled == ["FY2016", "FY2017", "FY2018", "FY2019", "FY2020", "FY2021"] and len(m["hist"]) == 11, filled
+    assert len(m["market"]["price_hist"]) == 11 and {x["year"] for x in mism} == {"FY2022", "FY2023", "FY2024", "FY2025"}, mism
+
+    if not excel:
+        return
+    rr = {k: 5 + i for i, (_, k, _) in enumerate(lender.LAYOUT) if k}
+    for i, s in enumerate(model.SCENARIOS):
+        (tmp / f"bank-{s}").mkdir()
+        (tmp / f"bank-{s}" / "model.xlsx").write_bytes(lender.to_excel(co, sc, 5, s))
+        ws = recalc(tmp / f"bank-{s}" / "model.xlsx", tmp / f"bank-{s}" / "calc")
+        assert ws["B3"].value == i + 1, ws["B3"].value
+        for j, c in enumerate(projs[s]):
+            _same(ws, rr, 2 + len(h) + j, {k: c[k] for k in rr if k in c} | {k: ex[s][k][j] for k in lender.KEYS}, (s, j))
+        for j, x in enumerate(h):
+            _same(ws, rr, 2 + j, {k: x[k] for k in ("nii", "total_income", "equity", "total_liab")}, ("bank hist", j))
+        vs = ws.parent["Valuation"]
+        at = {c.value: c.row for c in vs["A"] if isinstance(c.value, str)}
+        w = v["scenarios"][s]
+        for label, want in (("Fair value per share (Rs)", w["per_share"]), ("Sum of PV of residual income", w["pv_sum"]),
+                            ("Justified P/B = (RoE - g) / (Ke - g)", w["justified_pb"]), ("P/B at CMP", v["pb"]),
+                            ("P/ABV at CMP", v["pabv"]), ("Steady-state RoE (last year's PAT / opening book)", w["roe_t"]),
+                            ("Market-implied steady-state RoE = g + P/B x (Ke - g)", v["implied_roe"])):
+            got = vs.cell(at[label], 2).value
+            assert isinstance(got, (int, float)) and abs(got - want) < 1e-6 * max(1, abs(want)), (s, label, got, want)
+        top = next(r for label, r in at.items() if label.startswith("Fair value per share (Rs): Ke")) + 1
+        for a, row in enumerate(w["grid"]):
+            for k, x in enumerate(row):
+                got = vs.cell(top + 1 + a, 2 + k).value
+                assert (x is None and got in (None, "")) or abs(got - x) < 1e-6 * max(1, abs(x)), (s, a, k, got, x)
+
+
+def lender_api_check(server):
+    """6.1 through the API: a bank by ticker (recorded NSE answers: standalone filings picked, no quarters asked for,
+    an insurer stops at the quote), its payload and projection, Excel, the library row (implied RoE), peers, and the AI
+    steps that read the non-financial lines refused in plain words. Projecting never calls the LLM."""
+    import ai  # noqa: PLC0415
+    import sources  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+    lender = model_lender()
+    root = Path(tempfile.mkdtemp())
+    api, arch = sources.NSE + "/api/", "https://nsearchives.nseindia.com/"
+    quote = api + "NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N&series="
+    q = lambda name, basic: {"equityResponse": [{"metaData": {"companyName": name}, "tradeInfo": {  # noqa: E731
+        "lastPrice": 50.0, "issuedSize": 1e8}, "secInfo": {"basicIndustry": basic, "industryInfo": basic}}]}
+    rows = bank_rows()
+    listing = [{"toDate": f"{d:%d-%b-%Y}", "period": "Annual", "consolidated": c, "xbrl": f"{arch}b/{d.year}{c[0]}.xml"}
+               for d in BANK_DATES[2:] for c in ("Consolidated", "Standalone")]
+    net = {quote + "EQ&symbol=TBANK": q("Test Bank Limited", "Private Sector Bank"),
+           quote + "EQ&symbol=TLIFE": q("Test Life Insurance Limited", "Life Insurance"),
+           api + "corporates-financial-results?index=equities&symbol=TBANK&period=Annual": listing,
+           api + "corporates-financial-results?index=equities&symbol=TBANK&period=Quarterly": [],
+           api + "integrated-filing-results?index=equities&symbol=TBANK": {"data": []},
+           **{f"{arch}b/{d.year}S.xml": bank_xml(r, d) for r, d in zip(rows[2:], BANK_DATES[2:])},
+           **{f"{arch}b/{d.year}C.xml": bank_xml({**r, "pat": r["pat"] * 2}, d, False) for r, d in zip(rows[2:], BANK_DATES[2:])}}
+    calls, online = [], [True]
+    client, models, llm, adapter = TestClient(server.app), server.MODELS, ai.llm, server.local_source
+    server.MODELS, server.local_source = root, None
+    ai.llm = lambda *a, **k: (_ for _ in ()).throw(AssertionError("no LLM call for a lender"))
+    server._clients.clear()
+    try:
+        c = server.nse()
+        c.opener, c.gap = _fake_socket(net, calls, online)(), 0.0
+        lines = lambda sym: [json.loads(x) for x in client.post("/api/nse/fetch", json={"symbol": sym, "documents": False}).text.splitlines()]  # noqa: E731
+        e = lines("TLIFE")[-1]
+        assert e["lender"] and e["final"] and "insurer" in e["error"], e
+        ev = lines("TBANK")
+        p = next(x["company"] for x in ev if "company" in x)
+        co = p["company"]
+        assert p["kind"] == "lender" and co["kind"] == "lender" and co["source"]["basis"] == "standalone", co["source"]
+        assert all(abs(x["pat"] - r["pat"]) < 1e-4 for x, r in zip(co["hist"], rows[2:])), "standalone, not consolidated"
+        assert [u[-9:] for u in calls if u.endswith(".xml")] == ["2026S.xml", "2025S.xml", "2024S.xml"], calls
+        assert p["defaults"]["cet1_min"] == 0.12 and [d[0] for d in p["drivers"]] == lender.KEYS
+        sc = {s: {k: {"start": x, "end": None} for k, x in p["defaults"].items()} for s in model.SCENARIOS}
+        doc = {"version": 6, "company": co, "scenarios": sc, "n": 5, "active": "base"}
+        r = client.post("/api/project", json=doc).json()
+        v = r["valuation"]
+        assert v["kind"] == "lender" and v["scenarios"]["base"]["per_share"] > 0 and r["tracking"] is None, v.get("error")
+        assert v["note"]["impact"] and v["pb"] > 0 and r["quarter"] is None
+        x = client.post("/api/export", json=doc)
+        assert x.status_code == 200 and openpyxl.load_workbook(io.BytesIO(x.content))["Valuation"]["A1"].value.startswith("Residual")
+        saved = server.ModelDoc.model_validate(doc)
+        assert saved.model_dump(mode="json")["company"]["kind"] == "lender"
+        mid, _ = server.save_model(saved, root)
+        row = next(m for m in server.list_models(root) if m["id"] == mid)
+        assert row["implied_kind"] == "roe" and row["values"]["base"] == v["scenarios"]["base"]["per_share"], row
+        lit = [f for f in p["forensic"] if f["severity"] in ("high", "medium", "low")]
+        assert abs(row["implied"] - v["implied_roe"]) < 1e-12 and row["flags"] == len(lit), (row, lit)
+        # a saved non-lender keeps no "kind" key: its file is exactly as before 6.1
+        assert "kind" not in server.Company.model_validate({**co, "kind": None, "dates": co["dates"][:2], "hist": [
+            {**dict.fromkeys(server.REQUIRED, 1.0)}] * 2}).model_dump()
+        for path, body in (("/api/assumptions/draft", {"company": co, "scenarios": sc}),
+                           ("/api/note/write", doc)):
+            res = client.post(path, json=body)
+            assert res.status_code == 422 and "banks and NBFCs" in res.json()["detail"], (path, res.status_code, res.text[:200])
+        # peers: a lender's table compares P/B, RoA, RoE and GNPA
+        t = model.peer_table({"name": "A", "metrics": lender.peer_metrics(lender.derive(rows), 50.0, 10.0)},
+                             [{"symbol": "B", "metrics": lender.peer_metrics(lender.derive(rows[:-1]), 40.0, 10.0)}], lender.PEERS)
+        assert {k for k, *_ in t["columns"]} >= {"pb", "roa", "roe", "gnpa_pct"} and t["rank"]["advances"] == 1, t["rank"]
+    finally:
+        server.MODELS, ai.llm, server.local_source = models, llm, adapter
+        server._clients.clear()
+
+
+
+def lender_live_check():
+    """LIVE_NET=1 only: a real bank and a real NBFC through the real fetch (standalone filings, no older-years source,
+    a throwaway library), each projected at its rule defaults and exported; with LibreOffice the workbook's live
+    formulas equal Python (base case)."""
+    import lender  # noqa: PLC0415
+    import server  # noqa: PLC0415
+    models, adapter = server.MODELS, server.local_source
+    with tempfile.TemporaryDirectory() as tmp:
+        server.MODELS, server.local_source = Path(tmp), None
+        server._clients.clear()
+        try:
+            for sym in ("HDFCBANK", "BAJFINANCE"):
+                p = next(e["company"] for e in server.fetch_company(sym, documents=False) if "company" in e)
+                co = server.Company.model_validate(p["company"]).model_dump()
+                assert co["kind"] == "lender" and co["source"]["basis"] == "standalone" and len(co["hist"]) >= 3, co["source"]
+                assert lender.data_checks(co) == [], lender.data_checks(co)
+                sc = {s: {k: {"start": v, "end": None} for k, v in p["defaults"].items()} for s in model.SCENARIOS}
+                ex = model.expand(sc["base"], 5)
+                proj = lender.project(co["hist"], ex, 5)
+                v = lender.valuation(dict.fromkeys(model.SCENARIOS, proj), co["hist"], None, co["market"])
+                assert v["scenarios"]["base"]["per_share"] and v["pb"], (sym, v["error"])
+                if shutil.which("soffice"):
+                    (Path(tmp) / sym).mkdir()
+                    (Path(tmp) / sym / "m.xlsx").write_bytes(lender.to_excel(co, sc, 5))
+                    ws = recalc(Path(tmp) / sym / "m.xlsx", Path(tmp) / sym / "calc")
+                    rr = {k: 5 + i for i, (_, k, _) in enumerate(lender.LAYOUT) if k}
+                    for j, c in enumerate(proj):
+                        _same(ws, rr, 2 + len(co["hist"]) + j, {k: c[k] for k in rr if k in c}, (sym, j))
+                    got = ws.parent["Valuation"].cell(next(c.row for c in ws.parent["Valuation"]["A"]
+                                                           if c.value == "Fair value per share (Rs)"), 2).value
+                    assert abs(got - v["scenarios"]["base"]["per_share"]) < 1e-6 * got, (sym, got)
+                print(f"OK: live {sym}: {len(co['hist'])} standalone years, base FV Rs {v['scenarios']['base']['per_share']:,.0f}"
+                      f" at P/B {v['pb']:.2f}x, Excel {'= Python' if shutil.which('soffice') else 'not checked'}")
+        finally:
+            server.MODELS, server.local_source = models, adapter
+            server._clients.clear()
 
 
 if __name__ == "__main__":

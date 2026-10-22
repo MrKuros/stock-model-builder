@@ -9,6 +9,7 @@ import Fundamentals from './Fundamentals'
 import StatementsPage from './Statements'
 import ValuationPage, { PricedIn } from './Valuation'
 import { PeersSection, peerWords } from './Peers'
+import { LenderFinancials, LenderImpliedPage, LenderNote, LenderValuationPage, isLender, lenderOf } from './Lender'
 import { BottomBar, CHECK, Confirm, DL, Next, PageHead, PhoneTop, Rail, Scale, Sheet, Verdict, openFinder, slugOf, type Here, type RailNote } from './Shell'
 import { ago, pendingMerge, streamFetch } from './Fetch'
 import { Accuracy, Changed, QuarterCard, latestScored, quarterWords, unreviewed } from './Tracking'
@@ -47,6 +48,7 @@ type Check = { state: 'idle' | 'running' | 'done'; msg: ReactNode }
  * so the projection and every input are kept; /api/project runs again only when an input changes. */
 export default function Workspace({ route, models, parsed, doc, setDoc: setDocRaw, setDefaults, setParsed, save, notice, onRetry, onRestore, onNotice, onDelete }: Props) {
   const { company, years: histYears, drivers } = parsed
+  const lender = isLender(parsed)
   const { n, scenarios, valuation, filings, notes, flag_notes, assumption_sources, excluded_years } = doc
   const peers = doc.peers ?? null
   const track = doc.track ?? []
@@ -276,14 +278,14 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     tracking: fresh ? { text: 'New', tone: 'new' } : { text: lastQ ? qfy(lastQ) : fy(histYears[nHist - 1]) },
     peers: { text: doc.peers?.approved_at ? `${doc.peers.chosen.length} peers` : 'not set' },
     ...(yours ? { forecast: { text: `${yours} edited` } } : {}),
-    note: { text: doc.note ? when(doc.note.written_at).replace(/ \d{4}$/, '') : ai && !ai.available ? 'AI off' : 'not written' },
+    note: { text: lender ? 'n/a' : doc.note ? when(doc.note.written_at).replace(/ \d{4}$/, '') : ai && !ai.available ? 'AI off' : 'not written' },
     ...(doc.reports.length ? { documents: { text: String(doc.reports.length) } } : {}),
     ...(versions.length > 1 ? { versions: { text: String(versions.length) } } : {}),
   }
-  const here: Here = { slug, version: route.version, page: route.page, sub: route.sub, name: company.name, short, models, hasQuarters, notes: railNotes }
+  const here: Here = { slug, version: route.version, page: route.page, sub: route.sub, name: company.name, short, models, hasQuarters, notes: railNotes, lender }
 
   // ---- page change: title, place (Back returns to it), anchor, focus on the heading ----
-  const label = PAGES.find(p => p[0] === route.page)![1]
+  const label = lender && route.page === 'reverse-dcf' ? 'Implied RoE' : PAGES.find(p => p[0] === route.page)![1]
   const stmt = route.page === 'statements' ? STATEMENTS.find(s => s[0] === route.sub)?.[1] : null
   useEffect(() => { document.title = `${short} · ${label}${stmt ? ` · ${stmt}` : ''} · Stock Model Builder` }, [short, label, stmt])
   const shown = useRef<string | null>(null) // with placed.once, a remount (another company) still counts as a move
@@ -324,16 +326,17 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
         {CHECK}<span>Check for new results</span></button>
   let page: ReactNode
   switch (route.page) {
-    case 'financials': page = <Fundamentals parsed={parsed} tracking={tracking} notes={doc.notes} hasAnnual={doc.reports.some(isAnnual)} />; break
+    case 'financials': page = lender ? <LenderFinancials parsed={parsed} />
+      : <Fundamentals parsed={parsed} tracking={tracking} notes={doc.notes} hasAnnual={doc.reports.some(isAnnual)} />; break
     case 'statements': page = <StatementsPage parsed={parsed} doc={doc} projection={proj} sub={route.sub} excel={excelButton('primary', 'Download Excel')} />; break
     case 'forecast': page = <ModelView {...common} anchor={route.anchor} upgrades={upgrades} onApply={applyUpgrades} onKeep={() => setUpgrades([])} />; break
-    case 'valuation': page = <ValuationPage {...common} />; break
-    case 'reverse-dcf': page = <PricedIn {...common} />; break
+    case 'valuation': page = lender ? <LenderValuationPage {...common} /> : <ValuationPage {...common} />; break
+    case 'reverse-dcf': page = lender ? <LenderImpliedPage {...common} /> : <PricedIn {...common} />; break
     case 'risks': page = <RisksPage parsed={parsed} doc={doc} setDoc={setDoc} upgrades={upgrades} onApply={applyUpgrades} onKeep={() => setUpgrades([])}
       onProposals={onProposals} toggleYear={toggleYear} pendingYear={pendingYear} />; break
     case 'documents': page = <Documents {...common} versions={versions} upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals}
       onCompany={onCompany} onDelete={onDelete} />; break
-    case 'note': page = <NotePage {...common} />; break
+    case 'note': page = lender ? <LenderNote parsed={parsed} projection={proj} /> : <NotePage {...common} />; break
     case 'peers': {
       const t = proj?.peers, read = t && peers?.approved_at ? t.peers.filter(r => r.metrics && peers.chosen.includes(r.symbol ?? '')).length : 0
       page = <>
@@ -345,7 +348,16 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
         <Next lead="Multiples at CMP and at fair value, against the peer median."><a className="btn" href={href('valuation', 'yardsticks')}>Valuation</a></Next></>
       break
     }
-    case 'tracking': {
+    case 'tracking': if (lender) {
+      page = <>
+        <PageHead label="Analysis · Results tracking" title="Results tracking"
+          purpose="Reported results vs this model’s forecast."
+          answer={<>Results aren’t scored against the forecast for banks and NBFCs yet. Checking still adds new annual results to the model
+            (assumptions unchanged). Latest filed: {fy(histYears[nHist - 1])}.</>} />
+        <p className="chk-line">{checkButton('primary')} {chk.msg && <span className="small" role="status">{chk.msg}</span>}</p>
+        <Next lead="Earlier versions of this model, one per day it changed."><a className="btn" href={href('versions')}>Versions</a></Next></>
+      break
+    } else {
       const since = company.source?.fetched_at ?? doc.saved_at
       const scored = latestScored(tracking)
       const qt = proj?.quarter
@@ -379,15 +391,16 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
       {price != null
         ? <span className="bf"><span className="bl"><T k="cmp" /></span> <b className="num mkt">Rs {rs(price)}</b> <span className="bs">({priceSrc})</span></span>
         : <a className="bf" href={href('valuation', 'v-price')}>No CMP: enter one</a>}
-      {cap && <><span className="bf"><span className="bl"><T k="mcap">Mcap</T></span> <b className="num">{money(cap.mcap)}</b></span>
-        <span className="bf"><span className="bl"><T k="ev" /></span> <b className="num">{money(cap.ev)}</b> <span className="bs">Rs cr</span></span></>}
+      {cap && <><span className="bf"><span className="bl"><T k="mcap">Mcap</T></span> <b className="num">{money(cap.mcap)}</b>{lender && <> <span className="bs">Rs cr</span></>}</span>
+        {lender ? <span className="bf"><span className="bl"><T k="pb" /></span> <b className="num">{fmt(lenderOf(proj)?.pb, 'x')}</b></span>
+          : <span className="bf"><span className="bl"><T k="ev" /></span> <b className="num">{money(cap.ev)}</b> <span className="bs">Rs cr</span></span>}</>}
       <span className={`bf${yours ? ' you' : ''}`} title={yours ? `Includes ${yours} edited driver${yours > 1 ? 's' : ''}` : undefined}>
         <span className="bl">{NAMES[doc.active]} <T k="fv" /></span>{' '}
         {mine != null ? <b className="num ours">Rs {rs(mine)}</b> : <b>{proj ? 'n/a' : '…'}</b>}</span>
       <Verdict price={price} values={{ ...values, base: mine }} to={NAMES[doc.active].toLowerCase()} />
     </>
   )
-  const controls = (where: 'bar' | 'sheet') => <Controls where={where} doc={doc} setDoc={setDoc} inert={inert} check={checkButton(where === 'sheet' ? 'btn wide' : 'btn')}
+  const controls = (where: 'bar' | 'sheet') => <Controls where={where} doc={doc} setDoc={setDoc} inert={inert} lender={lender} check={checkButton(where === 'sheet' ? 'btn wide' : 'btn')}
     excel={excelButton(where === 'sheet' ? 'btn wide' : 'btn')} />
   const foot = (
     <>
@@ -449,16 +462,18 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
  * that show reported years only, scenario and years are dimmed (still focusable) and say so. */
 // the same words as the Forecast's "Copy or reset scenarios"
 const CASE_HINT = 'Base is the central forecast. Bear and bull start at base revenue growth ∓/±3 pp and EBITDA margin ∓/±1.5 pp.'
+const LENDER_HINT = 'Base is the central forecast. Bear and bull start at base loan growth ∓/±3 pp, NIM ∓/±15 bps and credit cost ±/∓25 bps.'
 
-function Controls({ where, doc, setDoc, inert, check, excel }: {
-  where: 'bar' | 'sheet'; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; inert: boolean; check: ReactNode; excel: ReactNode
+function Controls({ where, doc, setDoc, inert, lender, check, excel }: {
+  where: 'bar' | 'sheet'; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; inert: boolean; lender: boolean; check: ReactNode; excel: ReactNode
 }) {
   const id = useId()
+  const hint = lender ? LENDER_HINT : CASE_HINT
   const pick = (s: Scenario) => { if (!inert) setDoc(d => ({ ...d, active: s })) }
   return (
     <div className={`ctl ${where}${inert ? ' inert' : ''}`}>
       <div className="ctl-g">
-        <span className="ctl-l" id={`${id}-c`} title={CASE_HINT}>Scenario</span>
+        <span className="ctl-l" id={`${id}-c`} title={hint}>Scenario</span>
         <div className="seg" role="group" aria-labelledby={`${id}-c`} aria-describedby={`${id}-ch`}>
           {ORDER.map(s => (
             <button key={s} type="button" aria-pressed={doc.active === s} aria-disabled={inert || undefined}
@@ -473,7 +488,7 @@ function Controls({ where, doc, setDoc, inert, check, excel }: {
           {HORIZONS.map(h => <option key={h} value={h}>{h}</option>)}
         </select>
       </div>
-      <p id={`${id}-ch`} className={where === 'sheet' ? 'small muted ctl-hint' : 'sr'}>{CASE_HINT}</p>
+      <p id={`${id}-ch`} className={where === 'sheet' ? 'small muted ctl-hint' : 'sr'}>{hint}</p>
       {inert && <span className="ctl-note">Reported years only</span>}
       {check}
       {excel}

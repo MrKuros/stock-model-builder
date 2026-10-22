@@ -243,6 +243,7 @@ export interface RailNote { text: string; tone?: 'warn' | 'new' }
 export interface Here {
   slug: string; version: string | null; page: Page; sub: string; name: string; short: string; models: ModelSummary[] | null
   hasQuarters: boolean; notes: Partial<Record<Page, RailNote>>
+  lender?: boolean // a bank or NBFC: Reverse DCF reads Implied RoE, and there is no cash-flow statement
 }
 
 /** The pages in three groups with a quiet count or status each: the rail, and the phone's All pages sheet. */
@@ -258,9 +259,9 @@ function RailList({ here }: { here: Here }) {
             return <li key={p}>
               <a href={href(p, p === 'statements' && here.page === 'statements' ? here.sub : '')}
                 aria-current={here.page === p ? (p === 'statements' ? 'true' : 'page') : undefined}>
-                <span>{label}</span>{n && <span className={`rn${n.tone ? ` ${n.tone}` : ''}`}>{n.text}</span>}</a>
+                <span>{here.lender && p === 'reverse-dcf' ? 'Implied RoE' : label}</span>{n && <span className={`rn${n.tone ? ` ${n.tone}` : ''}`}>{n.text}</span>}</a>
               {p === 'statements' && here.page === 'statements' && <ul className="rail-sub">
-                {STATEMENTS.filter(s => s[0] !== 'quarters' || here.hasQuarters || here.sub === 'quarters').map(s => (
+                {STATEMENTS.filter(s => (s[0] !== 'quarters' || here.hasQuarters || here.sub === 'quarters') && !(here.lender && s[0] === 'cash-flow')).map(s => (
                   <li key={s[0]}><a href={href('statements', s[0])} aria-current={here.sub === s[0] ? 'page' : undefined}>{s[1]}</a></li>))}
               </ul>}
             </li>

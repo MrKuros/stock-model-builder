@@ -20,8 +20,9 @@ export const SCENARIOS = ['base', 'bull', 'bear'] as const
 export type Scenario = typeof SCENARIOS[number]
 export type Scenarios = Record<Scenario, Paths>
 
-/** Bull and bear start from base: growth ± 3 pp, EBITDA margin ± 1.5 pp, everything else equal. */
-export const SHIFT: Record<string, number> = { growth: 0.03, ebitda_margin: 0.015 }
+/** Bull and bear start from base: growth ± 3 pp, EBITDA margin ± 1.5 pp, everything else equal. A lender (lender.SHIFT):
+ * loan growth ± 3 pp, NIM ± 15 bps, credit cost ∓ 25 bps. */
+export const SHIFT: Record<string, number> = { growth: 0.03, ebitda_margin: 0.015, adv_growth: 0.03, nim: 0.0015, credit_cost: -0.0025 }
 export function seed(base: Paths): Scenarios {
   const move = (sign: number): Paths => Object.fromEntries(Object.entries(base).map(([k, p]) => {
     const d = (SHIFT[k] ?? 0) * sign
@@ -37,7 +38,9 @@ export const drifted = (s: Scenarios) => {
 }
 /** Bull and bear again from base (after a confirm when they hold edits); they take base's sources too. */
 export function copyBase(setDoc: (f: (d: ModelDoc) => ModelDoc) => void, scenarios: Scenarios) {
-  if (drifted(scenarios) && !window.confirm('Replace your bull and bear assumptions with base ± 3 pp growth and ± 1.5 pp EBITDA margin?')) return
+  const lender = 'nim' in scenarios.base
+  if (drifted(scenarios) && !window.confirm(lender ? 'Replace your bull and bear assumptions with base ± 3 pp loan growth, ± 15 bps NIM and ∓ 25 bps credit cost?'
+    : 'Replace your bull and bear assumptions with base ± 3 pp growth and ± 1.5 pp EBITDA margin?')) return
   setDoc(d => ({ ...d, scenarios: seed(d.scenarios.base),
     assumption_sources: { ...d.assumption_sources, bull: { ...d.assumption_sources.base }, bear: { ...d.assumption_sources.base } } }))
 }
@@ -62,7 +65,8 @@ export interface Source {
   // years a later filing restated (model.merge): both numbers, and whether you switched to the restated one
   restated?: { year: string; line: string; filed: number; restated: number; used: boolean }[]
 }
-export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market; quarters?: Quarters | null; source?: Source | null; pl_only?: PlYear[] | null }
+export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market; quarters?: Quarters | null; source?: Source | null; pl_only?: PlYear[] | null
+  kind?: 'lender' | null } // 6.1: a bank or NBFC (lender.py's lines); missing for everyone else
 /** An older year whose filing has a P&L but no balance sheet (model.pl_only): Statements and the revenue track record only. */
 export type PlYear = Row & { year: string; end: string }
 /** Trailing twelve months (model.ttm): the four quarters ending `end`, each row summed (null if one is missing). */
@@ -107,6 +111,20 @@ export interface Valuation {
   note?: NoteNumbers | null
   /** Missing on a server not yet restarted after an update; the panel then hides the grids. */
   steps?: { wacc: number[]; g: number[]; growth: number[]; margin: number[]; implied?: [number, number] }
+  kind?: 'lender' // a bank or NBFC: residual income (lender.valuation), the fields below
+}
+/** lender.valuation: residual income from book, P/B and P/ABV at CMP, justified P/B, the market-implied RoE and Ke. */
+export interface LenderValuation {
+  kind: 'lender'; price: number | null; shares: number | null; ke: number; ke_build: number; g: number; error: string | null
+  book: number; bvps: number | null; abvps: number | null; nnpa: number | null; pb: number | null; pabv: number | null; pe: number | null
+  implied_roe: number | null; implied_ke: number | null; steps: { ke: number[]; roe: number[] }
+  note: { impact: Impact[]; roe_scale: [number, number | null][] } | null
+  scenarios: Record<Scenario, {
+    per_share: number | null; equity: number | null; upside: number | null; error: string | null; roe_t: number | null
+    ri: number[] | null; pv: number[] | null; pv_sum: number | null; tv: number | null; pv_tv: number | null; tv_share: number | null
+    justified_pb: number | null; fv_jpb: number | null; pb_value: number | null; pe_price: number | null; pe_value: number | null
+    grid: (number | null)[][]
+  }>
 }
 /** One driver moved down / up one step, others at base (model.drivers_impact): value per share either way. */
 export interface Impact { key: string; label: string; step: number; down: number | null; up: number | null; swing: number | null }
@@ -285,6 +303,7 @@ export interface Sources {
 /** notes['adj:moved_out']: a business sold or moved to a JV, typed by you with a reason (wins over an approved note). */
 export interface MovedOut { year: string; revenue: number; ebitda: number | null; assets?: number | null; debt?: number | null; reason: string }
 export interface Parsed {
+  kind?: 'lender' // a bank or NBFC: lender.py's drivers, layout, ratios and forensic checks
   company: Company
   hist?: Row[] // company.hist with the filings' payables, leases and cash-flow capex (missing on an old server)
   sources?: Sources
@@ -320,6 +339,7 @@ export interface ModelSummary {
   price_saved?: number | null; price_at?: string | null; price_live?: boolean; results_to?: string
   // quarters filed this year against the base case's run-rate: gaps by line (revenue, PAT a share; margin in pp)
   quarter?: (Pick<QuarterTrack, 'year' | 'quarter' | 'period' | 'status'> & Record<QuarterLine['key'], number | null>) | null
+  implied_kind?: 'roe' // a lender: implied is the market-implied steady-state RoE, growth the base case's RoE
 }
 /** GET /api/auto: the scheduled checks (prices and new results, once a day while the app runs) and their last run. */
 export interface AutoState {
