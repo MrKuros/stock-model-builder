@@ -1588,6 +1588,7 @@ def library_check(root, co, scenarios):
     ar_notes_check(server, root, co, data)
     flag_check(server, root, data)
     assume_check(server, root, data)
+    ask_check(server, root, data)
     thesis_check(server, root, data)
     reimport_check(server, root, co, data)
     fetch_api_check(server, root, co, data)
@@ -2370,6 +2371,102 @@ def thesis_check(server, root, data):
         if env is not None:
             os.environ["LLM_CMD"] = env
         shutil.rmtree(root / server.REPORTS, ignore_errors=True)
+
+
+def ask_check(server, root, data):
+    """6.4: asking the filings. Rules pick the pages (BM25); without LLM_CMD the matching pages come back and nothing is
+    saved; with a fake LLM_CMD a cited answer is checked (quote on the page, every number printed on a cited page, no
+    recommendation wording), a failing one is retried once and then saved as couldn't-answer, and a guided driver
+    figure becomes an assumption proposal that the drafting rules accept with no LLM call. Answers never change a number."""
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    assert ai.terms("The Margins and the order books") == ["margin", "order", "book"], ai.terms("The Margins and the order books")
+    docs = [("D1", [("Revenue grew on volumes.", ""), ("Our order book stands at 4,500 crore; order book cover is strong.", ""),
+                    ("The order of the board.", "")])]
+    assert [p for _, _, p in ai.search_pages(docs, "What is the order book?")] == [2, 3], ai.search_pages(docs, "order book")
+    assert ai.search_pages(docs, "the and of") == [] and "order book stands" in ai.snippet(docs[0][1][1][0], "order book")
+    if not ai.pdf_available():
+        print("pdftotext missing: skipped asking the filings")
+        return
+    client, models, env = TestClient(server.app), server.MODELS, os.environ.pop("LLM_CMD", None)
+    server.MODELS = root
+    try:
+        pdf = tiny_pdf([["Q4 FY2025 earnings call transcript", "Operator: welcome to the call."],
+                        ["CEO: Going forward we expect revenue growth of 14 percent next year as the new plant ramps up,",
+                         "with demand strong across both segments and pricing steady."],
+                        ["CFO: Our capex plan for next year is Rs 450 crore, funded from internal accruals,",
+                         "and the dividend payout policy stays unchanged."]])
+        rep = client.post("/api/report", files={"file": ("call.pdf", pdf)}, data={"year": "FY2025", "kind": "transcript"}).json()
+        body = {"company": data["company"], "n": 5, "reports": [rep], "slug": "test-co", "question": "What capex is planned next year?"}
+        post = lambda **k: client.post("/api/ask", json=dict(body, **k))  # noqa: E731
+        listed = lambda: client.get("/api/answers/test-co").json()["answers"]  # noqa: E731
+        assert [post(**k).status_code for k in ({"reports": []}, {"slug": "../x"}, {"question": "?"})] == [422] * 3, [post(**k).text[:200] for k in ({"reports": []}, {"slug": "../x"}, {"question": "?"})]
+        r = post().json()
+        assert r["answer"] is None and "LLM_CMD" in r["message"] and r["hits"][0]["page"] == 3, r
+        assert "Rs 450 crore" in r["hits"][0]["snippet"] and listed() == [], "keyword search only, nothing saved"
+        pg = client.get(f"/api/reports/{rep['id']}/3").json()
+        assert pg["pages"] == 3 and "internal accruals" in pg["text"], pg
+        assert client.get(f"/api/reports/{rep['id']}/9").status_code == 404 and client.get("/api/reports/xyz/1").status_code == 422
+        q_capex = "Our capex plan for next year is Rs 450 crore, funded from internal accruals"
+        q_growth = "we expect revenue growth of 14 percent next year as the new plant ramps up"
+        good = {"answer": "Management plans capex of Rs 450 crore next year, funded from internal accruals.",
+                "citations": [{"doc": "D1", "page": 3, "quote": q_capex}], "driver": None}
+        calls = fake_llm(root / "llm", "Answer:\n" + json.dumps(good))
+        a = post().json()["answer"]
+        assert calls() == 1 and a["status"] == "answered" and a["rounds"] == 1 and a["proposal"] is None, a
+        assert a["citations"] == [{"report": rep["id"], "file": "call.pdf", "year": "FY2025", "kind": "transcript", "page": 3,
+                                   "quote": q_capex}], a["citations"]
+        prompt = (root / "llm" / "prompt-0.txt").read_text()
+        assert "What capex is planned next year?" in prompt and "=== D1 (FY2025 earnings-call transcript) PAGE 3 ===" in prompt
+        assert "buy or sell" in prompt and "growth (Revenue growth" in prompt, prompt[-900:]
+        assert [x["id"] for x in listed()] == [a["id"]], "saved under the company"
+        # a number not printed on a cited page and a quote not on its page fail, are retried once, then saved as failed
+        bad = dict(good, answer="Capex of Rs 600 crore is planned.", citations=[{"doc": "D1", "page": 2, "quote": q_capex}])
+        calls = fake_llm(root / "llm", bad, good)
+        a2 = post().json()["answer"]
+        assert calls() == 2 and a2["status"] == "answered" and a2["rounds"] == 2, a2
+        assert "Numbers on cited pages" in (root / "llm" / "prompt-1.txt").read_text()
+        calls = fake_llm(root / "llm", bad)
+        a3 = post().json()["answer"]
+        failed = {c["name"] for c in a3["checks"] if c["pass"] is False}
+        assert calls() == 2 and a3["status"] == "failed" and failed == {"Quotes are on the pages", "Numbers on cited pages"}, a3
+        sell = dict(good, answer="Capex of Rs 450 crore is planned; we recommend the stock.")
+        fake_llm(root / "llm", sell)
+        assert post().json()["answer"]["status"] == "failed"
+        calls = fake_llm(root / "llm", {"answer": None, "citations": [], "driver": None})
+        assert post(question="What is the order book?").json()["hits"] == [] and calls() == 0, "no matching page: no call"
+        a4 = post(question="How is demand across segments?").json()["answer"]
+        assert calls() == 1 and a4["status"] == "not_found" and a4["answer"] is None, a4
+        # a guided driver figure becomes an assumption proposal; accepting it re-checks by rules with no LLM call
+        drv = {"answer": "Management expects revenue growth of 14 percent next year as the new plant ramps up.",
+               "citations": [{"doc": "D1", "page": 2, "quote": q_growth}], "driver": {"key": "growth", "value": 14, "citation": 0}}
+        fake_llm(root / "llm", drv)
+        p = post(question="What revenue growth is guided?").json()["answer"]["proposal"]
+        assert p["kind"] == "assumption" and p["status"] == "proposed" and p["field"] == "growth", p
+        assert abs(p["value"]["base"]["start"] - 0.14) < 1e-12 and abs(p["value"]["bull"]["start"] - 0.17) < 1e-12, p["value"]
+        assert all(c["pass"] is not False for c in p["checks"]) and p["checks"][-1]["name"] == "Figure is in the quote", p["checks"]
+        fake_llm(root / "llm", dict(drv, driver={"key": "growth", "value": 19, "citation": 0}))
+        p19 = post(question="What revenue growth is guided?").json()["answer"]["proposal"]
+        assert p19["status"] == "rejected" and p19["checks"][-1]["pass"] is False, p19["checks"]
+        llm, ai.llm = ai.llm, None
+        try:
+            chk = client.post("/api/assumptions/check", json=dict(body, scenarios=data["scenarios"], proposals=[p])).json()
+            assert all(c["pass"] is not False for c in chk["proposals"][0]["checks"]), chk
+            req = {k: data[k] for k in ("company", "scenarios", "n", "valuation")}
+            assert client.post("/api/project", json=req).status_code == 200, "projecting never asks"
+        finally:
+            ai.llm = llm
+        n = len(listed())
+        assert client.delete(f"/api/answers/test-co/{a['id']}").json()["ok"] and len(listed()) == n - 1
+        assert client.get("/api/answers/Bad_Slug").status_code == 422
+        print(f"OK: ask the filings: BM25 pages, cited answers checked (quotes, numbers, wording), one retry, "
+              f"{n} saved, a guided figure as a proposal")
+    finally:
+        server.MODELS = models
+        os.environ.pop("LLM_CMD", None)
+        if env is not None:
+            os.environ["LLM_CMD"] = env
 
 
 def assume_check(server, root, data):

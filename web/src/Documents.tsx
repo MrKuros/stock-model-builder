@@ -9,6 +9,7 @@ import {
   type Parsed, type Projection, type Proposal,
 } from './lib'
 import { T } from './Term'
+import { AskDocs } from './Ask'
 
 const pc = (v: number) => fmt(v, 'pct')
 /** "FY2019 to FY2022, FY2024" from year labels. */
@@ -39,12 +40,12 @@ export function yearSources(company: Company, years: string[]): [string, string]
 interface Props {
   parsed: Parsed; doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; projection: Projection | null
   versions: ModelSummary[]; upgrades: Upgrade[]; onApply: () => void; onProposals: (f: (ps: Proposal[]) => Proposal[]) => void
-  onCompany: (p: Parsed, c: Company) => void; onDelete: () => Promise<void>
+  onCompany: (p: Parsed, c: Company) => void; onDelete: () => Promise<void>; slug: string
 }
 
 /** Documents: what the app has read, where every number comes from, the plumbing (filings line by line,
  * annual-report reading, the audit trail) in folds, the AI setting, and this model's file. */
-export default function Documents({ parsed, doc, setDoc, projection, versions, upgrades, onApply, onProposals, onCompany, onDelete }: Props) {
+export default function Documents({ parsed, doc, setDoc, projection, versions, upgrades, onApply, onProposals, onCompany, onDelete, slug }: Props) {
   useMinute()
   const href = useHref()
   const ai = useAi()
@@ -100,6 +101,8 @@ export default function Documents({ parsed, doc, setDoc, projection, versions, u
           <AddYears company={company} onCompany={onCompany} />
         </div>
       </section>
+
+      <AskDocs parsed={parsed} doc={doc} setDoc={setDoc} slug={slug} />
 
       <section className="blk" id="sources" tabIndex={-1} aria-labelledby="from-h">
         <h2 id="from-h">Data lineage</h2>

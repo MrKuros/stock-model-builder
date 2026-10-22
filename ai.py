@@ -2,6 +2,7 @@
 the prompt on stdin and prints the reply on stdout. model.py never imports this module. Nothing returned here
 becomes a number by itself: callers turn it into a proposal that rules check and the user approves."""
 import json
+import math
 import os
 import re
 import shlex
@@ -1230,3 +1231,128 @@ def peer_checks(reply, own, cands, segments=None):
                  "." if lo <= ok <= hi else f"; tick {lo - ok} more yourself." if ok < lo
                  else f"; only the first {hi} are ticked.")}
     return picks, count
+
+
+# ---------- asking the filings (6.4): rules find the pages (BM25), the LLM answers only from them, rules check ----------
+
+ASK_PAGES = 6  # ponytail: the 6 best pages, 8k characters each (~12k tokens); a question needing more is asked narrower
+ASK_LEN = 900  # characters in an answer: four sentences or so
+BM25_K1, BM25_B = 1.5, 0.75
+_ASK_STOP = _STOP | set("how why the and for are was were has had does did its our you your any all can could should "
+                        "company management what's give tell said says about".split())
+
+
+def terms(text):
+    """Search terms: lower-case words and numbers (norm), stop words out, a plural's trailing s dropped.
+    ponytail: no stemming past plurals; "margins" finds "margin" but "expanding" doesn't find "expansion"."""
+    out = []
+    for w in re.findall(r"[a-z0-9]+(?:[&-][a-z0-9]+)*", norm(text)):
+        if w in _ASK_STOP or (len(w) < 3 and not w.isdigit()):
+            continue
+        out.append(w[:-1] if len(w) > 4 and w.endswith("s") and not w.endswith("ss") else w)
+    return out
+
+
+def search_pages(docs, question, k=ASK_PAGES):
+    """docs [(label, pages)] -> [(score, label, page number)], best first: BM25 over every page of every document.
+    A page must hold at least one of the question's terms."""
+    q = set(terms(question))
+    if not q:
+        return []
+    rows = []
+    for lb, pages in docs:
+        for i, (raw, _) in enumerate(pages):
+            ws = terms(raw)
+            rows.append((lb, i + 1, len(ws), {w: c for w in q if (c := ws.count(w))}))
+    n = len(rows)
+    if not n:
+        return []
+    avg = sum(r[2] for r in rows) / n or 1.0
+    df = {w: sum(1 for r in rows if w in r[3]) for w in q}
+    idf = {w: math.log(1 + (n - df[w] + 0.5) / (df[w] + 0.5)) for w in q}
+    scored = []
+    for lb, p, ln, tf in rows:
+        s = sum(idf[w] * c * (BM25_K1 + 1) / (c + BM25_K1 * (1 - BM25_B + BM25_B * ln / avg)) for w, c in tf.items())
+        if s > 0:
+            scored.append((round(s, 3), lb, p))
+    return sorted(scored, key=lambda x: (-x[0], x[1], x[2]))[:k]
+
+
+def snippet(text, question, width=260):
+    """The line of a page holding most of the question's terms, with its neighbours, cut to `width` characters."""
+    q = set(terms(question))
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    if not lines:
+        return ""
+    best = max(range(len(lines)), key=lambda i: (len(q & set(terms(lines[i]))), -i))
+    s = " ".join(" ".join(lines[max(0, best - 1):best + 2]).split())
+    return s if len(s) <= width else s[:width].rsplit(" ", 1)[0] + " …"
+
+
+def ask_prompt(name, question, pages, drivers=(), why=None):
+    """pages [(doc label, title, page number, text)]; drivers [(key, label, unit)] an answer may give a figure for."""
+    text = "\n\n".join(f"=== {lb} ({title}) PAGE {n} ===\n{t[:MAX_PAGE_CHARS]}" for lb, title, n, t in pages)
+    drv = ""
+    if drivers:
+        drv = ("\nIf management itself (not an analyst asking on a call) gives a figure for one of these forecast drivers for the years ahead, add it "
+               "as \"driver\": {\"key\": ..., \"value\": number in the driver's unit, \"citation\": index (0-based) of the "
+               "citation whose quote prints that figure}; otherwise \"driver\": null. Drivers: "
+               + "; ".join(f"{k} ({lb}, unit {_pct_unit(kind)})" for k, lb, kind in drivers) + ".")
+    return (f"An equity analyst asks about {name}, an Indian listed company: {question}\n\n"
+            f"Pages from its filings (only these were read):\n{text}\n\n"
+            "Answer from these pages only, in a sell-side analyst's register: at most four sentences, under 140 words, "
+            "the direct answer first. Write every figure exactly as it is printed on a page you cite (same number, same "
+            "unit); don't convert or compute. Cite every page you rely on, each with a quote of 5 to 60 words copied "
+            "character for character from that page. If the pages don't answer the question, set \"answer\" to null "
+            "and \"citations\" to []. Don't say whether to buy or sell." + drv + "\n"
+            'Answer as a JSON object: {"answer": "...", "citations": [{"doc": "D1", "page": 12, "quote": "..."}], '
+            '"driver": null}.' + (f"\n\nYour previous answer failed these checks:\n{why}\nAnswer again." if why else ""))
+
+
+def _ask_shape(v):
+    if not isinstance(v, dict) or not (v.get("answer") is None or isinstance(v.get("answer"), str)):
+        return 'expected {"answer": string or null, "citations": [...], "driver": null or {...}}'
+    cs = v.get("citations")
+    if not isinstance(cs, list) or not all(isinstance(c, dict) and isinstance(c.get("doc"), str) and isinstance(c.get("page"), int)
+                                           and isinstance(c.get("quote"), str) for c in cs):
+        return 'each citation must be {"doc": "D1", "page": number, "quote": string}'
+    if isinstance(v.get("answer"), str) and v["answer"].strip() and not cs:
+        return "an answer needs at least one citation"
+    d = v.get("driver")
+    if d is not None and not (isinstance(d, dict) and isinstance(d.get("key"), str) and isinstance(d.get("value"), (int, float))
+                              and not isinstance(d.get("value"), bool) and isinstance(d.get("citation"), int)):
+        return '"driver" must be null or {"key": string, "value": number, "citation": index}'
+    return None
+
+
+def ask_filings(prompt):
+    """{answer, citations [{doc, page, quote}], driver} as asked by ask_prompt (checked by ask_checks, never used as is)."""
+    return ask_json(prompt, _ask_shape)
+
+
+def ask_checks(reply, docs, sent):
+    """Rules on an answer: every citation is a page that was sent, its quote is on that page and long enough, every
+    number in the answer is printed on a cited page (numbers_check's rules), no recommendation wording, a length
+    limit. docs {label: pages}; sent {label: [page numbers]}. [{name, pass, detail}]."""
+    answer, cites = (reply.get("answer") or "").strip(), reply.get("citations") or []
+    bad_page = [f"{c['doc']} p.{c['page']}" for c in cites if c["page"] not in sent.get(c["doc"], [])]
+    off = [f"{c['doc']} p.{c['page']}" for c in cites if c["page"] in sent.get(c["doc"], [])
+           and not on_page(c["quote"], docs[c["doc"]][c["page"] - 1])]
+    short = [f"{c['doc']} p.{c['page']}" for c in cites if len(norm(c["quote"]).split()) < MIN_QUOTE_WORDS]
+    cited = " ".join(t for c in cites if c["page"] in sent.get(c["doc"], []) for t in docs[c["doc"]][c["page"] - 1])
+    bad = unmatched(answer, cited)
+    w = wording_check(answer)
+    return [
+        {"name": "Pages were read", "pass": bool(cites) and not bad_page,
+         "detail": f"{len(cites)} citation{'s' * (len(cites) != 1)}, each on a page that was sent." if cites and not bad_page
+         else "No citation given." if not cites else f"{', '.join(bad_page[:3])} wasn't among the pages sent."},
+        {"name": "Quotes are on the pages", "pass": not off and not short,
+         "detail": "Every quote occurs on its page." if not off and not short
+         else f"The quote for {', '.join(off[:3])} doesn't occur on that page." if off
+         else f"The quote for {', '.join(short[:3])} is under {MIN_QUOTE_WORDS} words."},
+        {"name": "Numbers on cited pages", "pass": not bad,
+         "detail": "Every number in the answer is printed on a cited page." if not bad
+         else f"{', '.join(bad[:4])} {'is' if len(bad) == 1 else 'are'} not printed on any cited page."},
+        {"name": "Length", "pass": len(answer) <= ASK_LEN, "detail": f"{len(answer)} characters (at most {ASK_LEN})."},
+        w,
+    ]

@@ -992,6 +992,153 @@ def assumptions_check(req: DraftRequest):
     return {"proposals": [out[p.get("id")] for p in req.proposals]}
 
 
+# ---------- asking the filings (6.4): rules find the pages, the LLM answers from them only, rules check every answer ----------
+
+ANSWERS = "_answers"  # library root: <slug>.json {"answers": [...newest first]} ("_": never a slug)
+ANSWERS_MAX = 200  # ponytail: oldest dropped past this; nobody scrolls 200 questions
+ANSWERS_LOCK = threading.Lock()  # one read-modify-write of an answers file at a time
+SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+class AskRequest(DraftRequest):
+    """A question about the attached documents, with what _draft_ctx needs to turn a guided figure into a proposal."""
+    slug: str = Field(pattern=f"^{SLUG.pattern}$", max_length=80)
+    question: str = Field(min_length=3, max_length=400)
+    search_only: bool = False  # keyword search over the pages, no LLM call
+
+
+def answers_file(s, root=None):
+    if not SLUG.fullmatch(s or ""):
+        raise HTTPException(422, "That isn't a company address.")
+    return (root or MODELS) / ANSWERS / f"{s}.json"
+
+
+def load_answers(s, root=None):
+    try:
+        v = json.loads(answers_file(s, root).read_bytes()).get("answers")
+        return v if isinstance(v, list) else []
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def keep_answer(s, entry, root=None):
+    with ANSWERS_LOCK:
+        xs = [entry, *(x for x in load_answers(s, root) if x.get("id") != entry["id"])][:ANSWERS_MAX]
+        _write(answers_file(s, root), json.dumps({"answers": xs}).encode())
+
+
+def _ask_proposal(req, reply, docs, sent):
+    """The answer's guided figure for a driver as an ordinary assumption proposal (checked by the drafting rules, plus
+    the figure must be printed in its quote), or None. Bull and bear sit around it as the rule default's do."""
+    d = reply.get("driver")
+    cites = reply.get("citations") or []
+    if not d or req.company.kind or not 0 <= d["citation"] < len(cites):
+        return None
+    ctx = _draft_ctx(req)
+    k, c = d["key"], cites[d["citation"]]
+    if k not in ctx["asked"] or k == "debt_change" or c["doc"] not in docs:
+        return None
+    kind, s = ctx["kinds"][k], SHIFT.get(k, 0.0) * (100 if ctx["kinds"][k] == "pct" else 1)
+    x = {"key": k, "from": "documents", **{case: {"start": d["value"] + sh, "end": None} for case, sh in
+                                           (("base", 0.0), ("bull", s), ("bear", -s))},
+         "reasoning": "Management's figure, from an answer on Ask the filings; the quote prints it.",
+         "doc": c["doc"], "page": c["page"], "quote": c["quote"],
+         "outside_history": "Management states this figure in the cited quote."}
+    r, pages = docs[c["doc"]]
+    p = _checked([(x, r, sent[c["doc"]], pages)], ctx, {})[0]
+    holds = ai.quote_holds(c["quote"], [p["value"]["base"]["start"]], kind)
+    p["checks"].append({"name": "Figure is in the quote", "pass": holds,
+                        "detail": "The quote prints the guided figure." if holds
+                        else "The quote doesn't print this figure, so it can't become an input."})
+    if not holds:
+        p["status"] = "rejected"
+    return p
+
+
+@app.post("/api/ask")
+def ask(req: AskRequest):
+    """Rules pick the pages that best match the question (ai.search_pages over every attached document); with LLM_CMD
+    the model answers from those pages only, and rules check every quote and number (one retry with what failed).
+    The answer is saved under the company (models/_answers) and never changes a number; a guided driver figure comes
+    back as a proposal for the Forecast review. Without LLM_CMD, or search_only: the matching pages only."""
+    if not req.reports:
+        raise HTTPException(422, "No documents attached yet. Attach an annual report, call transcript or presentation on Documents.")
+    question = " ".join(req.question.split())
+    docs, gone = {}, []
+    for i, r in enumerate(req.reports):
+        try:
+            docs[f"D{i + 1}"] = (r, report_pages(r))
+        except HTTPException:  # its text isn't on this machine any more: ask the rest
+            gone.append(r.file)
+    if not docs:
+        raise HTTPException(422, "The text of the attached documents isn't on this machine any more; attach them again.")
+    picks = ai.search_pages([(lb, pages) for lb, (_, pages) in docs.items()], question)
+    hits = [{"report": docs[lb][0].id, "file": docs[lb][0].file, "year": docs[lb][0].year, "kind": docs[lb][0].kind,
+             "page": n, "score": s, "snippet": ai.snippet(docs[lb][1][n - 1][0], question)} for s, lb, n in picks]
+    if req.search_only or not ai.available() or not picks:
+        why = ("No page of the attached documents uses the question's words. Try other terms (order book, capex, margin)."
+               if not picks else "" if req.search_only else "AI is off, so these are the pages that match your words. " + ai.NOT_SET)
+        return {"hits": hits, "answer": None, "message": why, "missing": gone}
+    sent = {lb: sorted(n for _, b, n in picks if b == lb) for lb in docs}
+    pages = [(lb, f"{docs[lb][0].year} {ai.KINDS[docs[lb][0].kind]}", n, docs[lb][1][n - 1][0]) for _, lb, n in picks]
+    drivers = [] if req.company.kind else [(k, lb, kind) for k, lb, kind in model.DRIVERS if k != "debt_change"]
+    page_of = {lb: pages_ for lb, (_, pages_) in docs.items()}
+    why, checks, rounds = None, [], 0
+    try:
+        for rounds in (1, 2):
+            reply = ai.ask_filings(ai.ask_prompt(req.company.name, question, pages, drivers, why))
+            if not (reply.get("answer") or "").strip():
+                break
+            checks = ai.ask_checks(reply, page_of, sent)
+            failed = [c for c in checks if c["pass"] is False]
+            if not failed:
+                break
+            why = "\n".join(f"- {c['name']}: {c['detail']}" for c in failed)
+    except ai.LLMError as e:
+        raise HTTPException(502, str(e))
+    answered = bool((reply.get("answer") or "").strip())
+    ok = answered and all(c["pass"] is not False for c in checks)
+    cites = [{"report": docs[c["doc"]][0].id, "file": docs[c["doc"]][0].file, "year": docs[c["doc"]][0].year,
+              "kind": docs[c["doc"]][0].kind, "page": c["page"], "quote": c["quote"].strip()[:600]}
+             for c in reply.get("citations") or [] if c["doc"] in docs]
+    now = datetime.now().isoformat(timespec="seconds")
+    entry = {"id": os.urandom(6).hex(), "question": question,
+             "status": "answered" if ok else "failed" if answered else "not_found",
+             "answer": reply["answer"].strip()[:ai.ASK_LEN * 2] if answered else None,
+             "citations": cites if answered else [], "checks": checks, "rounds": rounds, "asked_at": now,
+             "pages": [{"report": h["report"], "file": h["file"], "year": h["year"], "kind": h["kind"], "page": h["page"]} for h in hits],
+             "proposal": _ask_proposal(req, reply, docs, sent) if ok else None, "ai": True}
+    keep_answer(req.slug, entry)
+    return {"hits": hits, "answer": entry, "message": "", "missing": gone}
+
+
+@app.get("/api/answers/{s}")
+def answers_list(s: str):
+    return {"answers": load_answers(s)}
+
+
+@app.delete("/api/answers/{s}/{aid}")
+def answers_delete(s: str, aid: str):
+    with ANSWERS_LOCK:
+        xs = load_answers(s)
+        _write(answers_file(s), json.dumps({"answers": [x for x in xs if x.get("id") != aid]}).encode())
+    return {"ok": True}
+
+
+@app.get("/api/reports/{rid}/{page}")
+def report_page(rid: str, page: int):
+    """One page's text as kept by /api/report (reading order), for a citation or a search hit."""
+    if not FILING_ID.fullmatch(rid):
+        raise HTTPException(422, "That isn't a document id.")
+    raw = MODELS / REPORTS / f"{rid}.json"
+    if not raw.is_file():
+        raise HTTPException(404, "That document's text isn't on this machine any more; attach it again.")
+    d = json.loads(raw.read_bytes())
+    if not 1 <= page <= len(d["pages"]):
+        raise HTTPException(404, f"{d['file']} has {len(d['pages'])} pages.")
+    return {"file": d["file"], "page": page, "pages": len(d["pages"]), "text": d["pages"][page - 1][0]}
+
+
 # ---------- annual-report notes (3.3): rules pick pages per topic, the LLM extracts, rules check, the user approves ----------
 
 class NotesRequest(BaseModel):
@@ -2551,6 +2698,7 @@ def delete_model(model_id, root=None):
         raise HTTPException(404, "No saved model with that id.")
     try:
         p.parent.rmdir()  # last version of that company
+        (root / ANSWERS / f"{p.parent.name}.json").unlink(missing_ok=True)  # and the questions asked of its filings
     except OSError:
         pass
 

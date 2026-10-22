@@ -137,7 +137,7 @@ export default function DraftPanel({ parsed, doc, d, ai, href }: { parsed: Parse
       {d.msg && <p className={`small ${d.msg.bad ? 'bad' : ''}`} role="status">{d.msg.text}</p>}
       {rows.length > 0 && <>
         <div className="draft-bar">
-          <span className="small">AI read {docs.length} document{docs.length === 1 ? '' : 's'} and suggests {nDoc} input{nDoc === 1 ? '' : 's'}. Rules checked each one{nBad ? `; ${nBad} rejected` : ''}. {rows.length - nDoc} keep the rule’s figure.</span>
+          <span className="small">AI read {docs.length} document{docs.length === 1 ? '' : 's'} and suggests {nDoc} input{nDoc === 1 ? '' : 's'}. Rules checked each one{nBad ? `; ${nBad} rejected` : ''}.{rows.length > nDoc ? ` ${rows.length - nDoc} keep the rule’s figure.` : ''}</span>
           <button type="button" className="btn" onClick={() => d.accept(passing)} disabled={!passing.length} aria-disabled={!!d.busy}>
             Use all that passed ({passing.length})</button>
         </div>

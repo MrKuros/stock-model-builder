@@ -5,6 +5,7 @@ import ModelView, { UPGRADED, inputName, type Upgrade } from './Model'
 import Summary from './Summary'
 import RisksPage from './Risks'
 import Documents from './Documents'
+import AskPage from './Ask'
 import Fundamentals from './Fundamentals'
 import StatementsPage from './Statements'
 import ValuationPage, { PricedIn } from './Valuation'
@@ -335,7 +336,8 @@ export default function Workspace({ route, models, parsed, doc, setDoc: setDocRa
     case 'risks': page = <RisksPage parsed={parsed} doc={doc} setDoc={setDoc} upgrades={upgrades} onApply={applyUpgrades} onKeep={() => setUpgrades([])}
       onProposals={onProposals} toggleYear={toggleYear} pendingYear={pendingYear} />; break
     case 'documents': page = <Documents {...common} versions={versions} upgrades={upgrades} onApply={applyUpgrades} onProposals={onProposals}
-      onCompany={onCompany} onDelete={onDelete} />; break
+      onCompany={onCompany} onDelete={onDelete} slug={slug} />; break
+    case 'ask': page = <AskPage parsed={parsed} doc={doc} setDoc={setDoc} slug={slug} />; break
     case 'note': page = lender ? <LenderNote parsed={parsed} projection={proj} /> : <NotePage {...common} />; break
     case 'peers': {
       const t = proj?.peers, read = t && peers?.approved_at ? t.peers.filter(r => r.metrics && peers.chosen.includes(r.symbol ?? '')).length : 0

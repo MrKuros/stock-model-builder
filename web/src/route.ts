@@ -3,7 +3,7 @@
 import { createContext, useContext } from 'react'
 
 export type Page = 'summary' | 'valuation' | 'reverse-dcf' | 'risks' | 'tracking' | 'peers' | 'forecast' | 'note' | 'financials'
-  | 'statements' | 'documents' | 'versions'
+  | 'statements' | 'documents' | 'ask' | 'versions'
 /** Page names from before: links and addresses using them land on their current page (moved()). The question-first
  * names (value, priced-in, business, changes) and the first ones (overview, fundamentals, checks). */
 type OldPage = 'overview' | 'fundamentals' | 'checks' | 'value' | 'priced-in' | 'business' | 'changes'
@@ -14,13 +14,13 @@ export const RAIL: [string, [Page, string][]][] = [
     ['risks', 'Risks & forensics'], ['tracking', 'Results tracking'], ['peers', 'Peers']]],
   ['Model', [['forecast', 'Forecast'], ['note', 'Research note']]],
   ['Data', [['financials', 'Financials'], ['statements', 'Statements'], ['documents', 'Documents'],
-    ['versions', 'Versions']]],
+    ['ask', 'Ask the filings'], ['versions', 'Versions']]],
 ]
 export const PAGES: [Page, string][] = RAIL.flatMap(g => g[1])
 /** The number keys 1-6: the Analysis pages. */
 export const ANSWERS = RAIL[0][1].map(p => p[0])
 /** Pages that show reported years only: the case and years controls do nothing there (dimmed, still focusable). */
-export const REPORTED: Page[] = ['financials', 'risks', 'documents', 'versions', 'peers']
+export const REPORTED: Page[] = ['financials', 'risks', 'documents', 'ask', 'versions', 'peers']
 
 /** Statement sub-pages: url, tab label, the LAYOUT section it shows */
 export const STATEMENTS = [
