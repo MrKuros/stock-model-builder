@@ -497,6 +497,22 @@ def filings_check(co):
     no_bs = dict(annual[0], facts={k: v for k, v in annual[0]["facts"].items() if k not in ("share_cap", "total_assets")})
     part, skipped = model.from_filings("T", [no_bs, *annual[-4:]])
     assert len(part["dates"]) == 4 and skipped == [{"year": "FY2016", "why": skipped[0]["why"]}], skipped
+    # ... but its P&L fills the history before the first full year, line for line as the export has it
+    pl = model.pl_only([no_bs, *annual[-4:]], part["dates"])
+    assert [r["year"] for r in pl] == ["FY2016"] and model.pl_only([*annual[-4:]], part["dates"]) == [], pl
+    for k in ("revenue", "ebitda", "other_income", "dep", "interest", "pbt", "tax", "pat"):
+        assert abs(pl[0][k] - co["hist"][0][k]) < 1e-4, (k, pl[0][k], co["hist"][0][k])
+    assert model.pl_only([no_bs], full["dates"]) == [], "a year the company already has, or a later one, isn't P&L-only"
+    near = dict(annual[5], facts={k: v for k, v in annual[5]["facts"].items() if k not in ("share_cap", "total_assets")})
+    import server  # noqa: PLC0415  (as library_check does)
+    pay = server._company_payload({**part, "pl_only": model.pl_only([no_bs, near, *annual[-4:]], part["dates"])})
+    assert [r["year"] for r in pay["company"]["pl_only"]] == ["FY2016", "FY2021"], pay["company"]["pl_only"]
+    assert [(c["from"], c["to"]) for c in pay["cagrs"]["3"]] == [("FY2021", "FY2024"), ("FY2022", "FY2025")], pay["cagrs"]
+    later = server._company_payload({**full, "pl_only": pay["company"]["pl_only"]})  # an export covered them since
+    assert later["company"]["pl_only"] is None and later["cagrs"]["5"] == model.cagrs(full["hist"], model.labels(full["dates"]), 5)
+    # saved with the company; a company without any saves exactly as before
+    c = server.Company.model_validate({**part, "pl_only": pay["company"]["pl_only"]})
+    assert c.model_dump(mode="json")["pl_only"][0]["year"] == "FY2016" and "pl_only" not in server.Company.model_validate(part).model_dump()
     for bad in ([annual[-1]], [no_bs]):
         try:
             model.from_filings("T", bad)

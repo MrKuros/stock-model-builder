@@ -20,8 +20,10 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
   const nHist = hist.length
   const n = doc.n, active = doc.active
   const proj = projection?.scenarios[active].length === n ? projection.scenarios[active] : null
-  const years = proj ? [...histYears, ...projection!.years] : histYears
-  const rows = proj ? [...hist, ...proj] : hist
+  // older years with a P&L but no balance sheet (NSE's results before FY2023) open the table, marked P&L only
+  const pl = company.pl_only ?? [], nPl = pl.length
+  const years = [...pl.map(r => r.year), ...histYears, ...(proj ? projection!.years : [])]
+  const rows: Row[] = [...pl, ...hist, ...(proj ?? [])]
   const quarterly: QuarterProps | null = company.quarters?.dates.length ? {
     quarters: company.quarters, ttm: parsed.ttm ?? null, ttmPrev: parsed.ttm_prev ?? null,
     year: histYears[nHist - 1], last: hist[nHist - 1], prev: nHist > 1 ? hist[nHist - 2] : null,
@@ -33,7 +35,7 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
   const hide = parsed.sources?.basis === 'cogs' ? undefined : new Set(['cogs'])
   // EPS per year: reported years on that year's share count where the export has it, the forecast on today's
   const sh = company.market?.shares_hist ?? [], now = projection?.valuation.shares ?? company.market?.shares ?? null
-  const shares = rows.map((_, i) => (i < nHist ? sh[i] ?? now : now))
+  const shares = rows.map((_, i) => (i < nPl ? null : i < nPl + nHist ? sh[i - nPl] ?? now : now))
   return (
     <>
       <PageHead label="Data · Statements" title={cur[1]}
@@ -43,7 +45,7 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
           : tab === 'RATIOS' ? <>Margins, growth, returns, working-capital days, cash conversion and leverage, every year. Reported in black; forecast in blue, marked E.</>
           : <>Every line, every year. Reported in black; forecast in blue, marked E. Rs cr.</>}
         answer={tab === 'QUARTERS' ? (quarterly ? <>Quarters to {qfy(quarterly.quarters.dates[quarterly.quarters.dates.length - 1])}.</> : <>No quarterly data in this file.</>)
-          : <>Reported {fy(histYears[0])}–{histYears[nHist - 1].slice(-2)}{proj ? <>; {NAMES[active]}-case forecast to {fy(projection!.years[n - 1])}</> : null}.</>} />
+          : <>Reported {fy(nPl ? pl[0].year : histYears[0])}–{histYears[nHist - 1].slice(-2)}{nPl ? <> ({fy(pl[0].year)}–{pl[nPl - 1].year.slice(-2)} P&amp;L only)</> : null}{proj ? <>; {NAMES[active]}-case forecast to {fy(projection!.years[n - 1])}</> : null}.</>} />
       <nav className="stmt-tabs" aria-label="Statements">
         {tabs.map(([id, name]) => <a key={id} href={href('statements', '', id)} aria-current={id === cur[0] ? 'true' : undefined}>{name}</a>)}
       </nav>
@@ -56,8 +58,13 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
             ? <div className="table-wrap" tabIndex={0} role="region" aria-label="Quarterly results"><QuarterTable {...quarterly} /></div>
             : <p className="val-empty">No quarterly data in this Excel export. Exports with the Quarters block show the last ten quarters
                 and TTM here.</p>
-          : <StatementTable layout={layout} section={tab} years={years} rows={rows} nHist={nHist} hide={hide} shares={shares}
+          : <StatementTable layout={layout} section={tab} years={years} rows={rows} nPl={nPl} nHist={nHist} hide={hide} shares={shares}
               cogs={parsed.sources?.basis === 'cogs'} />}
+        {tab !== 'QUARTERS' && nPl > 0 && <p className="muted small">
+          {fy(pl[0].year)}{nPl > 1 ? `–${fy(pl[nPl - 1].year)}` : ''}: P&amp;L from NSE’s annual results filings, which carry no
+          balance sheet or cash flow in XBRL, so those lines are blank. These years fill the P&amp;L and the revenue <T k="cagr" /> track
+          record only; the forecast defaults, ratios on the balance sheet and the forensic checks start at {fy(histYears[0])}.
+          An Excel export fills them in full (<a href={href('documents', 'sources')}>Documents</a>).</p>}
         {tab === 'PROFIT & LOSS' && proj && moved?.year === histYears[nHist - 1] && <p className="guard small">
           Forecast base is Rs {money((hist[nHist - 1].revenue ?? 0) - moved.revenue_out)} cr, not the reported Rs {money(hist[nHist - 1].revenue ?? 0)} cr:
           Rs {money(moved.revenue_out)} cr of {histYears[nHist - 1]} revenue ({moved.reason || 'divested business'}) deconsolidated, so the step down
@@ -100,8 +107,8 @@ function cell(key: string, v: number | null | undefined, kind: LineKind): string
   return fmt(v, kind)
 }
 
-function StatementTable({ layout, section, years, rows, nHist, hide, shares, cogs }: {
-  layout: LayoutLine[]; section: string; years: string[]; rows: Row[]; nHist: number; hide?: Set<string>
+function StatementTable({ layout, section, years, rows, nPl, nHist: nRep, hide, shares, cogs }: {
+  layout: LayoutLine[]; section: string; years: string[]; rows: Row[]; nPl: number; nHist: number; hide?: Set<string>
   shares: (number | null)[]; cogs: boolean
 }) {
   let lines: Line[] = []
@@ -136,6 +143,7 @@ function StatementTable({ layout, section, years, rows, nHist, hide, shares, cog
     const turn = lines.findIndex(l => l[1] === 'asset_turnover') + 1
     lines = [...lead, ...lines.slice(0, turn), ...days, ...lines.slice(turn)]
   }
+  const nHist = nPl + nRep // reported columns, P&L-only ones first
   // opens at the first year; one button jumps to the latest
   const wrap = useRef<HTMLDivElement>(null)
   const jump = () => {
@@ -149,7 +157,7 @@ function StatementTable({ layout, section, years, rows, nHist, hide, shares, cog
       <table>
         <thead>
           <tr className="mark" aria-hidden="true"><td />
-            <td colSpan={nHist}>Reported</td>{nProj > 0 && <td colSpan={nProj} className="proj">Forecast →</td>}</tr>
+            {nPl > 0 && <td colSpan={nPl} className="pl-only">P&amp;L only</td>}<td colSpan={nRep}>Reported</td>{nProj > 0 && <td colSpan={nProj} className="proj">Forecast →</td>}</tr>
           <tr>
             <th scope="col">{section === 'RATIOS' ? 'Ratio' : 'Rs cr'}</th>
             {years.map((y, i) => <th scope="col" key={y} className={i >= nHist ? 'proj' : undefined}>{fy(i >= nHist && !y.endsWith('E') ? `${y}E` : y)}</th>)}
@@ -161,7 +169,7 @@ function StatementTable({ layout, section, years, rows, nHist, hide, shares, cog
               <th scope="row">{label}</th>
               {rows.map((r, i) => {
                 const v = get(r, i)
-                return <td key={years[i]} className={i >= nHist ? 'proj' : undefined}>{cell(key, v, kind)}</td>
+                return <td key={years[i]} className={i >= nHist ? 'proj' : i < nPl ? 'pl-only' : undefined}>{cell(key, v, kind)}</td>
               })}
             </tr>
           ))}

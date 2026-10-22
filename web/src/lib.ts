@@ -62,7 +62,9 @@ export interface Source {
   // years a later filing restated (model.merge): both numbers, and whether you switched to the restated one
   restated?: { year: string; line: string; filed: number; restated: number; used: boolean }[]
 }
-export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market; quarters?: Quarters | null; source?: Source | null }
+export interface Company { name: string; dates: string[]; hist: Row[]; market?: Market; quarters?: Quarters | null; source?: Source | null; pl_only?: PlYear[] | null }
+/** An older year whose filing has a P&L but no balance sheet (model.pl_only): Statements and the revenue track record only. */
+export type PlYear = Row & { year: string; end: string }
 /** Trailing twelve months (model.ttm): the four quarters ending `end`, each row summed (null if one is missing). */
 export interface Ttm { end: string; values: Row }
 /** A reported figure that moved > 0.5% against the latest saved model of this company (server.restatements). */

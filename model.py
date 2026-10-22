@@ -692,6 +692,32 @@ def filing_row(x):
     return r
 
 
+PL_ONLY = ("revenue", "cogs", "ebitda", "other_income", "dep", "interest", "pbt", "tax", "pat")
+
+
+def pl_only(annual, have):
+    """P&L-only years: annual results filings with profit lines but no balance sheet (NSE's before FY2023), for
+    years older than the first of `have` (the company's dates), oldest first: [{year, end, PL_ONLY lines}], built
+    like filing_row (exceptional items in other income, EBITDA = PBT + interest + depreciation - other income).
+    They fill the P&L history on Statements and the revenue track record (cagrs); with no balance sheet they never
+    feed a default, a ratio on the balance sheet, a forensic check or the projection."""
+    first, out = min(have).date() if have else None, {}
+    for f in annual:
+        end, x = _iso(f.get("period_end") or ""), f.get("facts") or {}
+        if (not end or f.get("kind") != "annual" or (first and end.date() >= first) or filing_row(x) is not None
+                or any(x.get(k) is None for k in ("revenue", "pbt", "pat")) or end in out):
+            continue
+        g = lambda k: x.get(k) or 0.0  # noqa: E731
+        oi = g("other_income") + g("exceptional")
+        cogs = ("materials", "purchases", "inventory_change")
+        out[end] = {"year": fy(end), "end": end.date().isoformat(), "revenue": x["revenue"],
+                    "cogs": sum(g(k) for k in cogs) if any(k in x for k in cogs) else None,
+                    "ebitda": x["pbt"] + g("interest") + g("dep") - oi, "other_income": oi, "dep": g("dep"),
+                    "interest": g("interest"), "pbt": x["pbt"],
+                    "tax": x["tax"] if "tax" in x else g("current_tax") + g("deferred_tax"), "pat": x["pat"]}
+    return [out[d] for d in sorted(out)]
+
+
 Q_FROM = (("sales", "revenue"), ("other_income", "other_income"), ("depreciation", "dep"), ("interest", "interest"),
           ("pbt", "pbt"), ("tax", "tax"), ("net_profit", "pat"))
 
@@ -2050,10 +2076,13 @@ def growth_scale(hist, a, period, wacc, g, per_share):
 
 
 def cagrs(hist, labels, years):
-    """Every rolling `years`-year revenue CAGR: [{"from", "to", "value"}] (skips windows that start or end <= 0)."""
+    """Every rolling `years`-year revenue CAGR: [{"from", "to", "value"}] (skips windows that start or end <= 0, and
+    windows across a missing year: P&L-only years can sit before a gap)."""
+    yr = lambda s: int(re.sub(r"\D", "", s) or 0)  # noqa: E731
     return [{"from": labels[i - years], "to": labels[i],
              "value": (hist[i]["revenue"] / hist[i - years]["revenue"]) ** (1 / years) - 1}
-            for i in range(years, len(hist)) if hist[i]["revenue"] > 0 and hist[i - years]["revenue"] > 0]
+            for i in range(years, len(hist)) if hist[i]["revenue"] > 0 and hist[i - years]["revenue"] > 0
+            and yr(labels[i]) - yr(labels[i - years]) == years]
 
 
 def projected_dates(co, n):

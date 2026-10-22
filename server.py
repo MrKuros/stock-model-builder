@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, model_serializer, model_validator
 
 import ai
 import model
@@ -131,6 +131,9 @@ class Company(BaseModel):
     hist: list[dict[str, float | None]]
     market: Market = Market()  # version-3 documents saved before 2.1 have none
     quarters: Quarters | None = None  # none in the export (Milky Mist), or saved before 3.5
+    # older years whose filings carry a P&L but no balance sheet (model.pl_only): Statements and the revenue track
+    # record only, never a default or the projection. None = none (or saved before they were read)
+    pl_only: list[dict[str, float | str | None]] | None = None
     # fetched by ticker (5.1): {symbol, exchange, basis, fetched_at, price_at, industry, years {FY2024: "NSE filing" |
     # "Excel export"}, missing, mismatches, notes, documents}; words and dates only, no number reads it. None = an upload
     source: dict | None = None
@@ -139,6 +142,14 @@ class Company(BaseModel):
     @classmethod
     def _old_source(cls, d):
         return {**d, "source": _unbrand(d["source"])} if isinstance(d, dict) and d.get("source") else d
+
+    @model_serializer(mode="wrap")
+    def _no_empty_pl(self, handler):
+        """A company without P&L-only years saves exactly as before they were read."""
+        d = handler(self)
+        if d.get("pl_only") is None:
+            d.pop("pl_only", None)
+        return d
 
     @model_validator(mode="after")
     def _years(self):
@@ -415,11 +426,14 @@ def _company_payload(co, excluded=(), filings=(), notes=None):
     """What the dashboard derives from the company. Ratios, defaults and one-offs use the upgraded history (with the
     filings' payables, leases and cash-flow capex); "company" stays as parsed, for the document."""
     labels, q, up = model.labels(co["dates"]), co.get("quarters"), upgraded(co, filings, notes)
+    # P&L-only years still older than the first full year (an export added later covers them instead)
+    first = co["dates"][0] if isinstance(co["dates"][0], str) else co["dates"][0].date().isoformat()
+    pl = [r for r in co.get("pl_only") or [] if str(r.get("end")) < first[:10]]
     return {
         "company": {"name": co["name"], "dates": [d.isoformat() for d in co["dates"]], "hist": co["hist"],
                     "market": co.get("market") or Market().model_dump(),
                     "quarters": q and {"dates": [d.isoformat() for d in q["dates"]], "rows": q["rows"]},
-                    "source": co.get("source")},
+                    "source": co.get("source"), "pl_only": pl or None},
         "ttm": model.ttm(q), "ttm_prev": model.ttm(q, 4),  # last four quarters, and the four before them
         "years": labels,
         "hist": up["hist"], "sources": up["sources"],
@@ -434,7 +448,8 @@ def _company_payload(co, excluded=(), filings=(), notes=None):
         "forensic": (radar := model.forensic(up["hist"], labels, notes)),
         "rule_checks": model.rule_checks(up["hist"], labels, oneoffs, model.data_checks(co), notes, radar),
         "key_numbers": model.key_numbers(up["hist"], labels),
-        "cagrs": {"3": model.cagrs(up["hist"], labels, 3), "5": model.cagrs(up["hist"], labels, 5)},
+        # the revenue track record also reads P&L-only years (cagrs reads revenue alone)
+        "cagrs": {n: model.cagrs([*pl, *up["hist"]], [r["year"] for r in pl] + labels, int(n)) for n in ("3", "5")},
         "valuation": model.VALUATION,  # defaults for a new document
         "drivers": model.DRIVERS,
         "layout": model.LAYOUT,
@@ -1596,11 +1611,16 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
             more.append("Some filings couldn’t be read, so trying again may help.")
         raise ValueError(" ".join([*more, "Upload an Excel export instead."]))
     notes += merged
+    # older filings with a P&L but no balance sheet fill the P&L history where nothing else has those years
+    co["pl_only"] = model.pl_only(read, co["dates"]) or None
     labels = model.labels(co["dates"])
     have = set(labels)
     no_bs = {s["year"] for s in skipped}
+    pl_years = {r["year"] for r in co["pl_only"] or ()}
     last = int(labels[-1][2:])
-    gaps = [(f"FY{y}", "NSE’s results filings for these years carry no balance sheet in XBRL"
+    gaps = [(f"FY{y}", "P&L only: NSE’s results filings for these years carry no balance sheet in XBRL, so the "
+             "balance sheet and cash flow are blank" if f"FY{y}" in pl_years else
+             "NSE’s results filings for these years carry no balance sheet in XBRL"
              if f"FY{y}" in no_bs else f"listed on NSE in {listed:%b %Y}, so no results before that"
              if listed and listed.year >= y else "no results filing in XBRL on NSE (it starts in 2018-19)")
             for y in range(last - FETCH_YEARS + 1, last + 1) if f"FY{y}" not in have]
