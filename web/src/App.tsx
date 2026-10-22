@@ -4,7 +4,7 @@ import AddPage, { useBuild, watchSymbol, type AddOpts } from './Add'
 import Workspace from './Workspace'
 import { BottomBar, Finder, HomeRail, KeysDialog, PhoneTop, keysOn, slugOf } from './Shell'
 import { ANSWERS, navigate, onLinkClick, pathOf, placed, readRoute, type Route } from './route'
-import { api, defaultPaths, postJson, seed, type ModelDoc, type ModelSummary, type Opened, type Parsed, type Report, type WatchList } from './lib'
+import { api, defaultPaths, postJson, seed, type ModelDoc, type AutoState, type ModelSummary, type Opened, type Parsed, type Report, type WatchList } from './lib'
 import { shortName } from './Note'
 
 const LAST = 'financial-model:last' // id of the last open model: only the old #note/#model/#evidence links need it now
@@ -47,8 +47,11 @@ const newDoc = (p: Parsed, reports: Report[] = []): ModelDoc => ({
 
 export interface SaveState { at: string | null; error: string | null }
 /** Tabs of this app tell each other when a model is saved, so a second tab on the same company follows (no polling). */
-type Msg = { type: 'saved' | 'deleted'; id: string; saved_at?: string }
+type Msg = { type: 'saved' | 'deleted'; id: string; saved_at?: string; from?: 'scheduled' }
 const channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('stock-model-builder') : null
+// the scheduled checks' saves reach this tab's own listener (and the others') through a second channel object
+const scheduled = typeof BroadcastChannel === 'function' ? new BroadcastChannel('stock-model-builder') : null
+const POLL = 60_000 // how often each tab asks whether a scheduled check saved new results (a local request)
 
 export default function App() {
   const [route, setRoute] = useState<Route>(readRoute)
@@ -231,19 +234,36 @@ export default function App() {
       if (m.type !== 'saved' || !cur || slugOf(m.id) !== slugOf(cur) || (m.saved_at ?? '') < (savedAt.current ?? '')) return
       if (pending.current || saving.current) {
         later.current = { id: m.id, saved_at: m.saved_at ?? '' }
-        setNotice('Another tab saved changes to this company. Your edits here are newer, so they replace those when they save in a moment.')
+        setNotice(m.from === 'scheduled'
+          ? 'The scheduled check added new results to this company. Your edits here are newer, so they replace that version when they save; check again on Results tracking.'
+          : 'Another tab saved changes to this company. Your edits here are newer, so they replace those when they save in a moment.')
         return
       }
       const g = gen.current
       api<Opened>(`/api/models/${m.id}`).then(o => {
         if (g !== gen.current || pending.current || saving.current) return
         openDoc(o.parsed, o.doc!, m.id, null)
-        setNotice('Updated with the changes saved in another tab.')
+        setNotice(m.from === 'scheduled' ? 'The scheduled check added new results; this page now shows them. Your assumptions are unchanged.'
+          : 'Updated with the changes saved in another tab.')
       }).catch(() => { /* the next save here wins */ })
     }
     channel.addEventListener('message', on)
     return () => channel.removeEventListener('message', on)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- scheduled checks (server, once a day): new results they saved reload the list and the open company ----
+  useEffect(() => {
+    let seen: string | null | undefined // the last run's end when this tab first looked: older saves are already loaded
+    const look = () => api<AutoState>('/api/auto').then(a => {
+      const done = a.last?.done_at ?? null
+      if (seen !== undefined && done && done !== seen)
+        for (const r of a.last!.new) if (r.id && r.saved_at) scheduled?.postMessage({ type: 'saved', id: r.id, saved_at: r.saved_at, from: 'scheduled' } satisfies Msg)
+      seen = done
+    }).catch(() => { /* an old server or a blip: look again later */ })
+    look()
+    const t = window.setInterval(look, POLL)
+    return () => window.clearInterval(t)
+  }, [])
 
   // ---- keys: / go to, ? the keys, 1-6 the answer pages; never while typing, and not at all when turned off ----
   const [find, setFind] = useState<'goto' | 'switch' | null>(null)

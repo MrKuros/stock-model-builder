@@ -1833,10 +1833,129 @@ def check_all(today=None):
     yield {"done": True}
 
 
+CHECKING = threading.Lock()  # one check of every company at a time: yours (Check all) or the scheduled one
+
+
+def _one_check(events):
+    """events (check_all) while holding CHECKING, or one error event when a check is already running."""
+    if not CHECKING.acquire(blocking=False):
+        raise ValueError("A scheduled check is running now; its results appear in the list when it finishes.")
+    try:
+        yield from events
+    finally:
+        CHECKING.release()
+
+
 @app.post("/api/track/check")
 def track_check():
     """check_all as JSON lines; closing the request stops it after the company in hand."""
-    return _stream(check_all(), "checking for new results", "use Refresh on each company")
+    return _stream(_one_check(check_all()), "checking for new results", "use Refresh on each company")
+
+
+# ---------- scheduled checks: prices and new results in the background, rules only ----------
+
+AUTO = "auto.json"  # library root: {"enabled": bool, "last": {started_at, done_at, prices, new: [{id, company, saved_at, text}], failed}}
+AUTO_EVERY = 24 * 3600  # seconds between scheduled runs while the app runs
+AUTO_START = 3600  # on start, a run only when the last one is older than this, so restarts don't poll NSE again
+AUTO_TICK = 300  # seconds between looks at the clock and the setting
+# ponytail: a fixed day from the last run, not a market-hours schedule; results land within a day of filing
+
+
+def auto_state(root=None):
+    """The scheduled-check setting and the last run's summary; on (and never run) when there's no file yet."""
+    try:
+        a = json.loads(((root or MODELS) / AUTO).read_bytes())
+        if isinstance(a, dict):
+            return {"enabled": a.get("enabled") is not False, "last": a.get("last") if isinstance(a.get("last"), dict) else None}
+    except (OSError, ValueError):
+        pass
+    return {"enabled": True, "last": None}
+
+
+def auto_due(state, now, start=False):
+    """Whether a scheduled run is due: on, and the last finished run is older than a day (an hour at app start)."""
+    if not state["enabled"]:
+        return False
+    done = (state["last"] or {}).get("done_at")
+    try:
+        age = (now - datetime.fromisoformat(done)).total_seconds() if done else None
+    except ValueError:
+        age = None
+    return age is None or age >= (AUTO_START if start else AUTO_EVERY)
+
+
+def auto_run(root=None, now=None):
+    """One scheduled run: today's prices (refresh_prices), then new results for every company added by ticker
+    (check_all, which saves a version only when there are new ones; assumptions never change). Rules only, the same
+    polite client and cache as the buttons. Returns the summary kept in auto.json, or None when a check was running."""
+    root = root or MODELS
+    if not CHECKING.acquire(blocking=False):
+        return None
+    try:
+        started = (now or datetime.now()).isoformat(timespec="seconds")
+        prices = next((e for e in refresh_prices(root, now) if "done" in e), {})
+        new, failed = [], 0
+        for e in check_all(now):
+            r = e.get("result") or {}
+            if r.get("status") == "new":
+                new.append({k: r.get(k) for k in ("id", "company", "saved_at", "text")})
+            failed += r.get("status") == "failed"
+        last = {"started_at": started, "done_at": datetime.now().isoformat(timespec="seconds"),
+                "prices": {k: prices.get(k) for k in ("checked", "missed", "stopped")}, "new": new, "failed": failed}
+        _write(root / AUTO, json.dumps({**auto_state(root), "last": last}).encode())
+        return last
+    finally:
+        CHECKING.release()
+
+
+def _auto_loop(stop, root=None):
+    start = True
+    while not stop.is_set():
+        try:
+            if auto_due(auto_state(root), datetime.now(), start):
+                auto_run(root)
+        except Exception:  # noqa: BLE001  ponytail: a failed run waits for the next tick; the list shows the last good one
+            pass
+        start = False
+        stop.wait(AUTO_TICK)
+
+
+_AUTO_STOP = threading.Event()
+
+
+@app.on_event("startup")
+def _auto_start():
+    """The scheduled checks run in a background thread while the app runs (AUTO_CHECKS=0 never starts it)."""
+    if os.environ.get("AUTO_CHECKS") != "0":
+        threading.Thread(target=_auto_loop, args=(_AUTO_STOP,), name="scheduled-checks", daemon=True).start()
+
+
+@app.on_event("shutdown")
+def _auto_end():
+    _AUTO_STOP.set()
+
+
+class AutoSetting(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/auto")
+def auto_get():
+    """The setting, whether a run is going on now, the last run and when the next is due."""
+    a = auto_state()
+    done = (a["last"] or {}).get("done_at")
+    nxt = None
+    if a["enabled"] and done:
+        with contextlib.suppress(ValueError):
+            nxt = datetime.fromtimestamp(datetime.fromisoformat(done).timestamp() + AUTO_EVERY).isoformat(timespec="seconds")
+    return {**a, "running": CHECKING.locked(), "next_at": nxt}
+
+
+@app.post("/api/auto")
+def auto_set(s: AutoSetting):
+    a = auto_state()
+    _write(MODELS / AUTO, json.dumps({**a, "enabled": s.enabled}).encode())
+    return auto_get()
 
 
 # ---------- watchlist (5.4): the coverage page's prices and history, rules only ----------

@@ -1594,6 +1594,7 @@ def library_check(root, co, scenarios):
     peers_api_check(server, root, co, data)
     track_check(server, root, co, data)
     watch_check(server, data)
+    auto_check(server)
 
 
 def reimport_check(server, root, co, data):
@@ -3321,6 +3322,39 @@ def _blank(tmp):
     openpyxl.Workbook().save(p)
     return p
 
+
+
+def auto_check(server):
+    """Scheduled checks: on by default, due on start after an hour and then daily, off by the setting; one run at a
+    time (a running one turns Check all away); a run keeps its summary. No network here: no company has a symbol."""
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    root, models = Path(tempfile.mkdtemp()), server.MODELS
+    server.MODELS = root
+    try:
+        assert server.auto_state(root) == {"enabled": True, "last": None}
+        now = datetime(2026, 10, 22, 9, 0)
+        assert server.auto_due(server.auto_state(root), now, start=True), "never run: due at once"
+        ran = {"enabled": True, "last": {"done_at": "2026-10-22T08:30:00"}}
+        assert not server.auto_due(ran, now, start=True) and not server.auto_due(ran, now)
+        assert server.auto_due(ran, datetime(2026, 10, 22, 9, 31), start=True) and not server.auto_due(ran, datetime(2026, 10, 22, 9, 31))
+        assert server.auto_due(ran, datetime(2026, 10, 23, 8, 30)) and not server.auto_due(dict(ran, enabled=False), datetime(2027, 1, 1))
+        last = server.auto_run(root)
+        assert last["new"] == [] and last["failed"] == 0 and server.auto_state(root)["last"] == last, last
+        client = TestClient(server.app)
+        assert client.post("/api/auto", json={"enabled": False}).json()["enabled"] is False
+        got = client.get("/api/auto").json()
+        assert got["enabled"] is False and got["last"] == last and got["running"] is False and got["next_at"] is None, got
+        assert not server.auto_due(server.auto_state(root), datetime(2030, 1, 1)), "off: never due"
+        assert client.post("/api/auto", json={"enabled": True}).json()["next_at"] is not None
+        with server.CHECKING:  # a run in progress: the scheduled one waits, Check all says so
+            assert server.auto_run(root) is None and client.get("/api/auto").json()["running"] is True
+            lines = [json.loads(x) for x in client.post("/api/track/check").text.splitlines()]
+            assert len(lines) == 1 and "scheduled check is running" in lines[0]["error"], lines
+        (root / server.AUTO).write_text("{damaged")
+        assert server.auto_state(root) == {"enabled": True, "last": None}, "a damaged file: on, never run"
+    finally:
+        server.MODELS = models
 
 
 def watch_check(server, data):

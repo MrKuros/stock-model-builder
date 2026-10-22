@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Confirm, Menu, Scale, ScaleHead, ScaleKey, Verdict, latestOf, slugOf } from './Shell'
 import { pathOf, placed } from './route'
-import { api, clock, fmt, properName, rs, gap, verdict, type ModelSummary, type VerdictKind, type WatchList } from './lib'
+import { api, clock, fmt, postJson, properName, rs, gap, verdict, type AutoState, type ModelSummary, type VerdictKind, type WatchList } from './lib'
 import { ago, streamFetch } from './Fetch'
 import { fy, qfy } from './lib'
 import { Q_WORD, quarterWords } from './Tracking'
@@ -119,6 +119,7 @@ export default function Home({ models, error, build, onAdd, onWatch, watch, setW
         <div className="cov-tools">
           <Prices models={latest} watch={watch?.watch ?? []} onDone={onReload} />
           {latest.some(m => m.symbol) && <CheckAll n={latest.filter(m => m.symbol).length} models={latest} onSaved={onChecked} />}
+          {latest.some(m => m.symbol) && <AutoChecks />}
           <label className="sort">Sort <select className="sel" value={sort} onChange={e => setSort(e.target.value as Sort)}>
             {Object.entries(SORTS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         </div>
@@ -203,6 +204,28 @@ function PriceNote({ m }: { m: ModelSummary }) {
   return moved != null && Math.abs(moved) >= 0.005
     ? <span className="small muted">Live CMP, {moved > 0 ? '+' : '−'}{fmt(Math.abs(moved), 'pct')} since the model was saved</span>
     : null
+}
+
+/** Scheduled checks: prices and new results for every company added by ticker, on app start and once a day while
+ * the app runs (server, rules only); the last run in one line, and the setting to turn them off. */
+function AutoChecks() {
+  const [a, setA] = useState<AutoState | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  useEffect(() => { api<AutoState>('/api/auto').then(setA).catch(() => setA(null)) }, [])
+  if (!a) return null
+  const flip = () => api<AutoState>('/api/auto', postJson({ enabled: !a.enabled })).then(x => { setA(x); setErr(null) })
+    .catch(e => setErr((e as Error).message))
+  const l = a.last
+  return (
+    <p className="small muted auto-line">
+      <span>Scheduled checks {a.enabled ? 'on' : 'off'}{a.running ? ': checking now…'
+        : l ? <>: last {clock(l.done_at)}, {l.new.length ? <>new results for {l.new.map((r, i) => <span key={r.id}>{i ? ', ' : ''}<a href={pathOf(slugOf(r.id), 'tracking')}>{properName(r.company)}</a></span>)}</> : 'nothing new'}{l.failed ? `, ${l.failed} couldn’t be reached` : ''}{a.next_at ? `; next ${clock(a.next_at)}` : ''}</>
+        : a.enabled ? ': first run shortly after the app starts' : ''}.</span>{' '}
+      <button type="button" className="link" onClick={flip} aria-describedby="auto-why">{a.enabled ? 'Turn off' : 'Turn on'}</button>
+      <span id="auto-why" className="sr"> Checks NSE once a day for prices and new results, adds them and keeps your assumptions.</span>
+      {err && <span role="alert"> {err}</span>}
+    </p>
+  )
 }
 
 interface CheckResult {

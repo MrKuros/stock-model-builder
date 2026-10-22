@@ -321,6 +321,12 @@ export interface ModelSummary {
   // quarters filed this year against the base case's run-rate: gaps by line (revenue, PAT a share; margin in pp)
   quarter?: (Pick<QuarterTrack, 'year' | 'quarter' | 'period' | 'status'> & Record<QuarterLine['key'], number | null>) | null
 }
+/** GET /api/auto: the scheduled checks (prices and new results, once a day while the app runs) and their last run. */
+export interface AutoState {
+  enabled: boolean; running: boolean; next_at: string | null
+  last: { started_at: string; done_at: string; prices: { checked: number | null; missed: number | null; stopped: boolean | null }
+    new: { id: string; company: string; saved_at: string; text: string }[]; failed: number } | null
+}
 /** GET /api/watch: tickers watched without a model, and the daily [date, price, bear, base, bull] per company slug. */
 export interface Watched { symbol: string; name: string; added_at: string; price: number | null; at: string | null; industry: string | null }
 export interface WatchList { watch: Watched[]; history: Record<string, [string, number, number | null, number, number | null][]> }
