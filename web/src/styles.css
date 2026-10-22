@@ -612,6 +612,7 @@ a.cell { color: var(--ink); text-decoration: none; }
 .deeper { margin-top: 36px; }
 .keys a.quiet { color: inherit; text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; }
 .keys a.quiet:hover { text-decoration-color: var(--ours); }
+.keys a.go-line { display: inline-block; min-width: 24px; min-height: 24px; text-align: center; text-decoration: none; color: var(--ours); }
 
 /* fundamentals */
 .growth { width: 100%; border-collapse: collapse; font-size: 14px; }

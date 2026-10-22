@@ -5,7 +5,7 @@ import { FlagNoteView, useAi } from './Sources'
 import { cagrOf } from './Fundamentals'
 import { Next, PageHead, Sev } from './Shell'
 import { useHref } from './route'
-import { T, def, type TermKey } from './Term'
+import { T, type TermKey } from './Term'
 import {
   api, clock, fmt, fy, gap, money, postJson, properName, rs, verdict, when, type Cagr, type ModelDoc, type NoteRef, type OneOffNote, type Parsed,
   type Path, type Projection, type RuleCheck, type Row, type ScenarioValue, type ThesisNote, type Valuation,
@@ -326,7 +326,10 @@ function KeyNumbers({ parsed, proj, next, checks, v }: {
             const f = flagged(k.key)
             return (
               <tr key={k.key}>
-                <th scope="row"><a className="quiet" href={TO[k.key] ?? href('statements')} title={KT[k.key] ? def(KT[k.key]) : undefined}>{k.label}</a></th>
+                <th scope="row">{KT[k.key]
+                  // the definition on its own term (hover, focus, tap) and the line behind it as a separate link: never one inside the other
+                  ? <><T k={KT[k.key]}>{k.label}</T> <a className="quiet go-line" href={TO[k.key] ?? href('statements')} aria-label={`${k.label}: open the line`}>→</a></>
+                  : <a className="quiet" href={TO[k.key] ?? href('statements')}>{k.label}</a>}</th>
                 <td className="num">{f ? <span className="pen">{show(k.last, k.kind)}<svg aria-hidden="true" viewBox="0 0 100 40" preserveAspectRatio="none"><ellipse cx="50" cy="20" rx="47" ry="16" /></svg><span className="sr"> (flagged: {f.fact})</span></span> : show(k.last, k.kind)}</td>
                 <td className="num dim">{show(k.typical, k.kind)}</td>
                 {p && <td className="num ours">{show(nextOf[k.key] ?? null, k.kind)}</td>}
@@ -343,7 +346,7 @@ function KeyNumbers({ parsed, proj, next, checks, v }: {
   )
 }
 
-/** Key metrics whose label (a link) carries the glossary definition as its hover title. */
+/** Key metrics whose label is a glossary term (definition on hover, focus and tap), with the link to its line beside it. */
 const KT: Record<string, TermKey> = { roce: 'roce', cash_conversion: 'cfo_pat', ebitda_margin: 'ebitda_margin', dso: 'dso', growth: 'growth' }
 
 type Pr = (text: string, refs: NoteRef[], uid: string) => ReactNode

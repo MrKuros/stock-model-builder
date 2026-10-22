@@ -2554,6 +2554,12 @@ def css_tokens_check():
     defined = set(re.findall(r"(--[\w-]+)\s*:", (web / "styles.css").read_text()))
     used = {u for f in web.iterdir() if f.suffix in (".css", ".ts", ".tsx") for u in re.findall(r"var\((--[\w-]+)|'(--[a-z][\w-]*)'", f.read_text()) for u in u if u}
     assert used <= defined, f"undefined CSS tokens: {sorted(used - defined)}"
+    # a glossary term is focusable itself (tap and keyboard show its definition), so it never sits inside a link or a
+    # button, and a definition never hides in a link's hover-only title
+    for f in web.glob("*.tsx"):
+        src = f.read_text()
+        assert not re.search(r"<(a|button)\b[^>]*>(?:(?!</\1>).)*?<T\b", src, re.S), f"{f.name}: a glossary term inside a link or button"
+        assert "title={def(" not in src.replace(" ", "") or f.name == "Term.tsx", f"{f.name}: a definition only on hover"
 
 
 def contrast_check():

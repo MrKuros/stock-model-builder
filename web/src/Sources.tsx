@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { lower, type Upgrade } from './Model'
 import { useHref } from './route'
+import { T } from './Term'
 import {
   api, dec2, DOC_KINDS, fmt, isAnnual, money, postJson, type ArNote, type DocKind, type ArValue, type Check, type Company, type Decided, type Filing,
   type FlagNote, type Forensic, type NotesPlan, type OneOffNote, type Proposal, type Report, type Sources as Used,
@@ -332,7 +333,8 @@ export default function Sources({
                     <div className="table-wrap src-wrap" tabIndex={0} role="region" aria-label={`Lines read, ${f.file}`}>
                       <table className="src-table">
                         <thead><tr><th scope="col">Line</th><th scope="col">Rs crore</th></tr></thead>
-                        <tbody>{facts.map(([k, v]) => <tr key={k}><th scope="row">{label(k)}</th><td>{amount(k, v)}</td></tr>)}</tbody>
+                        <tbody>{facts.map(([k, v]) => <tr key={k}><th scope="row">{k === 'eps_basic' || k === 'eps_diluted'
+                          ? <><T k="eps" />, {k === 'eps_basic' ? 'basic' : 'diluted'} (Rs)</> : label(k)}</th><td>{amount(k, v)}</td></tr>)}</tbody>
                       </table>
                     </div></details>}
                   {f.unmapped.length > 0 && <details><summary>Unmapped tags ({f.unmapped.length})</summary>
