@@ -1306,7 +1306,10 @@ def inputs_hash(req: ModelRequest):
     """What the note is written from: the company, every scenario's inputs, the horizon, the valuation inputs, what the
     filings add, and the words and sources behind its facts and citations (approved notes, flag notes, input sources,
     excluded years). A saved note with another hash was written for earlier inputs."""
-    key = {"company": req.company.model_dump(mode="json"), "n": req.n, "valuation": req.valuation.model_dump(),
+    co = req.company.model_dump(mode="json")
+    if co.get("source"):  # the price counts, not when it was read ("2 min ago" moves on every open)
+        co["source"] = {k: v for k, v in co["source"].items() if k != "price_at"}
+    key = {"company": co, "n": req.n, "valuation": req.valuation.model_dump(),
            "scenarios": {s: {k: v.model_dump() for k, v in a.items()} for s, a in req.scenarios.items()},
            "filings": [[f.id, f.facts] for f in req.filings], "notes": req.notes, "flag_notes": req.flag_notes,
            "sources": req.assumption_sources, "excluded": sorted(req.excluded_years)}
@@ -1472,7 +1475,9 @@ def _thesis_facts(doc: "ModelDoc"):
         why = f"drafted from a document and approved, see {c}" if c else "the rule default from history" if rule else "set by you"
         if rule and not c:  # a flagged year inside the default's window: say it, and what leaving it out gives
             for o in oneoffs:
-                if o["metric"] == k and o["year"] in window and o.get("unreliable"):  # no number to cite: it isn't spending
+                if o["metric"] == k and o["year"] in window and k in model.SKIP_ODD:  # the rule already leaves it out
+                    why += f"; leaves out {o['year']}'s flagged {_pc(o['value'])}"
+                elif o["metric"] == k and o["year"] in window and o.get("unreliable"):  # no number to cite: it isn't spending
                     why += f"; includes {o['year']}, whose capex from the net-block change is unreliable"
                 elif o["metric"] == k and o["year"] in window:
                     why += f"; includes {o['year']}'s flagged {_pc(o['value'])}"
@@ -1723,15 +1728,16 @@ class FetchRequest(SymbolRequest):
 @app.post("/api/nse/search")
 def nse_search(req: SearchRequest):
     """Companies on NSE matching a name or symbol (POST: only this app's pages can make the server go online)."""
+    code = sources.is_code(req.q.strip())
     try:
-        found, error = ([] if sources.is_code(req.q.strip()) else sources.search(nse(), req.q)), None
+        found, error = ([] if code else sources.search(nse(), req.q)), None
     except sources.Offline as e:
         found, error = [], str(e)
     if not found:  # nothing on NSE (or NSE refused): BSE, where a scrip code or a BSE-only company is found
         try:
             found = sources.bse_search(bse(), req.q)
-        except sources.Offline as e:
-            error = error and f"{error} BSE didn’t answer either ({e})"
+        except sources.Offline as e:  # said even when NSE was skipped or had no match: else "NSE has no such share"
+            error = f"{error} BSE didn’t answer either ({e})" if error else ("" if code else "No match on NSE. ") + str(e)
         else:
             error = None if found else error
     return {"results": found, "error": error}

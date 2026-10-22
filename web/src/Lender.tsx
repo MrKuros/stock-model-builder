@@ -33,7 +33,7 @@ export function lenderWords(parsed: Parsed, projection: Projection | null): { an
   if (value == null || value <= 0) {
     if (!v.error && v.shares == null) return { answer: <>No fair value: share count missing.</>,
       fix: { page: 'valuation', anchor: 'v-shares', label: 'Enter shares outstanding' } }
-    return { answer: <>No fair value: {(v.error ?? sv.error ?? 'the inputs gave an error.').replace(/^./, c => c.toLowerCase())}</>,
+    return { answer: <>No fair value: {(v.error ?? sv.error ?? 'the inputs gave an error.').replace(/^[A-Z](?=[a-z])/, c => c.toLowerCase())}</>,
       fix: v.error ? { page: 'valuation', anchor: 'how', label: 'Open valuation inputs' } : { page: 'forecast', anchor: 'credit_cost', label: 'Check the forecast' } }
   }
   const V = (x: number) => <span className="num ours">Rs {rs(x)}</span>

@@ -208,7 +208,7 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
         answer={v && (v.scenarios[active].per_share ?? 0) > 0
           ? <>{NAMES[active]}-case fair value <span className="num ours">Rs {rs(v.scenarios[active].per_share!)}</span>/share.
             {ownCount ? <> {ownCount} driver{ownCount === 1 ? '' : 's'} edited; the rest at rule defaults.</> : <> All drivers at rule defaults.</>}</>
-          : <>No fair value with these drivers{v?.scenarios[active].error ? `: ${v.scenarios[active].error.replace(/^./, c => c.toLowerCase())}` : '.'}</>} />
+          : <>No fair value with these drivers{v?.scenarios[active].error ? `: ${v.scenarios[active].error.replace(/^[A-Z](?=[a-z])/, c => c.toLowerCase())}` : '.'}</>} />
 
       <div className="f-tool">
         <p>Editing the <b>{NAMES[active]}</b> scenario <span className="small muted">(switch in the top bar)</span></p>
@@ -407,9 +407,9 @@ function Linked({ k, parsed }: { k: string; parsed: Parsed }) {
   const odd = parsed.oneoffs.find(o => o.metric === k && recent.includes(o.year))
   const lit = (parsed.rule_checks ?? []).find(c => c.id === k && (c.status === 'red' || c.status === 'amber'))
   if (!odd && !lit) return null
-  return <p className="small linked">{odd ? <>{fy(odd.year)} is an outlier ({odd.note.replace(/^./, c => c.toLowerCase())}); the default may include it.{' '}
+  return <p className="small linked">{odd ? <>{fy(odd.year)} is an outlier ({odd.note.replace(/^[A-Z](?=[a-z])/, c => c.toLowerCase())}); {k === 'tax_rate' || k === 'mi_pct' ? 'the default leaves it out' : 'the default may include it'}.{' '}
     <a href={href('risks', 'unusual')}>Details</a></>
-    : <>{inputName(k)} flagged: {lit!.fact.replace(/^./, c => c.toLowerCase())}. <a href={href('risks', 'signs')}>Details</a></>}</p>
+    : <>{inputName(k)} flagged: {lit!.fact.replace(/^[A-Z](?=[a-z])/, c => c.toLowerCase())}. <a href={href('risks', 'signs')}>Details</a></>}</p>
 }
 
 /** An AI suggestion waiting for this input: purple until you Use it. */

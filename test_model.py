@@ -1,4 +1,5 @@
 """Run: uv run python test_model.py  (Excel formula check needs LibreOffice `soffice` on PATH)."""
+import atexit
 import calendar
 import contextlib
 import io
@@ -101,6 +102,9 @@ def recalc(xlsx, outdir):
 
 def main():
     tmp = Path(tempfile.mkdtemp())
+    # every later mkdtemp lands inside it, and it goes at exit, pass or fail
+    tempfile.tempdir = str(tmp)
+    atexit.register(shutil.rmtree, tmp, True)
     src = tmp / "export.xlsx"
     fake_export(src)
 
@@ -187,7 +191,14 @@ def main():
     ex = model.default_assumptions(odd, exclude={"FY2023", "FY2024"}, labels=labels)
     assert abs(ex["tax_rate"] - 0.25) < 1e-3 and abs(ex["growth"] - 0.12) < 1e-6, ex
     assert ex["dso"] == model._ros((odd[i]["receivables"] * 365, odd[i]["revenue"]) for i in (5, 6, 9)), ex
-    assert model.default_assumptions(odd, labels=labels)["tax_rate"] > 0.3
+    # a year flagged for tax or minority share leaves that default by itself (SKIP_ODD), reaching back; the rest keep it
+    tax = lambda ix: model._ros((odd[i]["tax"], odd[i]["pbt"]) for i in ix)  # noqa: E731
+    assert abs(model.default_assumptions(odd, labels=labels)["tax_rate"] - tax((6, 8, 9))) < 1e-12  # not FY2023's 45%
+    assert model.default_assumptions(odd)["tax_rate"] == model.default_assumptions(odd, labels=labels)["tax_rate"]
+    dm = model.default_assumptions(mi, labels=labels)  # HUL FY2026 / ITC FY2025: a demerger gain read as +13.7%, +23.8%
+    want = model._ros((mi[i]["pat"] - (mi[i]["pbt"] - mi[i]["tax"]), mi[i]["pbt"] - mi[i]["tax"]) for i in (6, 7, 8))
+    assert abs(dm["mi_pct"] - want) < 1e-12 and abs(want + 0.05) < 0.02, dm["mi_pct"]  # not FY2025's 14.1%
+    assert dm["ebitda_margin"] == model.default_assumptions(co["hist"])["ebitda_margin"]
     try:
         model.default_assumptions(odd, exclude=set(labels[1:]), labels=labels)
         raise AssertionError("expected ValueError")
@@ -2357,6 +2368,11 @@ def thesis_check(server, root, data):
                 assert client.post("/api/project", json=moved).json()["inputs_hash"] != n["inputs_hash"], moved.keys()
             vi = dict(req, valuation=dict(req["valuation"], g=0.04))
             assert client.post("/api/project", json=vi).json()["inputs_hash"] != n["inputs_hash"]
+            # the price read later moves nothing; a new price does
+            at = lambda when, p=None: client.post("/api/project", json=dict(req, company=dict(  # noqa: E731
+                req["company"], source={"symbol": "TESTIND", "price_at": when},
+                market=dict(req["company"]["market"], price=p or req["company"]["market"]["price"])))).json()["inputs_hash"]
+            assert at("1 min ago") == at("3 h ago") != at("3 h ago", 1.0)
             assert client.post("/api/export", json=req).status_code == 200
             # the real routes (save, list with its reverse DCF, open, delete), on the test library: no LLM call
             assert server.load_model.__defaults__ == (None,), "routes must read server.MODELS at call time"
@@ -2896,7 +2912,7 @@ def bse_check(server, co):
                                     "ISIN_NUMBER": "INE000X01010", "INDUSTRY": "Widgets", "FACE_VALUE": "10.00", "Mktcap": "8,250.00"}
     ann = [{"XML_NAME": f"A{y.year}.xml", "NEWS_DT": f"{y.year}-05-10T10:00:00"} for y in d[-4:]][::-1]
     net = {
-        sources.BSE_LIST: [row("590001", "TESTBSE", "Test Bse Industries Limited"), row("ABC", "BAD", "Bad")],
+        sources.BSE_LIST: (row_list := [row("590001", "TESTBSE", "Test Bse Industries Limited"), row("ABC", "BAD", "Bad")]),
         f"{api}/getScripHeaderData/w?Debtflag=&scripcode=590001": {"Header": {"PrevClose": "1,640.00"}, "CurrRate": {"LTP": "1,650.00"},
                                                                      "Cmpname": {"FullN": "Test Bse Industries Limited"}},
         f"{api}/AnnSubCategoryGetData/w?pageno=1&strCat=Result": {"Table": [
@@ -2920,6 +2936,12 @@ def bse_check(server, co):
         for c in (server.nse(), server.bse()):
             c.opener, c.gap = Opener(), 0.0
         assert sources.is_code("590001") and not sources.is_code("TCS") and not sources.is_code("20MICRONS")
+        online[0] = False  # BSE refusing is said, not read as "no such share", whether NSE was skipped or found nothing
+        assert client.post("/api/nse/search", json={"q": "590001"}).json() == {"results": [], "error": "Couldn’t reach BSE. Check the internet connection."}
+        online[0], net[sources.BSE_LIST] = True, 403
+        r = client.post("/api/nse/search", json={"q": "nothing"}).json()
+        assert r["results"] == [] and r["error"].startswith("No match on NSE. BSE refused the request"), r
+        net[sources.BSE_LIST], calls[:] = row_list, []
         assert client.post("/api/nse/search", json={"q": "590001"}).json() == {"results": [
             {"symbol": "590001", "name": "Test Bse Industries Limited", "exchange": "BSE", "ticker": "TESTBSE"}], "error": None}
         assert not any("nseindia" in u for u in calls), "a scrip code goes to BSE only"
@@ -4017,7 +4039,8 @@ def lender_check(tmp, excel):
         mg[i]["total_assets"] *= 1.5
     mg[2]["tax"] = 0.14 * mg[2]["pbt"]
     assert {(o["year"], o["metric"]) for o in lender.oneoffs(mg, labels)} == {("FY2024", "total_assets"), ("FY2024", "tax_rate")}
-    assert lender.defaults(mg)["tax_rate"] < 0.24 and abs(lender.defaults(mg, exclude={"FY2024"}, labels_=labels)["tax_rate"] - 0.25) < 1e-6
+    # the write-back year leaves the tax default by itself, as model.SKIP_ODD; excluding it gives the same
+    assert abs(lender.defaults(mg)["tax_rate"] - 0.25) < 1e-6 and abs(lender.defaults(mg, exclude={"FY2024"}, labels_=labels)["tax_rate"] - 0.25) < 1e-6
     nim_f = {f["key"]: f for f in lender.forensic(mg, labels)}["nim"]
     assert "vs FY2025; FY2024 merger year skipped" in nim_f["fact"], nim_f["fact"]
     fall = [dict(x) for x in h]

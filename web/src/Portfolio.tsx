@@ -55,7 +55,8 @@ export default function Portfolio({ models }: { models: ModelSummary[] | null })
   rows.sort(sort === 'weight' ? key(r => r.weight) : sort === 'upside' ? key(r => r.upside)
     : sort === 'pnl' ? key(r => r.pnl != null && r.invested ? r.pnl / r.invested : null) : (a, b) => name(a).localeCompare(name(b)))
   const t = p.total, m = p.multiples, c = p.concentration
-  const unmodelled = p.holdings.filter(r => !r.id)
+  // a name = a model or a kept NSE/BSE quote: the symbol resolves, so Build model can find it
+  const unmodelled = p.holdings.filter(r => !r.id && r.name)
   const fresh = p.holdings.filter(r => r.new_results?.length)
   const withFv = p.holdings.filter(r => r.fv != null && r.value != null).length
   const answer = !p.holdings.length ? 'No holdings yet. Enter each as symbol, quantity and average cost, or paste them as CSV.'
@@ -188,7 +189,8 @@ function Row({ r, onEdit, onRemove }: { r: HoldingRow; onEdit: () => void; onRem
       <th scope="row">{slug ? <a href={pathOf(slug, 'summary')}>{name(r)}</a> : <span>{r.name ? name(r) : r.symbol}</span>}
         <span className="pf-sym">{r.symbol}{r.lender ? ' · lender' : ''}</span></th>
       <td className="mkt">{r.price != null ? rs(r.price) : '–'}</td>
-      {!slug ? <td colSpan={2} className="pf-none">No model yet · <a href={`/add?symbol=${encodeURIComponent(r.symbol)}`}>Build model</a></td>
+      {!slug ? <td colSpan={2} className="pf-none">{r.name ? <>No model yet · <a href={`/add?symbol=${encodeURIComponent(r.symbol)}`}>Build model</a></>
+          : <>Not found on NSE/BSE: no quote for {r.symbol}. Check the symbol, or refresh prices.</>}</td>
         : r.fv == null ? <td colSpan={2} className="pf-none">No FV: {r.why ?? 'see Valuation'} · <a href={pathOf(slug, 'valuation')}>Valuation</a></td>
         : <><td className="ours">{fmt(r.upside, 'pct')}<span className="pf-sub"><Verdict price={r.price} values={{ bear: r.bear, base: r.fv, bull: r.bull }} words={false} /></span></td><td className="ours">{rs(r.fv)}</td></>}
       <td>{money(r.pnl)}<span className="pf-sub">{r.pnl != null && r.invested ? fmt(r.pnl / r.invested, 'pct') : ''}</span></td>

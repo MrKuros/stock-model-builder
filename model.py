@@ -1236,12 +1236,17 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
     """Weighted (ratio-of-sums) averages over the last `years` reported years; growth is the plain CAGR over
     the last `years`. Borrowings held flat. Years in `exclude` (labels like "FY2020", matched against
     `labels`) are skipped and the window reaches further back instead, except for growth: no one-off flag is
-    about revenue, and dropping a year from a growth window skews it (a dip year's rebound stays in)."""
+    about revenue, and dropping a year from a growth window skews it (a dip year's rebound stays in). Tax rate and
+    minority share also skip the years detect_oneoffs flags for that metric (SKIP_ODD)."""
     keep = [i for i in range(len(hist)) if labels is None or labels[i] not in exclude]
     if len(keep) < 2:
         raise ValueError("Keep at least two reported years in the defaults.")
     r = ratios(hist)
     w = [hist[i] for i in keep[-years:]]
+    lab = labels or [str(i) for i in range(len(hist))]
+    odd = {(o["metric"], lab.index(o["year"])) for o in detect_oneoffs(hist, lab) if o["metric"] in SKIP_ODD}
+    # a year flagged for this metric (HUL FY2026's demerger gain in PAT) is left out too; the window reaches back
+    wo = lambda m: [hist[i] for i in keep if (m, i) not in odd][-years:] or w  # noqa: E731
     pw = [(hist[i - 1], hist[i]) for i in keep if i][-years:]  # (prev, cur); prev may be excluded: its closing balances are fine
     per_rev = lambda f: _ros((f(h), h["revenue"]) for h in w)  # noqa: E731
     base = (lambda h: h.get("cogs") or 0.0) if on_cogs(hist) else (lambda h: h["revenue"])  # noqa: E731
@@ -1265,10 +1270,10 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
         # as 3,000%
         "int_rate": min(_ros((h["interest"], _debt(p)) for p, h in pw), INT_CAP),
         # ponytail: loss years make raw tax ratios meaningless
-        "tax_rate": min(max(_ros(((h["tax"], h["pbt"]) for h in w), 0.25), 0.0), 0.5),
+        "tax_rate": min(max(_ros(((h["tax"], h["pbt"]) for h in wo("tax_rate")), 0.25), 0.0), 0.5),
         "payout": min(max(_ros((h["dividend"], h["pat"]) for h in w), 0.0), 1.0),
         # ponytail: clamp, loss years make the ratio flip sign
-        "mi_pct": min(max(_ros((h["pat"] - (h["pbt"] - h["tax"]), h["pbt"] - h["tax"]) for h in w), -0.5), 0.5),
+        "mi_pct": min(max(_ros((h["pat"] - (h["pbt"] - h["tax"]), h["pbt"] - h["tax"]) for h in wo("mi_pct")), -0.5), 0.5),
         # ponytail: capex is the cash-flow figure where a filing gives it, else the net block change (where
         # acquisitions show up as capex); the median skips a merger year
         "capex_pct": statistics.median([h["capex"] / h["revenue"] for _, h in pw if h["revenue"]] or [0.0]),
@@ -1283,6 +1288,10 @@ def default_assumptions(hist, years=3, exclude=(), labels=None):
 
 
 INT_CAP = 0.25  # the interest rate default never reads above 25%
+# ratio-of-sums defaults that leave out a year flagged for that metric: below-the-line one-offs (a demerger gain, a
+# deferred-tax write-back) that don't recur. Other income and capex take medians already; an EBITDA-margin outlier
+# can be the new level (Coal India FY2024-25), so it stays in. web/src/Risks.tsx says so per year.
+SKIP_ODD = ("tax_rate", "mi_pct")
 
 FAST = 0.15  # last-3-year revenue CAGR above this: a young or booming company, so the defaults fade instead of holding flat
 
@@ -1871,14 +1880,24 @@ def _burn(rows, tax):
         {"capex_pct": cap if cap > 0 else None, "ebitda_margin": mar}
 
 
-def _no_equity(ev, equity):
+def _no_equity(ev, equity, rows=(), last=None):
     """Why a scenario whose last year makes cash still leaves the shares worth nothing (equity <= 0). The number stays
-    (the Excel sheet shows it too); every page reads this error instead of calling it a value."""
+    (the Excel sheet shows it too); every page reads this error instead of calling it a value. With the forecast `rows`
+    and the `last` reported year, it names working capital when that absorbs over half the forecast NOPAT (Titan
+    FY2026: inventory at 209 days of COGS, revenue growing 29% fading to 15%)."""
     if ev <= 0:
         return (f"EV is Rs {_signed(ev)} cr on these inputs: forecast-period cash burn outweighs the PV of the terminal "
                 "value, so equity has no value. Cut capex or raise EBITDA margin across the forecast, not only the final year.")
-    return (f"EV of Rs {_inr(ev)} cr is below net debt and other claims (Rs {_inr(ev - equity)} cr), so equity has no "
-            "value on these inputs.")
+    out = (f"EV of Rs {_inr(ev)} cr is below net debt and other claims (Rs {_inr(ev - equity)} cr), so equity has no "
+           "value on these inputs.")
+    nopat = sum(r["nopat"] for r in rows)
+    dwc = _nwc(rows[-1]) - _nwc(last) if rows and last else 0.0
+    if nopat > 0 and dwc > nopat / 2:
+        inv = rows[-1]["inventory"] - last["inventory"]
+        out += (f" Working capital absorbs Rs {_inr(dwc)} cr of the Rs {_inr(nopat)} cr forecast NOPAT"
+                + (", most of it inventory" if inv > dwc / 2 else "") + ": lower inventory or receivable days, or slower "
+                "revenue growth, release that cash.")
+    return out
 
 
 def valuation(projs, hist, val, base, market, inputs=None, note=False):
@@ -1932,7 +1951,7 @@ def valuation(projs, hist, val, base, market, inputs=None, note=False):
         x = _dcf(fcff, period, wacc, g) or dict.fromkeys(("df", "pv", "pv_sum", "tv", "pv_tv", "ev"))
         ps = per_share(x["ev"])
         why, fix = (None, None) if error else _burn(rows, (inputs or {}).get(s, base)["tax_rate"][-1]) \
-            if fcff[-1] <= 0 else (_no_equity(x["ev"], equity_of(x["ev"])) if ps is not None and ps <= 0 else None, None)
+            if fcff[-1] <= 0 else (_no_equity(x["ev"], equity_of(x["ev"]), rows, hist[-1]) if ps is not None and ps <= 0 else None, None)
         out[s] = {**x, "fcff": fcff, "minority": minority(x["ev"]), "equity": equity_of(x["ev"]), "per_share": ps,
                   "error": why, "fix": fix,
                   "upside": ps / price - 1 if ps is not None and price else None,

@@ -77,6 +77,12 @@ const L_INPUT: Record<string, [key: string, words: string]> = {
 const INPUT: Record<string, [key: string, words: string]> = {
   dso: ['dso', 'debtor days'], dio: ['dio', 'inventory days'], other_income: ['oi_pct', 'other income'], tax: ['tax_rate', 'tax rate'],
 }
+// model.SKIP_ODD (and lender.defaults' tax): a flagged year these defaults leave out by themselves, so no exclusion needed
+const SKIP_ODD: Record<string, string> = { tax_rate: 'tax rate', mi_pct: 'minority share' }
+const skipped = (items: OneOff[]) => {
+  const w = [...new Set(items.map(o => SKIP_ODD[o.metric]).filter(Boolean))]
+  return w.length ? `${w.join(' and ')} ${w.length > 1 ? 'are' : 'is'}` : ''
+}
 const div = (a: number | null | undefined, b: number | null | undefined) => (a != null && b ? a / b : null)
 /** The series a rule reads, one value per reported year, for its small chart (null: no chart). */
 function seriesOf(key: string, hist: Row[], ratios: Row[], lender = false): { v: (number | null)[]; show: (x: number) => string } | null {
@@ -182,10 +188,10 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
   return (
     <>
       <PageHead label="Analysis" title="Risks & forensics"
-        purpose={lender ? <>Fixed lender rules on {short}’s reported numbers: asset quality (<T k="gnpa" />, <T k="pcr" />), credit cost spikes,
+        purpose={lender ? <>Fixed lender rules on {short}’s reported numbers: asset quality (<T k="gnpa" />, <T k="pcr" />), credit cost spikes,{' '}
           <T k="nim" /> and the yield–cost-of-funds spread, the <T k="cd_ratio" />, <T k="cet1" /> capital and the earnings mix; related parties
           from the annual report.</>
-          : <>Fifteen fixed forensic rules on {short}’s reported financials: cash conversion (<T k="cfo_pat" />), working capital,
+          : <>Fifteen fixed forensic rules on {short}’s reported financials: cash conversion (<T k="cfo_pat" />), working capital,{' '}
           <T k="cwip" />, other income vs <T k="pbt" />, leverage, <T k="mscore" />, disclosures. AI can explain a flag from the annual report;
           it never changes a number.</>}
         answer={riskWords(parsed.forensic)} />
@@ -234,7 +240,8 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
           return (
             <li key={year}>
               <h3>{fy(items.map(o => o.note).join('. '))}</h3>
-              <p className="small">In rule defaults: <b>{out ? 'no, excluded' : inRules ? 'yes' : 'no, outside the 3-year window'}</b>.</p>
+              <p className="small">In rule defaults: <b>{out ? 'no, excluded' : inRules ? 'yes' : 'no, outside the 3-year window'}</b>.
+                {!out && inRules && skipped(items) && <> Its flagged {skipped(items)} already left out of {/ and /.test(skipped(items)) ? 'those defaults' : 'that default'}.</>}</p>
               {/* an older year changes no rule figure, so it gets no button; one you left out can still go back */}
               {(inRules || out) && <div className="rk-act">
                 <button type="button" className="btn" aria-pressed={out} aria-busy={pendingYear === year} aria-disabled={pendingYear != null || undefined}
@@ -245,7 +252,7 @@ export default function RisksPage({ parsed, doc, setDoc, upgrades, onApply, onKe
                 onProposals={onProposals} onReports={onReports} />}
             </li>
           )
-        })}</ul> : <p className="small-note">{lender ? 'No merger year or odd tax rate.' : 'No outlier year in other income, tax rate, capex or EBITDA margin.'}</p>}
+        })}</ul> : <p className="small-note">{lender ? 'No merger year or odd tax rate.' : 'No outlier year in other income, tax rate, capex, EBITDA margin or minority share.'}</p>}
       </section>
 
       <More title="Methodology">

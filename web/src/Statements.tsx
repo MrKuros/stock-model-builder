@@ -61,8 +61,9 @@ export default function StatementsPage({ parsed, doc, projection, sub, excel }: 
         {tab === 'QUARTERS'
           ? quarterly
             ? <div className="table-wrap" tabIndex={0} role="region" aria-label="Quarterly results"><QuarterTable {...quarterly} /></div>
-            : <p className="val-empty">No quarterly data in this Excel export. Exports with the Quarters block show the last ten quarters
-                and TTM here.</p>
+            : <p className="val-empty">{lender ? 'Quarterly results aren’t modelled for banks and NBFCs yet.'
+                : company.source ? `No quarterly results in the ${company.source.exchange} filings fetched. Refresh from ${company.source.exchange} once the next results are filed.`
+                : 'No quarterly data in this Excel export. Exports with the Quarters block show the last ten quarters and TTM here.'}</p>
           : <StatementTable layout={layout} section={tab} years={years} rows={rows} nPl={nPl} nHist={nHist} hide={hide} shares={shares}
               cogs={parsed.sources?.basis === 'cogs'} lender={lender} />}
         {tab !== 'QUARTERS' && nPl > 0 && <p className="muted small">

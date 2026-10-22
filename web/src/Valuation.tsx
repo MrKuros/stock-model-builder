@@ -97,7 +97,7 @@ export default function ValuationPage({ parsed, doc, setDoc, projection }: Props
   const answer: ReactNode = !v ? 'Running the DCF…'
     // the scenario you're on, not the base: its own reason and the way to fix it
     : (shown == null || shown <= 0) && active !== 'base' && !v.error && v.shares != null
-      ? <>No {NAMES[active].toLowerCase()}-case fair value: {(sa?.error ?? 'its inputs gave an error.').replace(/^./, c => c.toLowerCase())}{' '}
+      ? <>No {NAMES[active].toLowerCase()}-case fair value: {(sa?.error ?? 'its inputs gave an error.').replace(/^[A-Z](?=[a-z])/, c => c.toLowerCase())}{' '}
         <a className="primary" href={href('forecast', 'capex_pct')}>Fix the forecast</a></>
     : shown == null || shown <= 0 ? <NoValue parsed={parsed} projection={projection} />
     : price == null ? <>{our.replace(/^./, c => c.toUpperCase())} {V}/share. No CMP: enter one under DCF inputs.</>

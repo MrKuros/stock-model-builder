@@ -318,7 +318,7 @@ INSURER = "Insurers (life and general) aren’t supported: premiums, reserves an
 def defaults(hist, years=3, exclude=(), labels_=None):
     """Rule defaults: loan growth = the median of the last 3 years' growth (a merger year doesn't set it); NIM, fee
     income, cost-to-income, credit cost, tax and payout = ratio of sums over the last 3 years (years with provisions
-    for credit cost and cost-to-income: an export year holds provisions in opex); advances % assets and RWA density
+    for credit cost and cost-to-income: an export year holds provisions in opex; tax skips a year outside TAX_ODD); advances % assets and RWA density
     from the last year, so the first projected year starts where the books end."""
     keep = [i for i in range(1, len(hist)) if not labels_ or labels_[i] not in exclude]
     w = keep[-years:] or list(range(1, len(hist)))
@@ -342,7 +342,10 @@ def defaults(hist, years=3, exclude=(), labels_=None):
         "oi_pct": ros(pairs(lambda i: hist[i]["other_income"], avg_a)),
         "cost_income": ros([(hist[i]["opex"], hist[i]["total_income"]) for i in full]),
         "credit_cost": ros([(hist[i]["provisions"] or 0.0, avg_adv(i)) for i in full]),
-        "tax_rate": ros([(hist[i]["tax"], hist[i]["pbt"]) for i in w if hist[i]["pbt"] > 0]),
+        # a year oneoffs() flags for tax (a write-back) is left out, as model.SKIP_ODD does
+        "tax_rate": ros([(hist[i]["tax"], hist[i]["pbt"]) for i in w if hist[i]["pbt"] > 0
+                         and TAX_ODD[0] <= hist[i]["tax"] / hist[i]["pbt"] <= TAX_ODD[1]]
+                        or [(hist[i]["tax"], hist[i]["pbt"]) for i in w if hist[i]["pbt"] > 0]),
         "payout": ros(pairs(lambda i: hist[i]["dividend"] or 0.0, lambda i: hist[i]["pat"] if hist[i]["pat"] > 0 else 0)),
         "adv_assets": last["advances"] / last["total_assets"],
         # CET1 capital ~ net worth (ponytail: it is net worth less intangibles and deductions, so this density is
