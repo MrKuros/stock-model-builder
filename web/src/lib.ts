@@ -52,7 +52,7 @@ export interface Quarters { dates: string[]; rows: Record<string, (number | null
 export interface SourceDoc { date: string | null; kind: DocKind; title: string; url: string }
 /** Where a company added by ticker came from (server.fetch_company): words and dates only, no number reads it. */
 export interface Source {
-  symbol: string; exchange: 'NSE'; basis: 'consolidated' | 'standalone'; industry?: string | null
+  symbol: string; exchange: 'NSE' | 'BSE'; bse_code?: string; basis: 'consolidated' | 'standalone'; industry?: string | null
   fetched_at: string; price_at: string | null
   years: Record<string, string> // FY2024 -> "NSE filing" | "Excel export" | "Excel export (restated)" (your one-click choice)
   missing: string[] // "FY2019 to FY2022: why"
@@ -467,6 +467,7 @@ export const properName = (n: string) => (/[a-z]/.test(n) ? n : n.replace(/[A-Z]
 export function sourceLabel(s: string | null | undefined): string {
   const t = (s ?? '').toLowerCase()
   if (t.includes('nse')) return 'NSE filings'
+  if (t.includes('bse')) return 'BSE filings'
   if (t.includes('annual report')) return 'the company’s annual report'
   return 'an Excel export'
 }

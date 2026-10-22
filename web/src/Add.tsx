@@ -76,7 +76,7 @@ function useSeconds(from: number, on: boolean) {
 }
 
 const SYMBOL = /^[A-Z0-9&-]{1,20}$/
-type Option = { key: string; kind: 'open'; name: string; href: string } | { key: string; kind: 'add'; name: string; symbol: string }
+type Option = { key: string; kind: 'open'; name: string; href: string } | { key: string; kind: 'add'; name: string; symbol: string; exchange?: 'BSE' }
 
 /** One box for a name or an NSE symbol. Your saved companies come first (they open); an NSE match, when highlighted,
  * shows Build model and Watch price on its own row. ↑ ↓ pick, Enter builds, W watches (after picking with the arrows). */
@@ -85,7 +85,7 @@ export function SearchBox({ models, onBuild, onWatch, busy }: {
 }) {
   const id = useId()
   const [q, setQ] = useState('')
-  const [hits, setHits] = useState<{ symbol: string; name: string }[]>([])
+  const [hits, setHits] = useState<{ symbol: string; name: string; exchange?: 'BSE' }[]>([])
   const [error, setError] = useState<string | null>(null)
   const [searching, setSearching] = useState(false)
   const [asked, setAsked] = useState<string | null>(null) // the text NSE has answered for
@@ -100,7 +100,7 @@ export function SearchBox({ models, onBuild, onWatch, busy }: {
     const ctl = new AbortController()
     const t = window.setTimeout(() => {
       setSearching(true)
-      api<{ results: { symbol: string; name: string }[]; error: string | null }>('/api/nse/search', postJson({ q: text }, ctl.signal))
+      api<{ results: { symbol: string; name: string; exchange?: 'BSE' }[]; error: string | null }>('/api/nse/search', postJson({ q: text }, ctl.signal))
         .then(r => { setHits(r.results); setError(r.error); setAsked(text) })
         .catch(e => { if (e.name !== 'AbortError') setError((e as Error).message) })
         .finally(() => setSearching(false))
@@ -114,7 +114,7 @@ export function SearchBox({ models, onBuild, onWatch, busy }: {
   const none = asked === text && !error && !hits.length // NSE answered: nothing by that name or symbol
   const options: Option[] = [
     ...saved.map(m => ({ key: `o-${m.id}`, kind: 'open' as const, name: m.company, href: pathOf(slugOf(m.id), 'summary') })),
-    ...hits.map(h => ({ key: `a-${h.symbol}`, kind: 'add' as const, name: h.name, symbol: h.symbol })),
+    ...hits.map(h => ({ key: `a-${h.symbol}`, kind: 'add' as const, name: h.name, symbol: h.symbol, exchange: h.exchange })),
     ...(SYMBOL.test(typed) && !hits.some(h => h.symbol === typed) ? [{ key: `s-${typed}`, kind: 'add' as const, name: none ? `${typed}: not found on NSE, try the symbol anyway` : `${typed} (by symbol)`, symbol: typed }] : []),
   ]
   const shown = open && text.length > 0 && options.length > 0
@@ -130,7 +130,7 @@ export function SearchBox({ models, onBuild, onWatch, busy }: {
   const optId = (i: number) => `${id}-o${i}`
   return (
     <div className="addbox">
-      <label htmlFor={`${id}-in`} className="add-l">Company name or NSE symbol</label>
+      <label htmlFor={`${id}-in`} className="add-l">Company name, NSE symbol or BSE scrip code</label>
       <div className="add-row">
         <svg className="add-ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M10.4 10.4 14 14" stroke="currentColor" strokeWidth="1.8" /></svg>
         <input id={`${id}-in`} type="text" role="combobox" autoComplete="off" spellCheck={false} value={q} disabled={busy}
@@ -150,7 +150,7 @@ export function SearchBox({ models, onBuild, onWatch, busy }: {
           {options.map((o, i) => (
             <li key={o.key} id={optId(i)} role="option" aria-selected={i === active} className={i === active ? 'on' : undefined}
               onMouseDown={e => e.preventDefault()} onMouseEnter={() => setActive(i)} onClick={() => act(o)}>
-              <span className="al-main"><b>{o.name}</b><span className="al-sub">{o.kind === 'open' ? 'Yours already · open it' : `NSE: ${o.symbol}`}</span></span>
+              <span className="al-main"><b>{o.name}</b><span className="al-sub">{o.kind === 'open' ? 'Yours already · open it' : o.exchange === 'BSE' ? `BSE scrip code ${o.symbol}` : `NSE: ${o.symbol}`}</span></span>
               {i === active && o.kind === 'add'
                 ? <span className="al-act">
                     <button type="button" className="primary" tabIndex={-1} onClick={e => { e.stopPropagation(); act(o) }}>Build model</button>

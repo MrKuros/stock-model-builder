@@ -1429,6 +1429,22 @@ def export(req: ModelRequest):
 
 CACHE = "_cache"  # what the exchange sent, models/_cache/<site>/ ("_": never a slug); prices 15 min, lists 6 h, files kept
 FETCH_YEARS, FETCH_QUARTERS = 10, 8  # annual and quarterly results filings read per company
+BSE_FILINGS = 24  # BSE's results files read per company (its list doesn't say which are annual, so all are read)
+
+
+def _bse_pick(got, years, quarters):
+    """BSE's parsed results files -> (annual, quarter, basis): the newest annual's basis (consolidated when it has one),
+    one file per period, newest first (BSE lists the latest filing first, so a revised one wins)."""
+    ann = [x for x in got if x["kind"] == "annual" and x["period_end"]]
+    last = max((x["period_end"] for x in ann), default=None)
+    cons = any(x["consolidated"] for x in ann if x["period_end"] == last)
+    seen, pick = set(), {"annual": [], "quarter": []}
+    for x in sorted(got, key=lambda x: x["period_end"] or "", reverse=True):
+        k = (x["kind"], x["period_end"])
+        if x["kind"] in pick and x["period_end"] and x["consolidated"] == cons and k not in seen:
+            seen.add(k)
+            pick[x["kind"]].append(x)
+    return pick["annual"][:years], pick["quarter"][:quarters], "consolidated" if cons else "standalone"
 _clients, _clients_lock = {}, threading.Lock()
 
 
@@ -1439,6 +1455,22 @@ def nse(root=None):
         if root not in _clients:
             _clients[root] = sources.Client(root / CACHE / "nse")
         return _clients[root]
+
+
+def bse(root=None):
+    """BSE's polite client, like nse(): its own cache folder, BSE's hosts only."""
+    root = root or MODELS
+    with _clients_lock:
+        key = (root, "bse")
+        if key not in _clients:
+            _clients[key] = sources.Client(root / CACHE / "bse", sources.BSE_HOSTS, sources.BSE_HOME, name="BSE",
+                                           api=sources.BSE_HEADERS)
+        return _clients[key]
+
+
+def quote_of(sym, root=None, **kw):
+    """sources.quote from NSE, or from BSE for a scrip code (a company listed only there)."""
+    return sources.bse_quote(bse(root), sym, **kw) if sources.is_code(sym) else sources.quote(nse(root), sym, **kw)
 
 
 def _sym(s):
@@ -1467,16 +1499,24 @@ class FetchRequest(SymbolRequest):
 def nse_search(req: SearchRequest):
     """Companies on NSE matching a name or symbol (POST: only this app's pages can make the server go online)."""
     try:
-        return {"results": sources.search(nse(), req.q), "error": None}
+        found, error = ([] if sources.is_code(req.q.strip()) else sources.search(nse(), req.q)), None
     except sources.Offline as e:
-        return {"results": [], "error": str(e)}
+        found, error = [], str(e)
+    if not found:  # nothing on NSE (or NSE refused): BSE, where a scrip code or a BSE-only company is found
+        try:
+            found = sources.bse_search(bse(), req.q)
+        except sources.Offline as e:
+            error = error and f"{error} BSE didn’t answer either ({e})"
+        else:
+            error = None if found else error
+    return {"results": found, "error": error}
 
 
 @app.post("/api/nse/price")
 def nse_price(req: SymbolRequest):
     """Today's price and share count (cached 15 minutes). stale: NSE didn't answer and this is the last one kept."""
     try:
-        q = sources.quote(nse(), _sym(req.symbol))
+        q = quote_of(_sym(req.symbol))
     except sources.Offline as e:
         raise HTTPException(503, str(e))
     return {"price": q["price"], "shares": q["shares"], "face_value": q["face_value"], "as_of": q["as_of"],
@@ -1530,21 +1570,40 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
     the filings list (Refresh and "Check all" ask what's new). A bank, NBFC or insurer stops at the quote (model.Lender).
     separate: an earlier Excel upload of the same company is left alone ("Keep separate"), and the new model is named
     "<name> (NSE)" so the library keeps the two apart."""
-    c, today = nse(), today or datetime.now()
-    yield {"step": f"Finding {sym} on NSE…"}
-    q = sources.quote(c, sym)
+    c, today, exch, code, nq = nse(), today or datetime.now(), "NSE", None, quarters
+    if sources.is_code(sym):  # a BSE scrip code: a company listed only there (or typed by its code)
+        c, exch, code = bse(), "BSE", sym
+        yield {"step": f"Finding scrip code {sym} on BSE…"}
+        q = sources.bse_quote(c, sym)
+    else:
+        yield {"step": f"Finding {sym} on NSE…"}
+        try:
+            q = sources.quote(c, sym)
+        except sources.Offline as e:  # NSE has no such symbol or refuses: BSE, by the same ticker, same polite rules
+            try:
+                code = sources.bse_code(bse(), sym)
+            except sources.Offline:
+                code = None
+            if not code:
+                raise e
+            yield {"step": f"{e} Reading BSE instead: {sym} is scrip code {code} there…"}
+            c, exch = bse(), "BSE"
+            q = sources.bse_quote(c, code)
     name = q["name"]
     kind = q.get("basic_industry") or q.get("industry") or ""
     if LENDER.search(kind):
         raise model.Lender(f"{name} is a lender or insurer ({kind}). Banks, NBFCs and insurers aren’t supported yet, "
                            "because their accounts don’t fit this model, so an Excel export won’t work either.")
-    yield {"step": f"Listing {name}’s results filings…"}
-    fs = sources.filings(c, sym, fresh)
-    annual = [f for f in fs if f["kind"] == "annual"]
-    cons = bool(annual) and any(f["consolidated"] for f in annual if f["end"] == annual[0]["end"])
-    basis = "consolidated" if cons else "standalone"
-    ann = [f for f in annual if f["consolidated"] == cons][:years]
-    qtr = [f for f in fs if f["kind"] == "quarter" and f["consolidated"] == cons][:quarters]
+    yield {"step": f"Listing {name}’s results filings{' on BSE' if exch == 'BSE' else ''}…"}
+    if exch == "BSE":  # BSE's list doesn't say the period or basis: each file is read for them below
+        fs, ann, qtr, basis = sources.bse_filings(c, code, fresh, today)[:BSE_FILINGS], [], [], ""
+    else:
+        fs = sources.filings(c, sym, fresh)
+        annual = [f for f in fs if f["kind"] == "annual"]
+        cons = bool(annual) and any(f["consolidated"] for f in annual if f["end"] == annual[0]["end"])
+        basis = "consolidated" if cons else "standalone"
+        ann = [f for f in annual if f["consolidated"] == cons][:years]
+        qtr = [f for f in fs if f["kind"] == "quarter" and f["consolidated"] == cons][:quarters]
     notes, read, mappings = [], [], load_mappings(MODELS)
 
     def grab(f, label):
@@ -1557,7 +1616,7 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
             return None
         fid = hashlib.sha1(data).hexdigest()[:12]
         _write(MODELS / FILINGS / f"{fid}.xml", data)  # re-read by rules when a mapping is approved, like an upload
-        return {"id": fid, "file": f"NSE {sym} {label} {basis}.xml", **x}
+        return {"id": fid, "file": f"{exch} {code or sym} {label} {basis}.xml", **x}
 
     if ann:
         yield {"step": f"Reading {len(ann)} annual results ({model.fy(ann[-1]['end'])} to {model.fy(ann[0]['end'])})…"}
@@ -1572,6 +1631,17 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
         yield {"detail": f"{f['end']:%b %Y} ({i + 1} of {len(qtr)})"}
         if (x := grab(f, f"{f['end']:%b %Y} quarter")) and x["kind"] == "quarter":
             quarters.append(x)
+    if exch == "BSE":
+        got = []
+        if fs:
+            yield {"step": f"Reading {len(fs)} results filings from BSE…"}
+        for i, f in enumerate(fs):
+            yield {"detail": f"filed {f['filed']:%d %b %Y} ({i + 1} of {len(fs)})"}
+            if x := grab(f, f"filed {f['filed']:%Y-%m-%d}"):
+                got.append(x)
+        read, quarters, basis = _bse_pick(got, years, nq)
+        for x in read + quarters:
+            x["file"] = f"BSE {code} {model.fy(model._iso(x['period_end']))} {x['kind']} {basis}.xml"
 
     prev = (old or {}).get("source") or {}  # a refreshed model that was fetched before keeps saying where years came from
     twin = None if old else _saved_company(name)
@@ -1628,10 +1698,10 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
     if prev:  # what an earlier fetch found still holds (merge never compares a filed year with itself)
         new = {(m["year"], m["line"]) for m in mism}
         mism = [m for m in prev.get("mismatches") or [] if (m["year"], m["line"]) not in new] + mism
-    source = {"symbol": sym, "exchange": "NSE", "basis": basis, "industry": q.get("industry"),
+    source = {"symbol": sym, "exchange": exch, **({"bse_code": code} if code else {}), "basis": basis, "industry": q.get("industry"),
               "fetched_at": today.isoformat(timespec="seconds"), "price_at": _ago(q["age"]),
               "years": {y: (prev.get("years") or {}).get(y, model.EXPORT) if y in filled or not filed
-                        or (prev.get("years") or {}).get(y) == model.RESTATED_USE else "NSE filing" for y in labels},
+                        or (prev.get("years") or {}).get(y) == model.RESTATED_USE else f"{exch} filing" for y in labels},
               "missing": _spans(gaps), "from": (prev.get("from") if old and prev else whose)
               if filled or (not filed and other) else None,
               "mismatches": [{**m, "filing": round(m["filing"], 2), "export": round(m["export"], 2)} for m in mism],
@@ -1654,8 +1724,9 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
 
     yield {"step": "Looking for the annual report and the latest call transcript…"}
     try:
-        ars = sources.annual_reports(c, sym)
-        docs = sources.documents(c, sym, today)
+        # ponytail: from BSE only transcripts and presentations (its announcements); annual reports are attached by hand
+        ars = [] if exch == "BSE" else sources.annual_reports(c, sym)
+        docs = sources.bse_documents(c, code, today) if exch == "BSE" else sources.documents(c, sym, today)
     except sources.Offline as e:
         yield {"note": f"The documents list couldn’t be read: {e}"}
         ars, docs = [], []
@@ -1671,7 +1742,8 @@ def fetch_company(sym, old=None, documents=True, today=None, years=FETCH_YEARS, 
         yield {"note": f"The {ars[0]['year']} annual report on NSE is a zip file; download it from NSE and attach it "
                        "on the Checks page."}
     else:
-        yield {"note": "NSE has no annual report for this company yet (it may have listed this year)."}
+        yield {"note": "Annual reports aren’t read from BSE; download the PDF from BSE and attach it on Documents."
+               if exch == "BSE" else "NSE has no annual report for this company yet (it may have listed this year)."}
     t = next((d for d in docs if d["kind"] == "transcript"), None)
     if t:
         want.append((t["url"], f"the {t['date']:%d %b %Y} call transcript", sources.fy_of(t["date"]), "transcript",
@@ -1987,7 +2059,7 @@ def _live(root, sym):
     if not sym:
         return None
     try:
-        q = sources.quote(nse(root), sources.symbol(sym), cached=True)
+        q = quote_of(sources.symbol(sym), root, cached=True)
     except (sources.Offline, ValueError):
         return None
     return q if q["price"] else None
@@ -2012,7 +2084,7 @@ def watch_add(sym, root=None, now=None):
         return w
     if len(w["symbols"]) >= WATCH_MAX:
         raise HTTPException(422, f"The watchlist holds {WATCH_MAX} tickers; remove one first.")
-    q = sources.quote(nse(root), sym)  # the name, and proof the symbol trades
+    q = quote_of(sym, root)  # the name, and proof the symbol trades
     w["symbols"].append({"symbol": sym, "name": q["name"], "added_at": (now or datetime.now()).isoformat(timespec="seconds")})
     _write(root / WATCH, json.dumps(w).encode())
     return w
@@ -2059,8 +2131,8 @@ def refresh_prices(root=None, now=None):
     for i, s in enumerate(todo):
         yield {"step": f"Fetching prices from NSE: {s} ({i + 1} of {len(todo)})…"}
         try:
-            if sources.quote(c, sources.symbol(s))["age"] >= sources.PRICE_AGE:  # the site failed; the cache answered
-                raise sources.Offline("NSE didn’t answer, so the price shown is the last one kept.")
+            if quote_of(sources.symbol(s), root)["age"] >= sources.PRICE_AGE:  # the site failed; the cache answered
+                raise sources.Offline(f"{'BSE' if sources.is_code(s) else 'NSE'} didn’t answer, so the price shown is the last one kept.")
             checked, run = checked + 1, 0
         except (sources.Offline, ValueError) as e:
             failed, run = failed + 1, run + 1

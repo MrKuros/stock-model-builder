@@ -1590,6 +1590,7 @@ def library_check(root, co, scenarios):
     thesis_check(server, root, data)
     reimport_check(server, root, co, data)
     fetch_api_check(server, root, co, data)
+    bse_check(server, co)
     net_check(server, co)
     peers_api_check(server, root, co, data)
     track_check(server, root, co, data)
@@ -2755,6 +2756,83 @@ def _fake_socket(net, calls, online):
     return Opener
 
 
+def bse_check(server, co):
+    """BSE fallback, offline (recorded fixtures through the real client): a company listed only on BSE by name or scrip
+    code; an NSE ticker NSE has no data for, found on BSE by the same ticker; each results file read for its period
+    and basis (the newest annual's basis wins, one file per period, off-site links skipped); prices by scrip code."""
+    import sources  # noqa: PLC0415
+    import ai  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    api, x, d = sources.BSE_API, sources.BSE_XBRL, co["dates"]
+    pdf = tiny_pdf([["Transcript"], ["Revenue grew 12% in FY2025."]])
+    row = lambda code, tick, name: {"SCRIP_CD": code, "Scrip_Name": tick, "scrip_id": tick, "Issuer_Name": name,  # noqa: E731
+                                    "ISIN_NUMBER": "INE000X01010", "INDUSTRY": "Widgets", "FACE_VALUE": "10.00", "Mktcap": "8,250.00"}
+    ann = [{"XML_NAME": f"A{y.year}.xml", "NEWS_DT": f"{y.year}-05-10T10:00:00"} for y in d[-4:]][::-1]
+    net = {
+        sources.BSE_LIST: [row("590001", "TESTBSE", "Test Bse Industries Limited"), row("ABC", "BAD", "Bad")],
+        f"{api}/getScripHeaderData/w?Debtflag=&scripcode=590001": {"Header": {"PrevClose": "1,640.00"}, "CurrRate": {"LTP": "1,650.00"},
+                                                                     "Cmpname": {"FullN": "Test Bse Industries Limited"}},
+        f"{api}/AnnSubCategoryGetData/w?pageno=1&strCat=Result": {"Table": [
+            {"XML_NAME": "S2025.xml", "NEWS_DT": "2025-05-11T10:00:00"}, {"XML_NAME": "https://evil.example/a.xml"},
+            {"XML_NAME": "Q3.xml", "NEWS_DT": "2025-02-01T10:00:00"}, *ann]},
+        f"{api}/AnnSubCategoryGetData/w?pageno=1&strCat=-1": {"Table": [
+            {"HEADLINE": "Transcript of the earnings call", "ATTACHMENTNAME": "T.pdf", "NEWS_DT": "2026-08-01T10:00:00"}]},
+        sources.BSE_ATTACH + "T.pdf": pdf,
+        x + "S2025.xml": filing_xml(filing_facts(co, 9), _year_start(d[9]), d[9], consolidated=False),
+        x + "Q3.xml": filing_xml(_quarter_facts(0), datetime(2024, 10, 1), datetime(2024, 12, 31)),
+        **{f"{x}A{y.year}.xml": filing_xml(filing_facts(co, i), _year_start(y), y) for i, y in enumerate(d) if i >= len(d) - 4},
+        sources.NSE + "/api/NextApi/apiClient/GetQuoteApi": 404, sources.NSE + "/api/NextApi/globalSearch": {"data": []},
+    }
+    calls, online = [], [True]
+    Opener = _fake_socket(net, calls, online)
+    root, client = Path(tempfile.mkdtemp()), TestClient(server.app)
+    models, llm, adapter = server.MODELS, ai.llm, server.local_source
+    server.MODELS, ai.llm, server.local_source = root, None, None
+    server._clients.clear()
+    try:
+        for c in (server.nse(), server.bse()):
+            c.opener, c.gap = Opener(), 0.0
+        assert sources.is_code("590001") and not sources.is_code("TCS") and not sources.is_code("20MICRONS")
+        assert client.post("/api/nse/search", json={"q": "590001"}).json() == {"results": [
+            {"symbol": "590001", "name": "Test Bse Industries Limited", "exchange": "BSE", "ticker": "TESTBSE"}], "error": None}
+        assert not any("nseindia" in u for u in calls), "a scrip code goes to BSE only"
+        r = client.post("/api/nse/search", json={"q": "test bse"}).json()
+        assert [h["symbol"] for h in r["results"]] == ["590001"] and any("globalSearch" in u for u in calls), r
+        p = client.post("/api/nse/price", json={"symbol": "590001"}).json()
+        assert p["price"] == 1650 and p["shares"] == 5.0 and p["face_value"] == 10, p
+
+        def fetch(sym):
+            return [json.loads(y) for y in client.post("/api/nse/fetch", json={"symbol": sym}).text.splitlines()]
+        for sym in ("590001", "TESTBSE"):
+            ev = fetch(sym)
+            assert [e for e in ev if "error" in e] == [] and ev[-1] == {"done": True}, ev
+            steps = [e["step"] for e in ev if "step" in e]
+            assert steps[0] == ("Finding scrip code 590001 on BSE…" if sym == "590001" else "Finding TESTBSE on NSE…"), steps
+            assert sym == "590001" or any(st.endswith("Reading BSE instead: TESTBSE is scrip code 590001 there…") for st in steps), steps
+            pay = next(e["company"] for e in ev if "company" in e)
+            src = pay["company"]["source"]
+            assert (src["symbol"], src["exchange"], src["bse_code"], src["basis"]) == (sym, "BSE", "590001", "consolidated"), src
+            assert [y for y, w in src["years"].items() if w == "BSE filing"] == model.labels(d[-4:]), src["years"]
+            assert pay["company"]["market"]["price"] == 1650 and pay["company"]["quarters"]["dates"][-1].startswith("2024-12-31")
+            files = sorted(f["file"] for f in pay["fetched"]["filings"])
+            assert files[-1] == "BSE 590001 FY2025 annual consolidated.xml" and len(files) == 4, files
+            for h, want in zip(pay["hist"], co["hist"][-4:]):
+                assert abs(h["revenue"] - want["revenue"]) < 1e-4
+            assert any(e.get("report", {}).get("kind") == "transcript" for e in ev if "report" in e) or any(
+                "transcript" in str(e).lower() for e in ev if "documents" in e), ev
+            assert any("Annual reports aren’t read from BSE" in e["note"] for e in ev if "note" in e), ev
+        assert not any("evil.example" in u for u in calls), "off-site links are never fetched"
+        server._clients.clear()  # BSE refusing: said in plain words, nothing kept to fall back on
+        b = server.bse()
+        b.opener, b.gap = _fake_socket({sources.BSE_API: 403, sources.BSE_HOME: b""}, [], [True])(), 0.0
+        r = client.post("/api/nse/price", json={"symbol": "590002"})
+        assert r.status_code == 503 and "BSE refused" in r.json()["detail"], r.text
+    finally:
+        server.MODELS, ai.llm, server.local_source = models, llm, adapter
+        server._clients.clear()
+
+
 def fetch_api_check(server, root, co, data):
     """5.1: add a company by ticker, offline: NSE's answers are recorded fixtures served through the client's own
     cache, size-cap, allow-list and politeness code (only the socket is fake). Search, price and fetch never call the
@@ -2799,6 +2877,7 @@ def fetch_api_check(server, root, co, data):
     try:
         c = server.nse()
         c.opener, c.gap = Opener(), 0.0
+        server.bse().opener, server.bse().gap = c.opener, 0.0  # BSE (the fallback) never online in tests either
         # strict symbols, before any URL
         assert [sources.symbol(x) for x in ("tcs", " M&M ", "BAJAJ-AUTO")] == ["TCS", "M&M", "BAJAJ-AUTO"]
         for bad in ("", "../etc", "TCS?x=1", "A" * 21, "TCS/1", "ТСS"):
@@ -2985,6 +3064,7 @@ def net_check(server, co):
     try:
         c = server.nse()
         c.opener, c.gap = _fake_socket(net, calls, online)(), 0.0
+        server.bse().opener, server.bse().gap = c.opener, 0.0  # BSE (the fallback) never online in tests either
         # no such symbol: every series asked once, then plain words; marked final (trying again won't change it)
         try:
             sources.quote(c, "ZZQQX")
@@ -3064,6 +3144,18 @@ def live_net_check():
         assert x["kind"] == "annual" and x["facts"].get("revenue") and x["facts"].get("pat"), x["kind"]
         assert sources.universe(c), "the sector list"
     print("OK: live NSE shapes (search, quote, filings, one XBRL, sector list)")
+    with tempfile.TemporaryDirectory() as tmp:  # BSE, the fallback: TCS's scrip code, its quote and results files
+        b = sources.Client(Path(tmp), sources.BSE_HOSTS, sources.BSE_HOME, name="BSE", api=sources.BSE_HEADERS)
+        try:
+            assert sources.bse_code(b, "TCS") == "532540", "BSE's list"
+        except sources.Offline as e:  # BSE's CDN refuses automated requests from some networks
+            print(f"SKIP live BSE check: {e}")
+            return
+        q = sources.bse_quote(b, "532540")
+        assert q["price"] and q["shares"] and q["face_value"], q
+        fs = sources.bse_filings(b, "532540")
+        assert fs and model.parse_xbrl(b.get(fs[0]["url"], None, sources.MAX_XBRL)[0])["facts"].get("revenue"), fs[:2]
+    print("OK: live BSE shapes (list, quote, results XBRL)")
 
 
 def track_check(server, root, co, data):
@@ -3248,6 +3340,7 @@ def peers_api_check(server, root, co, data):
     try:
         c = server.nse()
         c.opener, c.gap = _fake_socket(net, calls, online)(), 0.0
+        server.bse().opener, server.bse().gap = c.opener, 0.0  # BSE (the fallback) never online in tests either
         for bad in ("../X", "TCS?x=1"):
             assert client.post("/api/peers/candidates", json={"symbol": bad}).status_code == 422
             assert client.post("/api/peers/fetch", json={"symbols": ["PEERA", bad]}).status_code == 422
@@ -3387,6 +3480,7 @@ def watch_check(server, data):
     try:
         c = server.nse()
         c.opener, c.gap = _fake_socket(net, calls, online)(), 0.0
+        server.bse().opener, server.bse().gap = c.opener, 0.0  # BSE (the fallback) never online in tests either
         by_ticker = dict(data, valuation=dict(data["valuation"], price=None),  # data's typed price would hide today's
                          company=dict(data["company"], name="Ticker Co", source={"symbol": "TESTIND", "price_at": "2026-10-01T09:00:00"}))
         mid, _ = server.save_model(server.ModelDoc.model_validate(by_ticker), root, now=datetime(2026, 10, 1, 9, 0))

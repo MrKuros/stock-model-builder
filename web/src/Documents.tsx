@@ -77,7 +77,7 @@ export default function Documents({ parsed, doc, setDoc, projection, versions, u
         <ul className="doc-rows">
           {from.filter(([l]) => l.startsWith('an Excel')).map(([, y]) => row(<>Excel export, {y}</>, 'Read by rules'))}
           {from.filter(([l]) => l === LOCAL).map(([, y]) => row(<>Older years, {y}</>, 'NSE filings start FY23; earlier years from the local 10-yr history · read by rules'))}
-          {s?.symbol && row(<>NSE annual results filings, {from.find(f => f[0] === 'NSE filings')?.[1] ?? 'none'}</>, 'Read by rules')}
+          {s?.symbol && row(<>{s.exchange === 'BSE' ? 'BSE' : 'NSE'} annual results filings, {from.find(f => f[0] === `${s.exchange === 'BSE' ? 'BSE' : 'NSE'} filings`)?.[1] ?? 'none'}</>, 'Read by rules')}
           {doc.filings.length > 0 && row(<>Results filings kept with the model ({doc.filings.length})</>, 'Read by rules',
             <a href="#filings" onClick={() => { const d = document.getElementById('filings') as HTMLDetailsElement | null; if (d) d.open = true }}>Review</a>)}
           {[...annual, ...talk].sort((a, b) => b.year.localeCompare(a.year)).map(r => <li key={r.id}>
@@ -211,7 +211,7 @@ function WhereFrom({ parsed, doc, onCompany }: { parsed: Parsed; doc: ModelDoc; 
   return (
     <>
       <ul className="from-list">
-        {yearSources(company, years).map(([l, y]) => <li key={l}><b>{y}</b>: {l}{l === 'NSE filings' ? ` (annual results, ${s?.basis ?? 'consolidated'}), read by rules` : ', read by rules'}.</li>)}
+        {yearSources(company, years).map(([l, y]) => <li key={l}><b>{y}</b>: {l}{l === 'NSE filings' || l === 'BSE filings' ? ` (annual results, ${s?.basis ?? 'consolidated'}), read by rules` : ', read by rules'}.</li>)}
         {s?.missing.map(m => <li key={m} className="miss">Not available: {m}.</li>)}
         <li>CMP and share count: {doc.valuation.price != null ? 'entered by you' : s?.symbol ? `NSE, checked ${ago(s.price_at)}` : 'from the Excel export'}.</li>
       </ul>

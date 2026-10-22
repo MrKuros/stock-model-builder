@@ -1,5 +1,5 @@
 """Company data from the exchange by ticker, by rules (no AI): NSE's search, quote, results XBRL filings, annual reports
-and call transcripts. A polite client: browser-like headers, a cookie from the home page first, at most one request a
+and call transcripts; BSE's (by scrip code) when NSE has no data or refuses, or for a company listed only on BSE. A polite client: browser-like headers, a cookie from the home page first, at most one request a
 second, small timeouts, an allow-list of hosts (redirects never leave it), size caps, and a local cache under the
 library folder (models/_cache), so everything fetched once works offline."""
 import contextlib
@@ -70,8 +70,9 @@ class _Stay(urllib.request.HTTPRedirectHandler):
 class Client:
     """GETs from an allow-listed site through a cache folder. `home` is fetched once first for its cookies."""
 
-    def __init__(self, cache: Path, hosts=HOSTS, home=NSE + "/", gap=GAP, name="NSE"):
+    def __init__(self, cache: Path, hosts=HOSTS, home=NSE + "/", gap=GAP, name="NSE", api=None):
         self.cache, self.hosts, self.home, self.gap, self.name = cache, hosts, home, gap, name
+        self.api = api or API  # headers for data requests (the site's own Referer)
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
                                                   _Stay(hosts))
         # one request at a time per host, `gap` apart: a long report download from the archive host never holds up
@@ -128,14 +129,14 @@ class Client:
                     self._cookies()
         with self.locks[host]:  # one request at a time per host, at least `gap` apart
             try:
-                return self._raw(url, limit, API)
+                return self._raw(url, limit, self.api)
             except urllib.error.HTTPError as e:
                 if e.code not in (401, 403) or not self.home:
                     raise (NotFound if e.code == 404 else Offline)(self._why(e)) from None
                 with self.locks.get(self._home_host(), threading.RLock()):
                     self._cookies()  # an expired cookie: a fresh one, then once more
                 try:
-                    return self._raw(url, limit, API)
+                    return self._raw(url, limit, self.api)
                 except (OSError, http.client.HTTPException) as e2:
                     raise Offline(self._why(e2)) from None
             except (OSError, http.client.HTTPException) as e:  # URLError, timeouts, resets, a cut-off chunked body
@@ -418,3 +419,117 @@ def candidates(c, sym, q):
         yield {"note": f"No other {sector} company on NSE’s list shares {q.get('name') or sym}’s industry"
                        f"{f' ({what})' if what else ''}, so these are the same sector only. Add its real peers yourself below."}
     yield {"candidates": [{k: v for k, v in x.items() if not k.startswith("_")} for x in out[:CANDIDATES]]}
+
+
+# ---------- BSE: the fallback when NSE has no data or refuses, and BSE-only companies, by scrip code ----------
+
+BSE_API = "https://api.bseindia.com/BseIndiaAPI/api"
+BSE_HOSTS = frozenset({"api.bseindia.com", "www.bseindia.com"})
+BSE_HOME = "https://www.bseindia.com/"
+BSE_HEADERS = {"Accept": "application/json, text/plain, */*", "Referer": BSE_HOME, "Origin": BSE_HOME.rstrip("/")}
+CODE = re.compile(r"\d{6}")  # a BSE scrip code (500325); NSE symbols are never six digits alone
+BSE_LIST = BSE_API + "/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status=Active"
+BSE_XBRL = "https://www.bseindia.com/XBRLFILES/FourOneUploadDocument/"
+BSE_ATTACH = "https://www.bseindia.com/xml-data/corpfiling/AttachLive/"
+BSE_YEARS = 5  # results announcements read back this many years (BSE's XBRL results start in 2018-19 too)
+# ponytail: BSE's API answers only browser-like clients from some networks (its CDN refused this app's requests in
+# testing, 403); the field names follow BSE's own pages' JSON. A refusal reads as Offline, so NSE or an Excel
+# export still works
+
+
+def is_code(s):
+    return bool(CODE.fullmatch((s or "").strip()))
+
+
+def _num(v):
+    """BSE sends numbers as text with Indian grouping ("3,456.10"); None when it isn't a positive number."""
+    try:
+        x = float(str(v).replace(",", "").strip())
+    except ValueError:
+        return None
+    return x if math.isfinite(x) and x > 0 else None
+
+
+def bse_list(c):
+    """{code: {code, ticker, name, isin, industry, face_value, mcap (Rs crore)}} for every active BSE equity, one request
+    a day (the list carries what NSE's quote does except the price)."""
+    d, _ = c.json(BSE_LIST, 24 * 3600)
+    out = {}
+    for x in d if isinstance(d, list) else (d.get("Table") if isinstance(d, dict) else None) or []:
+        code = str(x.get("SCRIP_CD") or "").strip() if isinstance(x, dict) else ""
+        if CODE.fullmatch(code):
+            out[code] = {"code": code, "ticker": str(x.get("scrip_id") or "").strip().upper()[:20],
+                         "name": str(x.get("Issuer_Name") or x.get("Scrip_Name") or code).strip()[:120],
+                         "isin": x.get("ISIN_NUMBER"), "industry": x.get("INDUSTRY") or None,
+                         "face_value": _num(x.get("FACE_VALUE")), "mcap": _num(x.get("Mktcap"))}
+    return out
+
+
+def bse_search(c, q):
+    """[{symbol (the scrip code), name, exchange "BSE", ticker}] matching a name, BSE ticker or scrip code."""
+    q = " ".join((q or "").split())
+    if not QUERY.fullmatch(q):
+        return []
+    low, rows = q.lower(), bse_list(c)
+    hit = [x for x in rows.values() if x["code"] == q or x["ticker"].lower() == low or low in x["name"].lower()]
+    hit.sort(key=lambda x: (x["code"] != q and x["ticker"].lower() != low, not x["name"].lower().startswith(low), x["name"]))
+    return [{"symbol": x["code"], "name": x["name"], "exchange": "BSE", "ticker": x["ticker"]} for x in hit[:12]]
+
+
+def bse_code(c, ticker):
+    """The scrip code BSE lists under the same ticker as NSE's symbol (TCS -> 532540), or None."""
+    t = (ticker or "").upper()
+    return next((x["code"] for x in bse_list(c).values() if x["ticker"] == t), None)
+
+
+def bse_quote(c, code, max_age=PRICE_AGE, cached=False):
+    """quote()'s shape from BSE: the price from its header data, name, face value, industry and market cap from the
+    list (shares = market cap / price). NotFound when BSE has no such code."""
+    row = bse_list(c).get(code) if not cached else None
+    d, age = c.json(f"{BSE_API}/getScripHeaderData/w?Debtflag=&scripcode={code}&seriesid=", max_age, cached)
+    d = d if isinstance(d, dict) else {}
+    head, rate, names = d.get("Header") or {}, d.get("CurrRate") or {}, d.get("Cmpname") or {}
+    price = _num(rate.get("LTP")) or _num(head.get("LTP")) or _num(head.get("PrevClose"))
+    name = names.get("FullN") or (row or {}).get("name")
+    if not name and not price:
+        raise NotFound(f"BSE has no company with the scrip code {code}. Check the number, or type its name.")
+    mcap = (row or {}).get("mcap")
+    return {"name": str(name or code)[:200], "price": price, "shares": mcap / price if mcap and price else None,
+            "face_value": (row or {}).get("face_value"), "industry": (row or {}).get("industry"),
+            "basic_industry": (row or {}).get("industry"), "sector": None, "ffmc": None, "isin": (row or {}).get("isin"),
+            "listed": None, "series": "BSE", "as_of": None, "age": age}
+
+
+def _announcements(c, code, cat, today, years=BSE_YEARS, stale=True):
+    today = today or datetime.now()
+    since = today.replace(year=today.year - years)
+    d, _ = c.json(f"{BSE_API}/AnnSubCategoryGetData/w?pageno=1&strCat={urllib.parse.quote(cat)}&strPrevDate={since:%Y%m%d}"
+                  f"&strScrip={code}&strSearch=P&strToDate={today:%Y%m%d}&strType=C&subcategory=-1", stale=stale)
+    return [x for x in (d.get("Table") if isinstance(d, dict) else None) or [] if isinstance(x, dict)]
+
+
+def bse_filings(c, code, fresh=False, today=None):
+    """Results XBRL files from BSE's results announcements: [{url, filed}], newest first. Unlike NSE's list it doesn't
+    say the period or basis, so the caller reads each file for them (model.parse_xbrl)."""
+    out = []
+    for x in _announcements(c, code, "Result", today, stale=not fresh):
+        name = str(x.get("XML_NAME") or "").strip()
+        url = name if name.startswith("https://") else BSE_XBRL + urllib.parse.quote(name) if name else None
+        when = _date(str(x.get("NEWS_DT") or x.get("DT_TM") or "")[:19], "%Y-%m-%dT%H:%M:%S")
+        if url and url.lower().endswith(".xml") and allowed(url, BSE_HOSTS):
+            out.append({"url": url, "filed": when or datetime.min})
+    return sorted({f["url"]: f for f in out}.values(), key=lambda f: f["filed"], reverse=True)
+
+
+def bse_documents(c, code, today=None):
+    """documents()'s shape from BSE's announcements: call transcripts and investor presentations of the last two years."""
+    out = []
+    for x in _announcements(c, code, "-1", today, years=2):
+        text = f"{x.get('HEADLINE') or ''} {x.get('NEWSSUB') or ''} {x.get('SUBCATNAME') or ''}".lower()
+        kind = next((k for word, k in DOCS if word in text), None)
+        att = str(x.get("ATTACHMENTNAME") or "").strip()
+        when = _date(str(x.get("NEWS_DT") or "")[:19], "%Y-%m-%dT%H:%M:%S")
+        url = BSE_ATTACH + urllib.parse.quote(att) if att else None
+        if kind and when and url and url.lower().endswith(".pdf"):
+            out.append({"date": when, "kind": kind, "title": str(x.get("HEADLINE") or x.get("NEWSSUB") or "")[:200], "url": url})
+    return sorted(out, key=lambda x: x["date"], reverse=True)
