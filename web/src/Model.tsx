@@ -7,6 +7,7 @@ import { Checks, useAi } from './Sources'
 import { Confirm, Next, PageHead, Src, Stepper } from './Shell'
 import { shortName } from './Note'
 import { useHref } from './route'
+import { T } from './Term'
 import {
   DOC_KINDS, NAMES, SHIFT, copyBase, defaultPaths, fmt, flat, groupKeys, money, rs, seed, type Impact,
   type Kind, type ModelDoc, type MovedOut, type Parsed, type Path, type Paths, type Projection, type Proposal, type Row, type Scenario, type Sources, type Ttm,
@@ -156,7 +157,8 @@ export default function ModelView({ parsed, doc, setDoc, projection, anchor, upg
       src={srcWords(k)} history={ratios.map(r => r[k])} years={histYears} effect={perStep(k, impact, kindOf(k))} need={needOf(k)} name={name}
       burn={burnOf(k)} onChange={p => setA(prev => ({ ...prev, [k]: p }))} onReset={() => resetOne(k)}>
       <RuleFold k={k} kind={kindOf(k)} rule={seeded[active][k]} active={active} parsed={parsed} doc={doc} />
-      {(k === 'growth' || k === 'ebitda_margin') && <MovedOutCard doc={doc} setDoc={setDoc} year={histYears[nHist - 1]} revenue={hist[nHist - 1].revenue ?? 0} used={sources?.moved_out ?? null} />}
+      {(k === 'growth' || k === 'ebitda_margin') && <MovedOutCard doc={doc} setDoc={setDoc} year={histYears[nHist - 1]} revenue={hist[nHist - 1].revenue ?? 0}
+        netBlock={hist[nHist - 1].net_block ?? 0} borrowings={hist[nHist - 1].borrowings ?? 0} used={sources?.moved_out ?? null} />}
       <Linked k={k} parsed={parsed} />
       <Pending k={k} doc={doc} kind={kindOf(k)} active={active} busy={!!draft.busy} docOf={docOf} current={valueOf(k)}
         onUse={p => draft.accept([p])} onKeep={p => draft.reject(p)} />
@@ -485,41 +487,54 @@ function Compare({ all, active, projYear }: { all: Projection['scenarios']; acti
 /** "Did a business leave the group?": revenue (and EBITDA) of a business sold, demerged or moved to a joint venture,
  * taken out of the last reported year before growth applies. Yours needs a reason; an approved annual-report note
  * (Documents) does the same with its quote. Rules check the size; the Excel export shows both as inputs. */
-function MovedOutCard({ doc, setDoc, year, revenue, used }: {
-  doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; year: string; revenue: number; used: Sources['moved_out'] | null
+function MovedOutCard({ doc, setDoc, year, revenue, netBlock, borrowings, used }: {
+  doc: ModelDoc; setDoc: (f: (d: ModelDoc) => ModelDoc) => void; year: string; revenue: number; netBlock: number; borrowings: number
+  used: Sources['moved_out'] | null
 }) {
   const href = useHref()
   const mine = doc.notes['adj:moved_out'] as MovedOut | undefined
   const [rev, setRev] = useState(mine?.revenue != null ? String(mine.revenue) : '')
   const [ebitda, setEbitda] = useState(mine?.ebitda != null ? String(mine.ebitda) : '')
+  const [assets, setAssets] = useState(mine?.assets != null ? String(mine.assets) : '')
+  const [debt, setDebt] = useState(mine?.debt != null ? String(mine.debt) : '')
   const [reason, setReason] = useState(mine?.reason ?? '')
   const [msg, setMsg] = useState('')
   const [opened] = useState(!!used) // open while in use when the page opens; your own toggling stays yours
-  const r = Number(rev.replace(/,/g, '')), e = ebitda.trim() === '' ? null : Number(ebitda.replace(/,/g, ''))
+  const num = (s: string) => s.trim() === '' ? null : Number(s.replace(/,/g, ''))
+  const r = Number(rev.replace(/,/g, '')), e = num(ebitda), a = num(assets), dt = num(debt)
+  const within = (v: number | null, cap: number) => v == null || (Number.isFinite(v) && v >= 0 && v <= cap)
   const bad = !rev.trim() ? 'Enter the revenue moved out.' : !(r > 0 && r < revenue) ? `Revenue must be above 0 and below ${year}’s Rs ${money(revenue)} cr.`
     : e != null && !(Number.isFinite(e) && Math.abs(e) <= r) ? 'EBITDA can’t exceed that revenue.'
+    : !within(a, netBlock) ? `Assets must be between 0 and ${year}’s net block of Rs ${money(netBlock)} cr.`
+    : !within(dt, borrowings) ? `Borrowings must be between 0 and ${year}’s Rs ${money(borrowings)} cr.`
     : !reason.trim() ? 'Enter a reason (e.g. “Unit X moved into a JV from April”).' : null
   const save = () => {
     if (bad) return setMsg(bad)
-    setDoc(d => ({ ...d, notes: { ...d.notes, 'adj:moved_out': { year, revenue: r, ebitda: e, reason: reason.trim() } satisfies MovedOut } }))
-    setMsg(`Saved: forecast base is ${year} revenue less Rs ${money(r)} cr.`)
+    setDoc(d => ({ ...d, notes: { ...d.notes, 'adj:moved_out': { year, revenue: r, ebitda: e, assets: a, debt: dt, reason: reason.trim() } satisfies MovedOut } }))
+    setMsg(`Saved: forecast base is ${year} revenue less Rs ${money(r)} cr${a || dt ? ', and its assets and debt leave the opening balance sheet' : ''}.`)
   }
   const remove = () => {
     setDoc(d => { const { ['adj:moved_out']: _, ...notes } = d.notes; return { ...d, notes } })
-    setRev(''); setEbitda(''); setReason('')
+    setRev(''); setEbitda(''); setAssets(''); setDebt(''); setReason('')
     setMsg('Removed: forecast base is full reported revenue again.')
   }
   return (
     <details className="sub-fold moved" open={opened || undefined}>
       <summary>Divestment / deconsolidation adjustment{used && <> <Src kind="you">In use</Src></>}</summary>
       <p className="small">For a business sold, demerged or moved to a JV: remove its revenue from the {year} base so growth isn’t
-        applied to revenue the group no longer consolidates.</p>
+        applied to revenue the group no longer consolidates. If it still sits in the {year} balance sheet, also remove its
+        assets and borrowings, so <T k="ev" />, net debt and capital employed describe the group that stays (its net assets leave reserves).</p>
       {used && <p className="small"><b>In use:</b> Rs {money(used.revenue_out)} cr revenue and Rs {money(used.ebitda_out)} cr
-        EBITDA removed from {used.year} ({used.reason}).{used.from === 'annual report' && <> From an approved note: <a href={href('documents', 'reading')}>see its quote</a>.</>}</p>}
+        EBITDA removed from {used.year}{used.assets_out ? <>; Rs {money(used.assets_out)} cr net block</> : null}{used.debt_out
+          ? <>; Rs {money(used.debt_out)} cr borrowings</> : null} ({used.reason}).{used.from === 'annual report' && <> From an approved note: <a href={href('documents', 'reading')}>see its quote</a>.</>}</p>}
       <div className="moved-f">
         <label>Revenue moved out, Rs cr<input inputMode="decimal" value={rev} onChange={x => setRev(x.target.value)} /></label>
         <label>Its EBITDA, Rs cr <span className="dim">(optional: blank = at {year} margin)</span>
           <input inputMode="decimal" value={ebitda} onChange={x => setEbitda(x.target.value)} /></label>
+        <label>Its assets (net block), Rs cr <span className="dim">(optional)</span>
+          <input inputMode="decimal" value={assets} onChange={x => setAssets(x.target.value)} /></label>
+        <label>Its borrowings, Rs cr <span className="dim">(optional)</span>
+          <input inputMode="decimal" value={debt} onChange={x => setDebt(x.target.value)} /></label>
         <label>Reason<input value={reason} maxLength={200} onChange={x => setReason(x.target.value)}
           placeholder="e.g. Steel unit moved into a JV from April" /></label>
       </div>

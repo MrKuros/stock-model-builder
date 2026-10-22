@@ -917,7 +917,23 @@ def upgrade_check(tmp, co, excel):
     flat = model.upgrade(co, [], None, {"revenue": 0.25 * h25["revenue"]})["hist"]
     assert abs(model.default_assumptions(flat)["ebitda_margin"] - d0["ebitda_margin"]) < 1e-3  # the year keeps its own margin; only its weight in the 3 years shrinks
     assert abs(flat[-1]["ebitda_out"] - 0.25 * h25["ebitda"]) < 1e-9
-    for bad in ({"revenue": 0.0}, {"revenue": 2 * h25["revenue"]}, {"revenue": 10.0, "ebitda": -11.0}, {"revenue": float("nan")}):
+    # ... and its assets and debt leave the opening balance sheet: net block, borrowings, equity by the net assets;
+    # EV's bridge and the WACC's debt weight follow, the reported year stays as reported
+    mob = model.upgrade(co, [], None, dict(mov, assets=0.3 * h25["net_block"], debt=0.5 * h25["borrowings"]))
+    b25 = model.base_row(mob["hist"][-1])
+    assert mob["hist"][-1]["net_block"] == h25["net_block"] and b25["net_block"] == 0.7 * h25["net_block"], b25
+    assert b25["borrowings"] == 0.5 * h25["borrowings"] and abs(
+        b25["reserves"] - (h25["reserves"] - 0.3 * h25["net_block"] + 0.5 * h25["borrowings"])) < 1e-9
+    assert model.base_row(mo["hist"][-1]) is mo["hist"][-1], "no assets or debt given: the base is the reported year"
+    pb = model.project(mob["hist"], d0, 2)
+    assert abs(pb[0]["dep"] - 0.7 * h25["net_block"] * d0["dep_pct"]) < 1e-9 and abs(pb[0]["chk_bs"]) < 1e-6
+    assert abs(pb[0]["chk_cash"]) < 1e-6 and abs(pb[1]["chk_cash"]) < 1e-6, pb
+    assert pb[0]["revenue"] == pm[0]["revenue"] and pb[0]["interest"] < pm[0]["interest"]
+    ex0 = model.expand({k: {"start": x, "end": None} for k, x in d0.items()}, 2)
+    vb, vm = (model.valuation({"base": p}, c["hist"], None, ex0, c["market"]) for p, c in ((pb, mob), (pm, mo)))
+    assert abs(vb["d"] - (vm["d"] - 0.5 * h25["borrowings"])) < 1e-9, (vb["d"], vm["d"])
+    for bad in ({"revenue": 0.0}, {"revenue": 2 * h25["revenue"]}, {"revenue": 10.0, "ebitda": -11.0}, {"revenue": float("nan")},
+                {"revenue": 10.0, "assets": 2 * h25["net_block"]}, {"revenue": 10.0, "debt": -1.0}):
         b = model.upgrade(co, [], None, bad)
         assert "revenue_out" not in b["hist"][-1] and "isn't used" in b["sources"]["notes"][-1], (bad, b["sources"]["notes"])
     if not excel:
@@ -925,7 +941,7 @@ def upgrade_check(tmp, co, excel):
     rows = {key: 5 + i for i, (_, key, _) in enumerate(model.LAYOUT) if key}
     first = model.labels(co["dates"])[0]  # cash-flow capex in the first reported year: FCF has no earlier column
     for name, comp in (("cogs", up), ("rev", up_rev), ("ar", model.upgrade(co, [], {"FY2023": 70.0})),
-                       ("ar0", model.upgrade(co, [], {first: 70.0})), ("moved", mo)):
+                       ("ar0", model.upgrade(co, [], {first: 70.0})), ("moved", mo), ("moved_bs", mob)):
         base = {k: {"start": x, "end": None} for k, x in model.default_assumptions(comp["hist"]).items()}
         base.update(dpo={"start": 40.0, "end": 70.0}, cogs_pct={"start": 0.5, "end": 0.45}, debt_change={"start": -60.0, "end": None})
         sc = {"base": base, "bull": dict(base, growth={"start": 0.2, "end": None}),
@@ -950,11 +966,12 @@ def upgrade_check(tmp, co, excel):
                                     **{k: rh[j][k] for k in ("cogs_pct", "dio", "dpo", "int_rate", "capex_pct", "ol_pct",
                                                              "debt_change")}}, (name, "hist", j))
         assert ("annual report and approved (FY2023)" if name == "ar" else f"annual report and approved ({first})"
-                if name == "ar0" else "moved out of FY2025" if name == "moved" else "XBRL filings") in ws["A2"].value, ws["A2"].value
+                if name == "ar0" else "moved out of FY2025" if name.startswith("moved") else "XBRL filings") in ws["A2"].value, ws["A2"].value
         assert ("on revenue" if name == "rev" else "on COGS") in ws["A2"].value
         at = {c.value: c.row for c in ws["A"] if isinstance(c.value, str)}
         moved = [k for k in at if k.startswith("Revenue moved out")]
-        assert bool(moved) == (name == "moved"), moved
+        assert bool(moved) == name.startswith("moved"), moved
+        assert any(k.startswith("Assets (net block) moved out") for k in at) == (name == "moved_bs")
         if moved:  # two inputs in the base year's column, the pro-forma margin a live formula equal to the default's year
             assert moved[0] == "Revenue moved out of the FY2025 base (=HYPERLINK(1) unit sold)", moved
             col = 1 + len(comp["hist"])
@@ -2067,6 +2084,16 @@ def ar_notes_check(server, root, co, data):
             mine = {**mo_note, "adj:moved_out": {"year": "FY2025", "revenue": 100.0, "ebitda": None, "reason": "sold the unit"}}
             got = client.post("/api/company", json={"company": data["company"], "notes": mine}).json()
             assert got["sources"]["moved_out"]["revenue_out"] == 100.0 and got["sources"]["moved_out"]["reason"] == "sold the unit"
+            hb = data["company"]["hist"][-1]
+            bs = {"adj:moved_out": {"year": "FY2025", "revenue": 100.0, "ebitda": None, "assets": 0.2 * hb["net_block"],
+                                    "debt": 0.1 * hb["borrowings"], "reason": "sold the unit"}}
+            got = client.post("/api/company", json={"company": data["company"], "notes": bs}).json()["sources"]["moved_out"]
+            assert got["assets_out"] == 0.2 * hb["net_block"] and got["debt_out"] == 0.1 * hb["borrowings"], got
+            bs_p = client.post("/api/project", json={**req, "notes": bs}).json()
+            assert bs_p["valuation"]["d"] < moved_p["valuation"]["d"], "the debt moved out leaves the bridge"
+            rows = [{"label": "Revenue: unit", "amount": 5.0}, {"label": "Borrowings of the unit", "amount": 2.0},
+                    {"label": "Assets held for sale", "amount": 3.0}]
+            assert [r and r["amount"] for r in server._moved_rows(rows)] == [5.0, None, 3.0, 2.0]
             nameless = {"adj:moved_out": {"year": "FY2025", "revenue": 100.0, "reason": " "}}
             assert "moved_out" not in client.post("/api/company", json={"company": data["company"], "notes": nameless}).json()["sources"]
             assert client.post("/api/export", json={**req, "notes": mine}).status_code == 200

@@ -318,8 +318,9 @@ TOPICS = {
     "moved_out": ("Business moved out", "for a business, subsidiary or division the report says was sold, deconsolidated, "
                   "demerged or moved into a joint venture, or is held for sale or shown as a discontinued operation: its "
                   "revenue from operations for the year (an item whose label starts with \"Revenue\") and, if printed, "
-                  "its EBITDA or operating profit before depreciation (an item whose label starts with \"EBITDA\"); after "
-                  "the word, name the business and what happened to it, e.g. \"Revenue: XYZ Ltd, moved into a joint venture\"",
+                  "its EBITDA or operating profit before depreciation (an item whose label starts with \"EBITDA\"), and, if "
+                  "the report prints them for the business at the year end, its total assets (label starts with "
+                  "\"Assets\") and its borrowings (label starts with \"Borrowings\"); after the word, name the business and what happened to it, e.g. \"Revenue: XYZ Ltd, moved into a joint venture\"",
                   (("discontinued operation", 4), ("deconsolidat", 4), ("held for sale", 4), ("loss of control", 4),
                    ("demerger", 4), ("slump sale", 4), ("ceased to be a subsidiary", 4), ("disposal of", 3),
                    ("divestment", 3), ("joint venture", 1))),

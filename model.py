@@ -1052,7 +1052,32 @@ def move_out(last, out):
         e = r * last["ebitda"] / last["revenue"]
     if not isinstance(e, (int, float)) or not math.isfinite(e) or abs(e) > r:
         return "The business moved out isn't used: its EBITDA can't be larger than its revenue."
-    return {"revenue_out": float(r), "ebitda_out": float(e)}
+    out_bs = {}
+    for k, cap, what in (("assets", "net_block", "net block"), ("debt", "borrowings", "borrowings")):
+        v = out.get(k)
+        if v in (None, 0, 0.0):
+            continue
+        if not isinstance(v, (int, float)) or not math.isfinite(v) or not 0 < v <= last[cap] + TOL:
+            return (f"The business moved out isn't used: its {'assets' if k == 'assets' else 'debt'} must be above zero "
+                    f"and at most the year's {what} of Rs {_inr(last[cap])} cr.")
+        out_bs[f"{k}_out"] = float(min(v, last[cap]))
+    return {"revenue_out": float(r), "ebitda_out": float(e), **out_bs}
+
+
+def base_row(last):
+    """The forecast's opening balance sheet: the last reported year less a moved-out business's assets (out of the
+    net block) and debt (out of borrowings), its net assets leaving equity, so EV, net debt and capital employed
+    describe the group that stays. Mirrored in to_excel() by the first projected column's references to the base
+    year and by the Valuation sheet's bridge.
+    ponytail: net assets leave reserves, as in a demerger to shareholders; a sale's cash proceeds or a JV stake
+    kept aren't added (type the net assets less what came back to model one), and its working capital resets
+    with the days on the lower revenue."""
+    a, d = last.get("assets_out") or 0.0, last.get("debt_out") or 0.0
+    if not (a or d):
+        return last
+    return {**last, "net_block": last["net_block"] - a, "borrowings": last["borrowings"] - d,
+            "reserves": last["reserves"] - (a - d), "total_assets": last["total_assets"] - a,
+            "total_liab": last["total_liab"] - a}
 
 
 def _sources(hist, used, notes):
@@ -1654,7 +1679,7 @@ def expand(assumptions, n):
 def project(hist, a, n=5):
     """Mirrors the Excel formulas in to_excel(); keep both in sync (test_model.py checks this).
     a[key] is a float (every year) or a list of n per-year values (see expand())."""
-    out, p, cogs = [], hist[-1], on_cogs(hist)
+    out, p, cogs = [], base_row(hist[-1]), on_cogs(hist)
     for t in range(n):
         y = {k: v[t] if isinstance(v, list) else v for k, v in a.items()}  # this year's inputs
         c = {}
@@ -1805,6 +1830,7 @@ def valuation(projs, hist, val, base, market, inputs=None, note=False):
     year end; per scenario at today's price and at its value per share (see _multiples()).
     Mirrors the Valuation sheet in to_excel()."""
     v, last = {**VALUATION, **(val or {})}, hist[-1]
+    b = base_row(last)  # the bridge and the weights without a business that left (move_out); multiples stay as reported
     market = market or {}
     price = _pos(v["price"] if v["price"] is not None else market.get("price"))
     shares = _pos(v["shares"] if v["shares"] is not None else market.get("shares"))
@@ -1814,16 +1840,16 @@ def valuation(projs, hist, val, base, market, inputs=None, note=False):
     kd = min(max(base["int_rate"][0], v["rf"]), ke) if v["kd"] is None else v["kd"]
     kd_at = kd * (1 - tax)
     # ponytail: no share price -> book equity weights the WACC; a negative book counts as zero
-    e = price * shares if price and shares else max(0.0, last["share_cap"] + last["reserves"])
+    e = price * shares if price and shares else max(0.0, b["share_cap"] + b["reserves"])
     # lease liabilities are debt (Ind AS 116 moved lease rent out of EBITDA, so FCFF is before lease payments);
     # The export's borrowings already included them, so splitting them out leaves D and the bridge unchanged
-    d = _debt(last)
+    d = _debt(b)
     we = e / (e + d) if e + d > 0 else 1.0
     wacc_build = we * ke + (1 - we) * kd_at
     wacc = v["wacc_override"] if v["wacc_override"] is not None else wacc_build
     g, n = v["g"], len(next(iter(projs.values())))
     period = [t + 1 - (0.5 if v["mid_year"] else 0) for t in range(n)]
-    bridge = -d + last["cash"] + last["investments"]
+    bridge = -d + b["cash"] + b["investments"]
     # minority holders' claim on the consolidated EV, as their share of profit (the base scenario's first year;
     # mi_pct nets minorities against associates, so a net positive share deducts nothing).
     # ponytail: proportional to profit share; upgrade path: a typed NCI value from the annual report
@@ -2265,7 +2291,7 @@ def _scenario_sheet(wb, scenarios, n, years, formats, head_fill):
     return lambda s, key, j: f"Scenarios!{get_column_letter(2 + j)}{rows[s, key]}"
 
 
-def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill):
+def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill, less=None):
     """'Valuation' sheet: the DCF of whichever scenario Model!B3 picks. Mirrors valuation(); val is its result
     (inputs, price and shares as resolved there, and the grid_gm / implied_growth values per scenario).
     at(key, j) -> Model sheet ref for column j (0 = first reported year)."""
@@ -2278,7 +2304,8 @@ def _valuation_sheet(wb, co, n, val, src, at, years, formats, head_fill):
                 "Blue = input, green = from the Scenarios sheet (base, first projected year).")
     vs["A2"].font = Font(italic=True, color="808080")
     blue, green = Font(color="0000FF"), Font(color="008000")
-    hist = lambda k: f"Model!{at(k, nh - 1)}"  # noqa: E731
+    less = less or {}  # a moved-out business's assets and debt leave the base year (base_row())
+    hist = lambda k: f"(Model!{at(k, nh - 1)}-{less[k]})" if k in less else f"Model!{at(k, nh - 1)}"  # noqa: E731
     r, ref = 3, {}
 
     def put(key, label, value, fmt, font=None):
@@ -2647,6 +2674,18 @@ def to_excel(co, scenarios, n=5, active="base", val=None, peers=None, at=None):
     last, moved = co["hist"][-1], co["hist"][-1].get("revenue_out") is not None
     out_row, base_col = top + len(LAYOUT) + 2, get_column_letter(1 + nh)
     out_ref = f"${base_col}${out_row}"
+    # its assets and debt (base_row()): two more inputs below the margin line; the first projected column reads the
+    # base year less them, and so does the Valuation sheet's bridge
+    bs_out = [(k, label) for k, label in (("assets_out", "Assets (net block) moved out"), ("debt_out", "Borrowings moved out"))
+              if last.get(k)]
+    bs_ref = {k: f"${base_col}${out_row + 3 + i}" for i, (k, _) in enumerate(bs_out)}
+
+    def adj(sheet=""):
+        a, d = (f"{sheet}{bs_ref[k]}" if k in bs_ref else None for k in ("assets_out", "debt_out"))
+        net = f"({a}-{d})" if a and d else a or (f"(-{d})" if d else None)
+        return {k: v for k, v in (("net_block", a), ("total_assets", a), ("total_liab", a), ("borrowings", d),
+                                  ("reserves", net)) if v}
+    less = adj()
 
     ws.cell(top, 1, "Rs crore").font = bold
     for j, h in enumerate(headers):
@@ -2666,7 +2705,11 @@ def to_excel(co, scenarios, n=5, active="base", val=None, peers=None, at=None):
             continue
         for j in range(len(headers)):
             col, prev = get_column_letter(2 + j), get_column_letter(1 + j)
-            x = lambda k, p=0, col=col, prev=prev: f"{prev if p else col}{rows[k]}"  # noqa: E731
+            first = j == nh
+
+            def x(k, p=0, col=col, prev=prev, first=first):
+                ref = f"{prev if p else col}{rows[k]}"
+                return f"({ref}-{less[k]})" if p and first and k in less else ref
             cell = ws.cell(r, 2 + j)
             if j < nh:
                 h = co["hist"][j]  # missing cash-flow lines stay blank instead of 0-based formulas
@@ -2696,6 +2739,10 @@ def to_excel(co, scenarios, n=5, active="base", val=None, peers=None, at=None):
         ws.cell(out_row + 2, 1, f"{y} EBITDA margin without it (the default margin uses this year)")
         c = ws.cell(out_row + 2, 1 + nh, f"=IFERROR(({ebitda}-{base_col}{out_row + 1})/({rev}-{out_ref}),\"\")")
         c.number_format = formats["pct"]
+        for i, (k, label) in enumerate(bs_out):
+            ws.cell(out_row + 3 + i, 1, f"{label} of the {y} base; its net assets leave reserves")
+            c = ws.cell(out_row + 3 + i, 1 + nh, last[k])
+            c.font, c.number_format = Font(color="0000FF"), formats["num"]
     ws.column_dimensions["A"].width = 34
     for j in range(len(headers)):
         ws.column_dimensions[get_column_letter(2 + j)].width = 11
@@ -2704,7 +2751,7 @@ def to_excel(co, scenarios, n=5, active="base", val=None, peers=None, at=None):
     v = valuation({s: project(co["hist"], ex[s], n) for s in SCENARIOS}, co["hist"], val, ex["base"],
                   co.get("market"), inputs=ex)
     _valuation_sheet(wb, co, n, v, src, lambda k, j: f"{get_column_letter(2 + j)}{rows[k]}", headers[nh:],
-                     formats, head_fill)
+                     formats, head_fill, adj("Model!"))
     if co.get("quarters"):
         _quarters_sheet(wb, co["quarters"], formats)
     if peers:

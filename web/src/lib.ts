@@ -271,10 +271,11 @@ export interface Sources {
   notes: string[] // filings that weren't used, and why
   used: Record<'payables' | 'lease' | 'capex', string[]> & { capex_ar?: string[] } // year labels; capex_ar: approved annual-report capex
   // a business that left the group, taken out of the last reported year before growth (yours or an approved note)
-  moved_out?: { revenue_out: number; ebitda_out: number; year: string; reason: string; from: 'you' | 'annual report' }
+  // assets_out / debt_out: its net block and borrowings, taken out of the opening balance sheet (net assets leave reserves)
+  moved_out?: { revenue_out: number; ebitda_out: number; assets_out?: number; debt_out?: number; year: string; reason: string; from: 'you' | 'annual report' }
 }
 /** notes['adj:moved_out']: a business sold or moved to a JV, typed by you with a reason (wins over an approved note). */
-export interface MovedOut { year: string; revenue: number; ebitda: number | null; reason: string }
+export interface MovedOut { year: string; revenue: number; ebitda: number | null; assets?: number | null; debt?: number | null; reason: string }
 export interface Parsed {
   company: Company
   hist?: Row[] // company.hist with the filings' payables, leases and cash-flow capex (missing on an old server)

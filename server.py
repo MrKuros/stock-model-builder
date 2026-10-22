@@ -376,6 +376,8 @@ def ar_capex(notes):
 
 MOVED_REV = re.compile(r"\s*(?:revenue|turnover|sales|income from operations)", re.I)  # the label starts with it
 MOVED_EBITDA = re.compile(r"\s*(?:ebitda|operating profit|profit before (?:depreciation|interest))", re.I)
+MOVED_ASSETS = re.compile(r"\s*(?:total assets|assets|property, plant|fixed assets)", re.I)
+MOVED_DEBT = re.compile(r"\s*(?:borrowings|debt|loans)", re.I)
 
 
 def moved_out(notes, co):
@@ -385,21 +387,23 @@ def moved_out(notes, co):
     notes, last = notes or {}, model.labels(co["dates"])[-1]
     m = notes.get("adj:moved_out")
     if isinstance(m, dict) and m.get("year") == last and str(m.get("reason") or "").strip():
-        return {"revenue": m.get("revenue"), "ebitda": m.get("ebitda"), "reason": str(m["reason"]).strip()[:200], "from": "you"}
+        return {"revenue": m.get("revenue"), "ebitda": m.get("ebitda"), "assets": m.get("assets"), "debt": m.get("debt"),
+                "reason": str(m["reason"]).strip()[:200], "from": "you"}
     n = notes.get(f"ar:moved_out:{last}")
     rows = n.get("rows") if isinstance(n, dict) else None
     if not rows:
         return None
-    rev, ebitda = _moved_rows(rows)
-    return {"revenue": rev.get("amount"), "ebitda": ebitda and ebitda.get("amount"),
+    rev, ebitda, assets, debt = _moved_rows(rows)
+    amt = lambda r: r and r.get("amount")  # noqa: E731
+    return {"revenue": rev.get("amount"), "ebitda": amt(ebitda), "assets": amt(assets), "debt": amt(debt),
             "reason": f"{n.get('file') or 'the annual report'} p.{rev.get('page')}, approved", "from": "annual report"}
 
 
 def _moved_rows(rows):
-    """(revenue row, EBITDA row or None) of a business-moved-out note, by their labels; the first row is the revenue
-    when no label says so."""
+    """(revenue, EBITDA, assets, borrowings) rows of a business-moved-out note, by their labels (None when not
+    given); the first row is the revenue when no label says so."""
     pick = lambda pat: next((r for r in rows if isinstance(r, dict) and pat.match(str(r.get("label") or ""))), None)  # noqa: E731
-    return pick(MOVED_REV) or (rows[0] if rows else None), pick(MOVED_EBITDA)
+    return (pick(MOVED_REV) or (rows[0] if rows else None), pick(MOVED_EBITDA), pick(MOVED_ASSETS), pick(MOVED_DEBT))
 
 
 def upgraded(co, filings=(), notes=None):
@@ -986,12 +990,15 @@ def _ar_note(req, topic, reply, sent, pages):
 def _moved_checks(rows, h, year, last):
     """Rules on a business moved out (beyond the quotes): model.move_out's (revenue above zero and below the year's,
     EBITDA no larger than that revenue), and whether the note is for the forecast's base year (only then is it used)."""
-    rev, ebitda = _moved_rows(rows)
-    m = model.move_out(h, {"revenue": rev and rev.get("amount"), "ebitda": ebitda and ebitda.get("amount")})
+    rev, ebitda, assets, debt = _moved_rows(rows)
+    amt = lambda r: r and r.get("amount")  # noqa: E731
+    m = model.move_out(h, {"revenue": amt(rev), "ebitda": amt(ebitda), "assets": amt(assets), "debt": amt(debt)})
+    bs = "".join(f"; {what} Rs {model._inr(m[k])} cr leave the base balance sheet" for k, what in
+                 (("assets_out", "assets"), ("debt_out", "borrowings")) if not isinstance(m, str) and m.get(k))
     return [{"name": "Fits the year", "pass": not isinstance(m, str),
              "detail": m if isinstance(m, str) else f"Revenue moved out Rs {model._inr(m['revenue_out'])} cr of the year's "
              f"Rs {model._inr(h['revenue'])} cr; EBITDA Rs {model._inr(m['ebitda_out'])} cr"
-             + ("." if ebitda else " (not printed: taken at the year's own margin).")},
+             + ("" if ebitda else " (not printed: taken at the year's own margin)") + bs + "."},
             {"name": "Base year", "pass": True if year == last else None,
              "detail": f"{year} is the last reported year, so approving it takes the business out of the forecast's base."
              if year == last else f"Only a note for {last}, the forecast's base, changes the forecast; this one is kept "
@@ -1163,7 +1170,9 @@ def _thesis_facts(doc: "ModelDoc"):
         f["shares"] = f"Share count: {g['text']}"
     if mo := co["sources"].get("moved_out"):
         f["moved_out"] = (f"Our {last} base leaves out {model._cr(mo['revenue_out'])} of revenue and {model._cr(mo['ebitda_out'])} "
-                          f"of EBITDA of a business that was deconsolidated ({mo['reason']}); growth applies to the rest")
+                          f"of EBITDA of a business that was deconsolidated ({mo['reason']}); growth applies to the rest"
+                          + "".join(f"; its {w} of {model._cr(mo[k])} leave the opening balance sheet" for k, w in
+                                    (("assets_out", "assets"), ("debt_out", "borrowings")) if mo.get(k)))
     nb = v.get("note") or {}
     unit = lambda key, x: f"{x:.0f} days" if key in ("dso", "dio", "dpo") else _pc(x)  # noqa: E731
     ours = lambda key: v["wacc"] if key == "wacc" else v["g"] if key == "g" else avg(key)  # noqa: E731
