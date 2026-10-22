@@ -23,6 +23,7 @@ Every page has its own address, so a link, a bookmark, a reload or a second brow
 | Page | Address | What it's for |
 |---|---|---|
 | Coverage | `/` | Every company's CMP against its bear–bull fair-value range on one shared log scale (CMP is always the middle line), the verdict, reverse-DCF implied growth vs the base case, red flags and latest results; filter chips (below bear FV, within range, above bull FV, needs a fix, new results, not reviewed); sort by upside (FV ÷ CMP), most red flags, recently changed or A–Z; Refresh prices, Check all for new results; each row's ⋯ menu (Open, Versions, Delete with a confirm); the watchlist of tickers not yet modelled |
+| Portfolio | `/portfolio` | Your holdings (symbol, quantity, average cost; typed or pasted as CSV) at CMP: market value, weight, unrealised P&L, base-case FV and upside per holding and for the portfolio, look-through P/E, EV/EBITDA (ex-lenders) and P/B (lenders), NSE sector exposure, top-5 weight and HHI, red flags and new results by holding, Build model for a holding without one, and an Excel export |
 | Add company | `/add` | Search by name or NSE symbol, then Build model or Watch price right on the match; a progress card that keeps running while you look elsewhere; an Excel export (`/add#upload`) or the sample company. Adding a company you already have asks first: add these years to it, keep both, or replace it (the current version is kept under Versions) |
 | Summary | `/c/<company>/summary` | The answer line, five cards (Valuation, Reverse DCF, Risks & forensics, Results tracking, Peers) that each open their page, a quick sensitivity line for revenue growth and EBITDA margin, the note's thesis points and Mark as reviewed |
 | Valuation | `/c/<company>/valuation` | DCF: CMP vs bear/base/bull fair value, sensitivity (WACC × TG and revenue growth × EBITDA margin, ▲ where a cell is at or above CMP), P/E, EV/EBITDA and P/B at CMP and at fair value against the peer median and own history, TV share of EV; the eight DCF inputs and the EV-to-equity bridge folded below |
@@ -79,6 +80,7 @@ After any change that moves fair value, a bar under the company bar shows fair v
 - **Quarterly tracking:** each quarter filed in the first forecast year is scored YTD against the base case's FY E: revenue and PAT against FY E times the share of last year the same quarters made (straight quarters / 4 when last year's aren't filed), EBITDA margin in bps against FY E. Within 2% (revenue), 5% (PAT) and 100 bps is in line. Results tracking shows the table, Summary and Coverage one line ("H1 FY27 behind FY27E run-rate: revenue −2.1%, PAT −8.0%").
 - **Tracking new results:** when new annual results come in, the forecast as it stood is kept, scored input by input against what was reported (a hit is within one step), and Results tracking shows it: actual vs forecast by line, the fair-value range and implied growth before and after, and new or cleared red flags. Inputs that missed are offered the new rule default; assumptions never change by themselves.
 - **Watchlist and coverage:** Coverage shows each company's CMP (refreshed from NSE when the page opens and the price is over 15 minutes old, with the time it was checked) against the fair-value range, upside/(downside) to base-case FV, implied growth vs the base case, red flags, the latest results and a "new results" tag, sorted by upside, most red flags or recently changed, and filtered the same way. A small line per company draws CMP against base-case FV day by day. Tickers can be watched before modelling them, with a Build model button. Offline, the last prices kept are shown with their time.
+- **Portfolio:** holdings are kept in `models/portfolio.json` (a damaged file is never overwritten); a repeated symbol adds at the weighted average cost, and a pasted CSV with any bad line saves nothing and names the line. Each holding is valued at its model's CMP, or the last price kept for a symbol without a model, never going online by itself (Refresh prices includes held symbols). Portfolio multiples are weighted harmonic means (total market value ÷ the held share of each company's PAT, EBITDA or book), at CMP on the last reported year; weights are of the value that has a CMP. Rules only; the Excel sheet holds the values.
 - **Model library:** models autosave to `models/` locally, and you can reopen any of them from Coverage or the company switcher.
 - **An installable app:** a web app manifest and icons, so Chrome or Edge offers "Install app" and opens it in its own window. Old `#note`, `#model` and `#evidence` links still open the right page.
 - **Excel export:** every projected statement cell is a live formula. Inputs are blue, and a scenario selector switches the whole workbook between base, bull and bear.
@@ -121,7 +123,7 @@ lender.py         banks and NBFCs: lender years, defaults, projection, residual 
 sources.py        NSE client: search, quote, results filings, reports; polite, allow-listed, cached
 ai.py             LLM_CMD calls, PDF page text and picking, quote and number checks
 test_model.py     self-check incl. Excel parity
-web/src/          App (routing, autosave, tab sync, keys), Shell (rail, company bar, switcher, dialogs, scale), Workspace, Home + Watch (Coverage), Add, Fetch, Peers, Tracking, Summary, Note (research note), Fundamentals (Financials), Statements,
+web/src/          App (routing, autosave, tab sync, keys), Shell (rail, company bar, switcher, dialogs, scale), Workspace, Home + Watch (Coverage), Portfolio, Add, Fetch, Peers, Tracking, Summary, Note (research note), Fundamentals (Financials), Statements,
                   Model (Forecast), Valuation (Valuation, Reverse DCF), Lender (lender pages), Risks, Documents, Ruler, Draft, Chart, Sources, Term (glossary), route
 ```
 
@@ -154,7 +156,8 @@ web/src/          App (routing, autosave, tab sync, keys), Shell (rail, company 
 6. ~~Leftovers: a moved-out business's balance sheet, BSE fallback, quarterly tracking, P&L-only years, scheduled checks~~ ✓
 7. ~~Banks and NBFCs: lender template, residual income, implied RoE, lender forensics and peers~~ ✓
 8. ~~Ask the filings: cited Q&A over a company's documents, rules-checked~~ ✓
-9. Optional: US companies, portfolio view
+9. ~~Portfolio view: holdings at CMP against base FV, look-through multiples, sector exposure, concentration~~ ✓
+10. Optional: US companies
 
 ## License
 

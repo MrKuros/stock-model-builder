@@ -1,5 +1,6 @@
 """Run: uv run uvicorn server:app  (serves the API and the built web/dist front end)."""
 import contextlib
+import csv
 import hashlib
 import io
 import json
@@ -2353,7 +2354,8 @@ def refresh_prices(root=None, now=None):
     {done, checked, missed, stopped, left}. Nothing here calls the LLM or changes a saved model."""
     root = root or MODELS
     syms = list(dict.fromkeys([m["symbol"] for m in latest_models(root) if m.get("symbol")] +
-                              [x.get("symbol") for x in _watch(root)["symbols"] if x.get("symbol")]))
+                              [x.get("symbol") for x in _watch(root)["symbols"] if x.get("symbol")] +
+                              [x["symbol"] for x in _holdings(root)[0]]))
     c, checked, failed, run, stopped = nse(root), 0, 0, 0, False
     todo = [s for s in syms if not ((q := _live(root, s)) and q["age"] < sources.PRICE_AGE)]
     for i, s in enumerate(todo):
@@ -2399,6 +2401,259 @@ def watch_delete(symbol: str):
 def watch_prices():
     """refresh_prices as JSON lines; closing the request stops it after the price in hand."""
     return _stream(refresh_prices(), "checking prices", "the prices shown are the last ones kept")
+
+
+# ---------- portfolio (6.3): your holdings against the models, rules only, offline from the cache ----------
+
+PORTFOLIO = "portfolio.json"  # library root (list_models reads only */*.json): {"holdings": [{symbol, qty, cost}]}
+HOLDINGS_MAX = 300
+
+
+class Holding(BaseModel):
+    symbol: str = Field(max_length=40)
+    qty: FiniteFloat = Field(gt=0, le=1e12)
+    cost: FiniteFloat = Field(ge=0, le=1e9)  # average cost per share, Rs
+
+
+class Holdings(BaseModel):
+    holdings: list[Holding] = Field(max_length=HOLDINGS_MAX)
+
+
+class Paste(BaseModel):
+    text: str = Field(max_length=100_000)
+    replace: bool = False  # True: the pasted lines become the portfolio; False: added to it
+
+
+def _holdings(root=None, strict=False):
+    """(holdings, damaged). A damaged file reads as empty; strict makes it a 409, so a write never replaces it."""
+    p = (root or MODELS) / PORTFOLIO
+    try:
+        return Holdings.model_validate_json(p.read_bytes()).model_dump()["holdings"], False
+    except FileNotFoundError:
+        return [], False
+    except (OSError, ValidationError):
+        if strict:
+            raise HTTPException(409, f"{PORTFOLIO} in the models folder is damaged; move it away and try again.")
+        return [], True
+
+
+def merge(holdings):
+    """One line per symbol (checked by sources.symbol): a repeated symbol adds its quantity at the weighted average cost."""
+    out = {}
+    for h in holdings:
+        sym = _sym(h["symbol"])
+        if sym in out:
+            o = out[sym]
+            q = o["qty"] + h["qty"]
+            out[sym] = {"symbol": sym, "qty": q, "cost": (o["qty"] * o["cost"] + h["qty"] * h["cost"]) / q}
+        else:
+            out[sym] = {"symbol": sym, "qty": h["qty"], "cost": h["cost"]}
+    if len(out) > HOLDINGS_MAX:
+        raise HTTPException(422, f"A portfolio holds up to {HOLDINGS_MAX} companies.")
+    return list(out.values())
+
+
+def _number(x):
+    v = float(re.sub(r"^(rs\.?|inr|₹)", "", x.strip().lower().replace(",", "").replace(" ", "")))  # ValueError for words
+    if not math.isfinite(v):
+        raise ValueError
+    return v
+
+
+def parse_holdings(text):
+    """'symbol,qty,cost' per line (comma or tab; a number with Indian grouping in quotes; Rs/₹ allowed; a header line
+    skipped) -> (holdings, errors [{line, text}]). Nothing is merged or saved here."""
+    out, errors = [], []
+    for i, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        parts = [x.strip() for x in (line.split("\t") if "\t" in line else next(csv.reader([line])))]
+        if len(parts) != 3:
+            errors.append({"line": i, "text": f"needs 3 values (symbol, quantity, average cost), found {len(parts)}" + (
+                "; put a number with commas in quotes (\"1,250\")" if len(parts) > 3 else "")})
+            continue
+        try:
+            qty, cost = _number(parts[1]), _number(parts[2])
+        except ValueError:
+            if not out and not errors and re.search(r"[a-z]", parts[1].lower()):
+                continue  # the header line
+            errors.append({"line": i, "text": "quantity and average cost must be numbers"})
+            continue
+        try:
+            sym = sources.symbol(parts[0])
+        except ValueError as e:
+            errors.append({"line": i, "text": str(e)})
+            continue
+        if not 0 < qty <= 1e12 or not 0 <= cost <= 1e9:
+            errors.append({"line": i, "text": "quantity must be above 0 and average cost 0 or more"})
+            continue
+        out.append({"symbol": sym, "qty": qty, "cost": cost})
+    return out, errors
+
+
+def _hmean(pairs):
+    """Weighted harmonic mean of a multiple over x > 0 (Σ w ÷ Σ w/x: total value over look-through earnings), and the
+    weight it covers."""
+    pos = [(w, x) for w, x in pairs if x is not None and x > 0]
+    return (sum(w for w, _ in pos) / sum(w / x for w, x in pos), sum(w for w, _ in pos)) if pos else (None, 0.0)
+
+
+def portfolio(root=None):
+    """Every holding at CMP (its model's, else the last cached quote: never online) against its model: market value,
+    weight, P&L, base-case FV and upside, multiples, NSE sector, red flags, new results; then the totals, look-through
+    multiples (P/E on all, EV/EBITDA without lenders, P/B on lenders), sector exposure and concentration. Weights are
+    of the market value that has a CMP. Rules only: never calls the LLM."""
+    root = root or MODELS
+    hs, damaged = _holdings(root)
+    rows_of = {m["symbol"]: m for m in latest_models(root) if m.get("symbol")} if hs else {}
+    # ponytail: a model is matched by its NSE symbol; one built from an Excel export alone has none, so it shows
+    # "no model yet" until it is refreshed by ticker
+    rows = []
+    for h in hs:
+        m = rows_of.get(h["symbol"])
+        q = None if m else _live(root, h["symbol"])
+        price = m["price"] if m else q and q["price"]
+        v = (m or {}).get("values") or {}
+        mv = h["qty"] * price if price else None
+        rows.append({**h, "name": m["company"] if m else q and q["name"], "id": m and m["id"], "price": price,
+                     "price_at": m["price_at"] if m else q and _ago(q["age"]), "value": mv,
+                     "invested": h["qty"] * h["cost"], "pnl": None if mv is None else mv - h["qty"] * h["cost"],
+                     "fv": v.get("base"), "bear": v.get("bear"), "bull": v.get("bull"),
+                     "upside": v["base"] / price - 1 if v.get("base") and price else None, "why": m and m.get("why"),
+                     "lender": bool(m and m.get("lender")), "multiples": (m or {}).get("multiples"),
+                     "sector": (m or {}).get("sector") or (q or {}).get("sector"),
+                     "flags": m and m.get("flags"), "new_results": m and m.get("new_results"), "quarter": m and m.get("quarter")})
+    total = sum(r["value"] for r in rows if r["value"] is not None)
+    for r in rows:
+        r["weight"] = r["value"] / total if r["value"] is not None and total else None
+    priced = [r for r in rows if r["weight"] is not None]
+    fv = [r for r in priced if r["fv"]]
+    sectors = {}
+    for r in sorted(priced, key=lambda r: -r["weight"]):
+        s = sectors.setdefault(r["sector"] or "Not classified", [0.0, []])
+        s[0] += r["weight"]
+        s[1].append(r["symbol"])
+    ws = sorted((r["weight"] for r in priced), reverse=True)
+    hhi = sum(w * w for w in ws) * 10_000
+    multiples = {}
+    for k, keep in (("pe", lambda r: True), ("ev_ebitda", lambda r: not r["lender"]), ("pb", lambda r: r["lender"])):
+        x, cover = _hmean([(r["weight"], (r["multiples"] or {}).get(k)) for r in priced if keep(r)])
+        multiples[k] = {"value": x, "cover": cover}
+    invested = sum(r["invested"] for r in priced)
+    held_fv = sum(r["qty"] * r["fv"] for r in fv)
+    return {"holdings": rows, "damaged": damaged,
+            "total": {"value": total if priced else None, "invested": invested, "pnl": total - invested if priced else None,
+                      "unpriced": [r["symbol"] for r in rows if r["value"] is None],
+                      # base FV of the held shares against their market value, over the holdings that have one
+                      "fv": held_fv if fv else None, "fv_cover": sum(r["weight"] for r in fv),
+                      "upside": held_fv / sum(r["value"] for r in fv) - 1 if fv else None},
+            "multiples": multiples,
+            "sectors": sorted(([k, w, syms] for k, (w, syms) in sectors.items()), key=lambda x: -x[1]),
+            "concentration": {"top5": sum(ws[:5]) if ws else None, "hhi": hhi if ws else None,
+                              "effective": 10_000 / hhi if ws else None, "n": len(ws)},
+            "flags": sum(r["flags"] or 0 for r in rows),
+            "new_results": [r["symbol"] for r in rows if r["new_results"]]}
+
+
+def save_holdings(hs, root=None):
+    root = root or MODELS
+    _holdings(root, strict=True)
+    _write(root / PORTFOLIO, json.dumps({"holdings": merge(hs)}).encode())
+
+
+@app.get("/api/portfolio")
+def portfolio_get():
+    return portfolio()
+
+
+@app.post("/api/portfolio")
+def portfolio_post(req: Holdings):
+    """The whole holdings list (an add, edit or remove on the page sends the list back)."""
+    save_holdings(req.model_dump()["holdings"])
+    return portfolio()
+
+
+@app.post("/api/portfolio/paste")
+def portfolio_paste(req: Paste):
+    """Pasted 'symbol,qty,cost' lines, added (or replacing all). Any bad line: nothing is saved, and every bad line is named."""
+    hs, errors = parse_holdings(req.text)
+    if errors:
+        raise HTTPException(422, "Nothing saved. " + "; ".join(f"Line {e['line']}: {e['text']}" for e in errors[:10]) +
+                            (f"; and {len(errors) - 10} more." if len(errors) > 10 else "."))
+    if not hs:
+        raise HTTPException(422, "No holdings in the pasted text.")
+    save_holdings(hs if req.replace else _holdings(strict=True)[0] + hs)
+    return portfolio()
+
+
+@app.get("/api/portfolio.xlsx")
+def portfolio_xlsx():
+    return Response(portfolio_excel(portfolio()),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="Portfolio.xlsx"'})
+
+
+def portfolio_excel(p, at=None):
+    """The Portfolio sheet as values at export (no formulas: CMP, fair values and multiples come from the app)."""
+    from openpyxl import Workbook  # noqa: PLC0415
+    from openpyxl.styles import Font  # noqa: PLC0415
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Portfolio"
+    bold, num, rs_, pct, x = Font(bold=True), "#,##0;(#,##0);-", "#,##0.00;(#,##0.00);-", "0.0%;(0.0%);-", '0.0"x"'
+    ws["A1"] = "Portfolio"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = (f"Values at export, {(at or datetime.now()):%d %b %Y %H:%M}, in Rs. Base FV: the base-case fair value per share "
+                "of each company's model. Multiples at CMP on the last reported year; portfolio multiples are weighted "
+                "harmonic means. Analysis, not a recommendation.")
+    ws["A2"].font = Font(italic=True, color="808080")
+    cols = [("symbol", "Symbol", None), ("name", "Company", None), ("sector", "Sector (NSE)", None), ("qty", "Quantity", num),
+            ("cost", "Avg cost", rs_), ("price", "CMP", rs_), ("value", "Market value", num), ("weight", "Weight", pct),
+            ("pnl", "P&L", num), ("pnl_pct", "P&L %", pct), ("fv", "Base FV", rs_), ("upside", "Upside/(downside)", pct),
+            ("pe", "P/E", x), ("ev_ebitda", "EV/EBITDA", x), ("pb", "P/B", x), ("flags", "Red flags", "0"),
+            ("new", "New results", None)]
+    for j, (_, h, _) in enumerate(cols, 1):
+        ws.cell(4, j, h).font = bold
+    for i, r in enumerate(p["holdings"], 5):
+        val = {**r, **(r["multiples"] or {}), "new": ", ".join(r["new_results"] or []) or None,
+               "pnl_pct": r["pnl"] / r["invested"] if r["pnl"] is not None and r["invested"] else None}
+        for j, (k, _, f) in enumerate(cols, 1):
+            c = ws.cell(i, j, val.get(k))
+            if f:
+                c.number_format = f
+    t, r = p["total"], 5 + len(p["holdings"])
+    ws.cell(r, 1, "Total").font = bold
+    for k, j in (("value", 7), ("pnl", 9)):
+        ws.cell(r, j, t[k]).number_format = num
+    ws.cell(r, 8, 1 if t["value"] else None).number_format = pct
+    ws.cell(r, 10, t["pnl"] / t["invested"] if t["pnl"] is not None and t["invested"] else None).number_format = pct
+    m, c = p["multiples"], p["concentration"]
+    r += 2
+    for label, v, f in (("Invested (holdings with a CMP)", t["invested"], num),
+                        ("Base FV of the holdings with a model", t["fv"], num),
+                        ("Their share of market value", t["fv_cover"], pct), ("Upside/(downside) to base FV", t["upside"], pct),
+                        ("P/E (all with positive PAT)", m["pe"]["value"], x), ("EV/EBITDA (ex-lenders)", m["ev_ebitda"]["value"], x),
+                        ("P/B (lenders)", m["pb"]["value"], x), ("Top-5 weight", c["top5"], pct),
+                        ("HHI (sum of weights squared x 10,000)", c["hhi"], num),
+                        ("Effective number of holdings", c["effective"], "0.0")):
+        ws.cell(r, 1, label).font = bold
+        ws.cell(r, 2, v).number_format = f
+        r += 1
+    r += 1
+    ws.cell(r, 1, "Sector (NSE)").font = bold
+    ws.cell(r, 2, "Weight").font = bold
+    for name, w, syms in p["sectors"]:
+        r += 1
+        ws.cell(r, 1, name)
+        ws.cell(r, 2, w).number_format = pct
+        ws.cell(r, 3, ", ".join(syms))
+    ws.column_dimensions["A"].width = 38
+    ws.column_dimensions["B"].width = 30
+    ws.column_dimensions["C"].width = 24
+    ws.freeze_panes = "B5"
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
 # ---------- peers (5.2): rules find candidates, the AI picks by business mix, rules check and compare ----------
@@ -2614,7 +2869,7 @@ def list_models(root=None):
                     # results that came in since you last marked it reviewed (5.3)
                     "symbol": sym, "price_saved": doc.company.market.price,
                     "price_at": _ago(live["age"]) if live else (doc.company.source or {}).get("price_at"),
-                    "price_live": bool(live), "results_to": max([str(co["dates"][-1])[:10], *[str(d)[:10] for d in (q.get("dates") or [])[-1:]]]),
+                    "price_live": bool(live), "sector": live and live.get("sector"), "results_to": max([str(co["dates"][-1])[:10], *[str(d)[:10] for d in (q.get("dates") or [])[-1:]]]),
                     "new_results": rec.get("new_years") if rec and _before(doc.reviewed_at, rec.get("recorded_at"))
                     else [qt["quarter"] if qt and qt["through"] == qa.get("end") else qa.get("end")]
                     if qa.get("end") and _before(doc.reviewed_at, qa.get("at")) else None,
@@ -2645,7 +2900,7 @@ def _coverage(projs, co, ex, val):
         sv = v["scenarios"]
         pos = {s: sv[s]["per_share"] if (sv[s]["per_share"] or 0) > 0 else None for s in model.SCENARIOS}
         return {"price": v["price"], "values": pos, "implied": v["implied_roe"], "growth": sv["base"]["roe_t"],
-                "implied_kind": "roe",
+                "implied_kind": "roe", "lender": True, "multiples": {"pe": v["pe"], "ev_ebitda": None, "pb": v["pb"]},
                 "why": None if pos["base"] is not None else "no share count" if not v["shares"] else
                 "Ke doesn't clear terminal growth" if v["error"] else "equity value is negative on these inputs"}
     v = model.valuation(projs, co["hist"], val, ex["base"], co["market"], inputs={"base": ex["base"]})
@@ -2653,7 +2908,9 @@ def _coverage(projs, co, ex, val):
     g = ex["base"]["growth"]
     # a value of zero or below is no value: the list, the watch history and every badge read None, with the reason
     pos = {s: sv[s]["per_share"] if (sv[s]["per_share"] or 0) > 0 else None for s in model.SCENARIOS}
-    return {"price": v["price"], "values": pos,
+    return {"price": v["price"], "values": pos, "lender": False,
+            # at CMP on the last reported year (trailing), as the Valuation page's "at CMP" column
+            "multiples": {k: sv["base"]["multiples"]["price_last"][k] for k in model.MULTIPLES},
             "implied": sv["base"].get("implied_growth"), "growth": sum(g) / len(g),
             "why": None if pos["base"] is not None else
             "no share count" if not v["shares"] else "the WACC doesn't clear terminal growth" if v["error"] else

@@ -340,6 +340,7 @@ export interface ModelSummary {
   // quarters filed this year against the base case's run-rate: gaps by line (revenue, PAT a share; margin in pp)
   quarter?: (Pick<QuarterTrack, 'year' | 'quarter' | 'period' | 'status'> & Record<QuarterLine['key'], number | null>) | null
   implied_kind?: 'roe' // a lender: implied is the market-implied steady-state RoE, growth the base case's RoE
+  sector?: string | null // NSE's sector, from the last cached quote (6.3)
 }
 /** GET /api/auto: the scheduled checks (prices and new results, once a day while the app runs) and their last run. */
 export interface AutoState {
@@ -350,6 +351,24 @@ export interface AutoState {
 /** GET /api/watch: tickers watched without a model, and the daily [date, price, bear, base, bull] per company slug. */
 export interface Watched { symbol: string; name: string; added_at: string; price: number | null; at: string | null; industry: string | null }
 export interface WatchList { watch: Watched[]; history: Record<string, [string, number, number | null, number, number | null][]> }
+/** GET /api/portfolio (server.portfolio): holdings at CMP against their models, totals, look-through multiples,
+ * sector exposure and concentration. Weights are of the market value that has a CMP. */
+export interface Holding { symbol: string; qty: number; cost: number }
+export interface HoldingRow extends Holding {
+  name: string | null; id: string | null; price: number | null; price_at: string | null
+  value: number | null; invested: number; pnl: number | null; weight: number | null
+  fv: number | null; bear: number | null; bull: number | null; upside: number | null; why: string | null
+  lender: boolean; multiples: Record<'pe' | 'ev_ebitda' | 'pb', number | null> | null; sector: string | null
+  flags: number | null; new_results: string[] | null; quarter: ModelSummary['quarter']
+}
+export interface PortfolioView {
+  holdings: HoldingRow[]; damaged: boolean
+  total: { value: number | null; invested: number; pnl: number | null; unpriced: string[]; fv: number | null; fv_cover: number; upside: number | null }
+  multiples: Record<'pe' | 'ev_ebitda' | 'pb', { value: number | null; cover: number }>
+  sectors: [string, number, string[]][] // NSE sector, weight, its holdings (largest first)
+  concentration: { top5: number | null; hhi: number | null; effective: number | null; n: number }
+  flags: number; new_results: string[]
+}
 /** GET /api/models/{id}: the document plus what the dashboard derives from the company. */
 export interface Opened { id?: string; doc?: ModelDoc; parsed: Parsed }
 export interface Projection {

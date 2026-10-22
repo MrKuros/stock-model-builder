@@ -1597,6 +1597,7 @@ def library_check(root, co, scenarios):
     peers_api_check(server, root, co, data)
     track_check(server, root, co, data)
     watch_check(server, data)
+    portfolio_check(server, data)
     auto_check(server)
     lender_api_check(server)
 
@@ -3638,6 +3639,106 @@ def watch_check(server, data):
         server.MODELS, ai.llm = models, llm
         server._clients.clear()
 
+
+
+def portfolio_check(server, data):
+    """6.3 the portfolio, offline: holdings typed or pasted ('symbol,qty,cost': a header, tabs, quoted Indian grouping,
+    Rs; a bad line saves nothing), merged per symbol at the weighted average cost; each at its model's CMP (else the
+    cached quote, never online) with weight, P&L, base FV and upside as the coverage row has them; look-through P/E,
+    EV/EBITDA without lenders and P/B on lenders (weighted harmonic means), NSE sector exposure, top-5 weight and HHI;
+    a damaged file never overwritten; the Excel sheet as values. Never calls the LLM."""
+    import ai  # noqa: PLC0415
+    import sources  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+    lender = model_lender()
+    root = Path(tempfile.mkdtemp())
+    quote = sources.NSE + "/api/NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N&series=EQ&symbol="
+    q = lambda name, price, sector: {"equityResponse": [{"metaData": {"companyName": name}, "tradeInfo": {  # noqa: E731
+        "lastPrice": price, "issuedSize": 5e7}, "secInfo": {"industryInfo": "x", "sector": sector}}]}
+    net = {quote + "TESTIND": q("Test Industries Limited", 1650.0, "Capital Goods"),
+           quote + "TBANK": q("Test Bank Limited", 50.0, "Financial Services"),
+           quote + "NEWCO": q("New Co Limited", 311.0, "Capital Goods")}
+    calls, online = [], [True]
+    client, models, llm = TestClient(server.app), server.MODELS, ai.llm
+    server.MODELS = root
+    ai.llm = lambda *a, **k: (_ for _ in ()).throw(AssertionError("the portfolio never calls the LLM"))
+    server._clients.clear()
+    try:
+        c = server.nse()
+        c.opener, c.gap = _fake_socket(net, calls, online)(), 0.0
+        server.bse().opener, server.bse().gap = c.opener, 0.0
+        # pasting: header skipped, tab or comma, a quoted Indian-grouped number, Rs/₹, blank lines; errors by line
+        hs, err = server.parse_holdings('Symbol,Qty,Avg cost\nTESTIND,"1,000",Rs 1500\n\ntbank\t2000\t₹40\nTESTIND,1000,1700\n')
+        assert not err and hs == [{"symbol": "TESTIND", "qty": 1000, "cost": 1500}, {"symbol": "TBANK", "qty": 2000, "cost": 40},
+                                  {"symbol": "TESTIND", "qty": 1000, "cost": 1700}], (hs, err)
+        _, err = server.parse_holdings("TESTIND,10\nX,abc,1\n../x,1,1\nTESTIND,0,5\nTESTIND,1,250,000\n")
+        assert [e["line"] for e in err] == [1, 2, 3, 4, 5] and "quotes" in err[4]["text"], err
+        assert server.merge(hs) == [{"symbol": "TESTIND", "qty": 2000, "cost": 1600}, {"symbol": "TBANK", "qty": 2000, "cost": 40}]
+        # nothing held: an empty view; a paste with one bad line saves nothing
+        e = client.get("/api/portfolio").json()
+        assert e["holdings"] == [] and e["total"]["value"] is None and not e["damaged"], e
+        r = client.post("/api/portfolio/paste", json={"text": "TESTIND,10,1\nbad line"})
+        assert r.status_code == 422 and "Line 2" in r.json()["detail"] and not (root / server.PORTFOLIO).exists(), r.text
+        # the models: one by ticker, a lender by ticker, one upload without a symbol; NEWCO held, quoted, not modelled
+        by_ticker = dict(data, valuation=dict(data["valuation"], price=None),
+                         company=dict(data["company"], name="Ticker Co", source={"symbol": "TESTIND"}))
+        server.save_model(server.ModelDoc.model_validate(by_ticker), root)
+        bank = bank_company()
+        server.save_model(server.ModelDoc.model_validate({"version": 6, "company": {**bank, "source": {"symbol": "TBANK"}},
+                                                          "scenarios": bank_scenarios(lender, bank), "n": 5, "active": "base"}), root)
+        server.save_model(server.ModelDoc.model_validate(data), root)
+        for s in ("TESTIND", "TBANK", "NEWCO"):
+            server.quote_of(s, root)  # today's quotes, kept in the cache
+        n = len(calls)
+        p = client.post("/api/portfolio/paste", json={"text": "TESTIND,1000,1500\nTBANK,2000,40\nNEWCO,100,300\nGHOST,5,10\nTESTIND,1000,1700"}).json()
+        assert len(calls) == n, "the portfolio never goes online"
+        rows = {r["symbol"]: r for r in p["holdings"]}
+        assert list(rows) == ["TESTIND", "TBANK", "NEWCO", "GHOST"] and rows["TESTIND"]["qty"] == 2000 and rows["TESTIND"]["cost"] == 1600
+        cov = {m["symbol"]: m for m in server.latest_models(root) if m.get("symbol")}
+        t, b, nw, g = rows["TESTIND"], rows["TBANK"], rows["NEWCO"], rows["GHOST"]
+        assert t["price"] == 1650 and t["value"] == 3_300_000 and t["pnl"] == 3_300_000 - 3_200_000, t
+        assert t["fv"] == cov["TESTIND"]["values"]["base"] and abs(t["upside"] - (t["fv"] / 1650 - 1)) < 1e-12 and t["id"]
+        assert b["lender"] and b["multiples"]["ev_ebitda"] is None and b["multiples"]["pb"] > 0 and b["sector"] == "Financial Services"
+        assert nw["id"] is None and nw["name"] == "New Co Limited" and nw["price"] == 311 and nw["fv"] is None and nw["sector"] == "Capital Goods"
+        assert g["price"] is None and g["weight"] is None and p["total"]["unpriced"] == ["GHOST"]
+        total = 3_300_000 + 2000 * 50.0 + 100 * 311.0
+        assert abs(p["total"]["value"] - total) < 1e-6 and abs(sum(r["weight"] or 0 for r in p["holdings"]) - 1) < 1e-12
+        assert p["total"]["invested"] == 3_200_000 + 80_000 + 30_000, p["total"]  # GHOST has no CMP, so it isn't counted
+        w = {k: rows[k]["value"] / total for k in ("TESTIND", "TBANK", "NEWCO")}
+        fv = 2000 * t["fv"] + 2000 * b["fv"]
+        assert abs(p["total"]["upside"] - (fv / (3_300_000 + 100_000) - 1)) < 1e-12 and abs(p["total"]["fv_cover"] - w["TESTIND"] - w["TBANK"]) < 1e-12
+        pe = (w["TESTIND"] + w["TBANK"]) / (w["TESTIND"] / t["multiples"]["pe"] + w["TBANK"] / b["multiples"]["pe"])
+        m = p["multiples"]
+        assert abs(m["pe"]["value"] - pe) < 1e-9 and abs(m["ev_ebitda"]["value"] - t["multiples"]["ev_ebitda"]) < 1e-9, m
+        assert abs(m["pb"]["value"] - b["multiples"]["pb"]) < 1e-9 and abs(m["pb"]["cover"] - w["TBANK"]) < 1e-12, m
+        assert [s[0::2] for s in p["sectors"]] == [["Capital Goods", ["TESTIND", "NEWCO"]], ["Financial Services", ["TBANK"]]]
+        assert abs(p["sectors"][0][1] - w["TESTIND"] - w["NEWCO"]) < 1e-12
+        c5 = p["concentration"]
+        assert abs(c5["hhi"] - sum(x * x for x in w.values()) * 1e4) < 1e-6 and abs(c5["top5"] - 1) < 1e-12 and c5["n"] == 3, c5
+        assert p["flags"] == cov["TESTIND"]["flags"] + cov["TBANK"]["flags"]
+        # edit and remove: the page sends the whole list back
+        p = client.post("/api/portfolio", json={"holdings": [{"symbol": "testind", "qty": 10, "cost": 1}]}).json()
+        assert [(r["symbol"], r["qty"]) for r in p["holdings"]] == [("TESTIND", 10)]
+        assert client.post("/api/portfolio", json={"holdings": [{"symbol": "X", "qty": -1, "cost": 1}]}).status_code == 422
+        # the Excel sheet: values
+        x = client.get("/api/portfolio.xlsx")
+        ws = openpyxl.load_workbook(io.BytesIO(x.content))["Portfolio"]
+        assert x.status_code == 200 and ws["A1"].value == "Portfolio" and ws["A5"].value == "TESTIND" and ws["G5"].value == 16_500, ws["G5"].value
+        # Refresh prices asks for held symbols too (only stale ones)
+        for f in (root / server.CACHE / "nse").glob("*.bin"):
+            os.utime(f, (0, 0))
+        n = len(calls)
+        list(server.refresh_prices(root))
+        assert any(u.endswith("symbol=TESTIND") for u in calls[n:])
+        # damaged: read as empty and said so, never overwritten
+        (root / server.PORTFOLIO).write_text("{oops")
+        assert client.get("/api/portfolio").json()["damaged"]
+        assert client.post("/api/portfolio", json={"holdings": []}).status_code == 409
+        assert client.post("/api/portfolio/paste", json={"text": "TESTIND,1,1", "replace": True}).status_code == 409
+        assert (root / server.PORTFOLIO).read_text() == "{oops"
+    finally:
+        server.MODELS, ai.llm = models, llm
+        server._clients.clear()
 
 
 

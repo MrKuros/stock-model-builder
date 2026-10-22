@@ -8,7 +8,7 @@ const FRESH = 15 * 60_000 // a price this recent isn't asked for again (the serv
 /** The coverage page's price line: when NSE's prices were checked, Refresh, progress with Stop, and what happens when
  * NSE can't be reached (the last prices kept stay on screen). Opening the page refreshes prices older than 15 minutes
  * by itself; nothing here changes a saved model or calls the AI. */
-export function Prices({ models, watch, onDone }: { models: ModelSummary[]; watch: Watched[]; onDone: () => void }) {
+export function Prices({ models, watch, onDone }: { models: ModelSummary[]; watch: Pick<Watched, 'at'>[]; onDone: () => void }) {
   const [state, setState] = useState<'idle' | 'running' | 'done' | 'stopped' | 'offline'>('idle')
   const [step, setStep] = useState<string | null>(null)
   const [missed, setMissed] = useState<string[]>([])

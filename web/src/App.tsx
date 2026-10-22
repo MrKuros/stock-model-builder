@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import Home from './Home'
+import Portfolio from './Portfolio'
 import AddPage, { useBuild, watchSymbol, type AddOpts } from './Add'
 import Workspace from './Workspace'
 import { BottomBar, Finder, HomeRail, KeysDialog, PhoneTop, keysOn, slugOf } from './Shell'
@@ -369,7 +370,7 @@ export default function App() {
   if (open) lastUrl.current = location.pathname + location.search
   useEffect(() => {
     if (route.slug) return
-    document.title = route.top === 'add' ? `Add company · ${TITLE}` : route.top === 'none' ? `No page here · ${TITLE}` : `Coverage · ${TITLE}`
+    document.title = route.top === 'add' ? `Add company · ${TITLE}` : route.top === 'portfolio' ? `Portfolio · ${TITLE}` : route.top === 'none' ? `No page here · ${TITLE}` : `Coverage · ${TITLE}`
     if (route.anchor) { window.setTimeout(() => document.getElementById(route.anchor)?.scrollIntoView({ block: 'start' }), 60); return }
     window.scrollTo({ top: route.y ?? 0, behavior: 'instant' })
     if (openRef.current) flushRef.current() // the list shows the values you just set
@@ -399,7 +400,7 @@ export default function App() {
       setParsed={next => setParsed(p => p && mine<Parsed>(x => ({ ...next, restated: x.restated }))(p))} onDelete={removeOpen} />
     {global}
   </>)
-  const top = route.top === 'add' ? 'add' : 'home'
+  const top = route.top === 'add' || route.top === 'portfolio' ? route.top : 'home'
   const n = models ? new Set(models.map(m => slugOf(m.id))).size : null
   const building = build.b.symbol && build.b.state !== 'done' && route.top !== 'add'
   return (
@@ -419,6 +420,8 @@ export default function App() {
           : route.top === 'none'
           ? <main id="main" className="page" tabIndex={-1}><div className="gone"><h1 id="page-h" tabIndex={-1} className="h1">There’s no page here</h1>
               <p><a className="primary" href="/">Coverage</a></p></div></main>
+          : route.top === 'portfolio'
+          ? <Portfolio models={models} />
           : route.top === 'add'
           ? <main id="main" className="page" tabIndex={-1}>
               <AddPage models={models} build={build} onAdd={add} onWatch={watchIt} watchMsg={watchMsg} /></main>

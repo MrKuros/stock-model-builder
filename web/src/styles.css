@@ -1549,3 +1549,55 @@ abbr.gt:focus::after {
 .ask-list details[open] > .ask-card { margin-bottom: 14px; }
 .page-text { white-space: pre-wrap; overflow-wrap: anywhere; font: 400 13.5px/1.55 var(--ui); color: var(--ink); background: var(--inset); border-radius: 6px; padding: 12px 14px; margin: 8px 0 0; max-height: 70vh; overflow-y: auto; }
 .page-text mark { background: var(--ours-soft); color: var(--ink); outline: 1px solid var(--ours); border-radius: 2px; }
+
+/* ================= portfolio (6.3) ================= */
+.pf-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 22px 0 0; }
+.pf-kpi { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.pf-kpi dt { font-size: 12.5px; color: var(--ink-2); }
+.pf-kpi dd { margin: 2px 0 0; }
+.pf-kpi dd.num { font: 600 18px/1.25 var(--num); font-variant-numeric: tabular-nums; }
+.pf-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 13px; }
+.pf-tools .prices { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.pf-tools .sort { margin-left: 0; }
+.pf-table thead th { white-space: normal; vertical-align: bottom; min-width: 64px; font-size: 12px; }
+.pf-table thead th:first-child { text-align: left; }
+.pf-table tbody th { min-width: 150px; }
+.pf-table tbody th a { font-weight: 600; }
+.pf-table tfoot th { text-align: left; font: 600 14px var(--ui); position: sticky; left: 0; background: var(--panel); padding-left: 16px; }
+.pf-sym, .pf-sub { display: block; font: 11.5px var(--num); color: var(--ink-3); }
+.pf-sub .verdict-b, .pf-sub > * { font-size: 11px; }
+td.pf-none { text-align: left; white-space: normal; font: 13px var(--ui); color: var(--ink-2); min-width: 160px; }
+td.pf-look { text-align: left; font: 12.5px var(--ui); }
+td.pf-look a { display: block; }
+td.pf-look a.warn { color: var(--flag); }
+.pf-two { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0 40px; }
+.pf-bars { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.pf-bars li { display: grid; grid-template-columns: minmax(0, 14em) minmax(0, 1fr) 4.5em; gap: 10px; align-items: center; font-size: 14px; }
+.pf-bar { height: 10px; background: var(--inset); border-radius: 2px; overflow: hidden; }
+.pf-bar i { display: block; height: 100%; background: var(--ink-2); }
+.pf-bars b { text-align: right; font-weight: 500; }
+.pf-conc { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 10px 0 0; }
+.pf-conc dt { font-size: 12.5px; color: var(--ink-2); }
+.pf-conc dd { margin: 2px 0 0; font: 600 18px/1.25 var(--num); }
+.pf-form { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; align-items: end; margin-top: 12px; max-width: 760px; }
+.pf-form label { display: grid; gap: 3px; font-size: 13px; color: var(--ink-2); }
+.pf-form input, .pf-paste textarea { font: 14px var(--num); color: var(--ink); background: var(--raise); border: 1px solid var(--rule-2); border-radius: 6px; padding: 7px 9px; min-height: 38px; width: 100%; }
+.pf-form input[readonly] { background: var(--inset); }
+.pf-act { display: flex; gap: 8px; }
+.pf-act .primary { padding: 8px 16px; font-weight: 600; border: 0; }
+.pf-form .error, .pf-hint { grid-column: 1 / -1; margin: 0; }
+.pf-paste { margin-top: 18px; max-width: 760px; }
+.pf-paste textarea { display: block; margin: 10px 0 8px; resize: vertical; }
+.pf-mode { border: 0; padding: 0; margin: 0 0 10px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 14px; }
+.pf-mode label { display: inline-flex; gap: 6px; align-items: center; min-height: 24px; }
+@media (max-width: 760px) {
+  .pf-two { grid-template-columns: minmax(0, 1fr); }
+  .pf-form { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .pf-form label:first-child { grid-column: 1 / -1; }
+  .pf-act { grid-column: 1 / -1; }
+  .pf-bars li { grid-template-columns: minmax(0, 1fr) 4.5em; }
+  .pf-bar { grid-column: 1 / -1; grid-row: 2; }
+}
+.pf-table th, .pf-table td { padding: 6px 6px; }
+.pf-table tbody th { min-width: 132px; white-space: normal; }
+.pf-table tbody th, .pf-table tfoot th { padding-left: 16px; }

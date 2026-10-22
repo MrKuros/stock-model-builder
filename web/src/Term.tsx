@@ -75,6 +75,15 @@ export const GLOSSARY = {
   cd_ratio: ['CD ratio', 'Credit-deposit ratio: advances ÷ deposits'],
   cof: ['Cost of funds', 'Interest expended ÷ average deposits and borrowings'],
   yld: ['Yield', 'Interest earned ÷ average total assets'],
+  // portfolio
+  mv: ['Market value', 'Quantity × CMP'],
+  weight: ['Weight', 'Holding’s market value ÷ portfolio market value (holdings with a CMP)'],
+  upnl: ['P&L', 'Unrealised: market value − quantity × average cost'],
+  lookthrough: ['Look-through', 'Weighted harmonic mean: Σ weight ÷ Σ (weight ÷ multiple), i.e. total market value ÷ the held share of each company’s earnings (or EBITDA, book); negative denominators left out'],
+  top5: ['Top-5 weight', 'Combined weight of the five largest holdings'],
+  hhi: ['HHI', 'Herfindahl–Hirschman index: Σ weight² × 10,000; 10,000 = one holding, 1,000 = ten equal holdings'],
+  eff_n: ['Effective N', 'Effective number of holdings: 10,000 ÷ HHI (equal-weight equivalent)'],
+  sector: ['Sector', 'NSE’s sector classification for the company'],
 } as const satisfies Record<string, readonly [string, string]>
 export type TermKey = keyof typeof GLOSSARY
 

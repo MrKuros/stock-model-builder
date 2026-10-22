@@ -1,4 +1,4 @@
-/** Real path URLs: / (coverage), /add, /c/<slug>/<page>[/<statement>][?v=<version>][#<anchor>]. Every link is an
+/** Real path URLs: / (coverage), /add, /portfolio, /c/<slug>/<page>[/<statement>][?v=<version>][#<anchor>]. Every link is an
  * <a href>; clicks on same-origin links are taken here (pushState), so a page switch keeps the open model. */
 import { createContext, useContext } from 'react'
 
@@ -53,7 +53,7 @@ export function moved(page: string, anchor = ''): [Page, string] {
 
 export interface Route {
   slug: string | null; page: Page; sub: string; version: string | null; anchor: string; y: number | null
-  top: 'home' | 'add' | 'none' | null // a top-level page (no company), 'none' = no page at this address
+  top: 'home' | 'add' | 'portfolio' | 'none' | null // a top-level page (no company), 'none' = no page at this address
 }
 
 /** The address as a route; an old address comes back with `redirect` set to its new one. */
@@ -69,6 +69,7 @@ export function readRoute(): Route & { redirect?: string } {
     return { ...base, top: 'home' }
   }
   if (parts[0] === 'add' && parts.length === 1) return { ...base, top: 'add' }
+  if (parts[0] === 'portfolio' && parts.length === 1) return { ...base, top: 'portfolio' }
   if (parts[0] !== 'c' || !parts[1]) return { ...base, top: 'none' }
   const [page, a] = moved(parts[2] ?? 'summary', anchor)
   const sub = page === 'statements' ? (STATEMENTS.some(s => s[0] === parts[3]) ? parts[3] : STATEMENTS[0][0]) : ''

@@ -44,6 +44,7 @@ const ICON: Record<string, ReactNode> = {
   companies: <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="9" width="3" height="5" fill="currentColor" /><rect x="6.5" y="6" width="3" height="8" fill="currentColor" /><rect x="11" y="2.5" width="3" height="11.5" fill="none" stroke="currentColor" strokeWidth="1.3" /></svg>,
   watching: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" fill="none" stroke="currentColor" strokeWidth="1.4" /><circle cx="8" cy="8" r="2" fill="currentColor" /></svg>,
   add: <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" stroke="currentColor" strokeWidth="1.8" /></svg>,
+  portfolio: <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M8 2.2V8h5.8" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg>,
 }
 
 /** The newest saved version of each company (the library lists every version, newest first). */
@@ -288,7 +289,7 @@ const KeysFoot = () => (
 )
 
 /** Rail on Coverage and Add company. */
-export function HomeRail({ here, count, foot }: { here: 'home' | 'add'; count: number | null; foot?: ReactNode }) {
+export function HomeRail({ here, count, foot }: { here: 'home' | 'add' | 'portfolio'; count: number | null; foot?: ReactNode }) {
   return (
     <div className="side">
       <Brand />
@@ -298,6 +299,7 @@ export function HomeRail({ here, count, foot }: { here: 'home' | 'add'; count: n
           <ul>
             <li><a href="/" aria-current={here === 'home' ? 'page' : undefined}><span>Coverage</span>{count != null && <span className="rn">{count}</span>}</a></li>
             <li><a href="/#watching"><span>Watchlist</span></a></li>
+            <li><a href="/portfolio" aria-current={here === 'portfolio' ? 'page' : undefined}><span>Portfolio</span></a></li>
             <li><a href="/add" aria-current={here === 'add' ? 'page' : undefined}><span>Add company</span></a></li>
           </ul>
         </div>
@@ -321,12 +323,13 @@ export function PhoneTop({ short, menu }: { short?: string; menu: MenuItem[] }) 
   )
 }
 /** Phones: the four pages most used and All pages (the rail as a sheet); on the list pages, Coverage, Watchlist, Add. */
-export function BottomBar({ here }: { here: Here | 'home' | 'add' }) {
+export function BottomBar({ here }: { here: Here | 'home' | 'add' | 'portfolio' }) {
   const [all, setAll] = useState(false)
   if (typeof here === 'string') return (
     <nav className="bnav" aria-label="Library">
       <a href="/" aria-current={here === 'home' ? 'page' : undefined}>{ICON.companies}Coverage</a>
       <a href="/#watching">{ICON.watching}Watchlist</a>
+      <a href="/portfolio" aria-current={here === 'portfolio' ? 'page' : undefined}>{ICON.portfolio}Portfolio</a>
       <a href="/add" aria-current={here === 'add' ? 'page' : undefined}>{ICON.add}Add</a>
     </nav>
   )
@@ -378,6 +381,7 @@ export function Finder({ mode, onClose, models, here }: {
   const toks = q.toLowerCase().split(/\s+/).filter(Boolean)
   const hit = (it: Item) => toks.every(t => it.find.toLowerCase().includes(t))
   const items = [...(toks.length ? pages.filter(hit) : []), ...cos.filter(hit),
+    ...(toks.length ? ([{ key: 'portfolio', label: 'Portfolio', find: 'portfolio holdings', href: '/portfolio' }] as Item[]).filter(hit) : []),
     { key: 'add', label: '+ Add company', find: '', href: '/add' }]
   const go = (it: Item | undefined) => { if (!it) return; onClose(); navigate(it.href) }
   const opt = (i: number) => `${id}-o${i}`
